@@ -1,4 +1,5 @@
 import WebGpuFramePresenter from '#/graphics/WebGpuFramePresenter.js';
+import { getGpuRenderSurfaceId } from '#/graphics/GpuRenderPackets.js';
 
 export const canvas: HTMLCanvasElement = document.getElementById('canvas') as HTMLCanvasElement;
 export const canvas2d: CanvasRenderingContext2D = canvas?.getContext('2d', {
@@ -130,7 +131,7 @@ export function presentImageData(imageData: ImageData, x: number, y: number, ctx
     return true;
 }
 
-export function presentGpuRenderPackets(width: number, height: number, x: number, y: number, ctx: CanvasRenderingContext2D): boolean {
+export function presentGpuRenderPackets(width: number, height: number, x: number, y: number, ctx: CanvasRenderingContext2D, pixels?: Int32Array): boolean {
     if (!packetReplayRequested) {
         return false;
     }
@@ -147,7 +148,8 @@ export function presentGpuRenderPackets(width: number, height: number, x: number
         throw new Error('WebGPU packet presenter initialization has not completed');
     }
 
-    if (!webGpuPresenter.presentPackets(width, height, x, y)) {
+    const surfaceId = pixels ? getGpuRenderSurfaceId(pixels, width, height) : undefined;
+    if (!webGpuPresenter.presentPackets(width, height, x, y, null, surfaceId)) {
         throw new Error('WebGPU packet presenter failed to present frame');
     }
 

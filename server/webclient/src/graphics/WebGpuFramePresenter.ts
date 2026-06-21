@@ -1250,7 +1250,7 @@ export default class WebGpuFramePresenter {
         return true;
     }
 
-    presentPackets(surfaceWidth: number, surfaceHeight: number, x: number, y: number, expectedImageData: ImageData | null = null): boolean {
+    presentPackets(surfaceWidth: number, surfaceHeight: number, x: number, y: number, expectedImageData: ImageData | null = null, surfaceId?: number): boolean {
         if (!this.frameTexture || !this.bindGroup) {
             return false;
         }
@@ -1271,7 +1271,7 @@ export default class WebGpuFramePresenter {
             return true;
         }
 
-        this.replayPacketsOrThrow(surfaceWidth, surfaceHeight, x, y);
+        this.replayPacketsOrThrow(surfaceWidth, surfaceHeight, x, y, surfaceId);
         if (expectedImageData) {
             this.validator?.maybeValidate(this.frameTexture, expectedImageData, sourceX, sourceY, dstX, dstY, copyWidth, copyHeight);
         }
@@ -1354,7 +1354,7 @@ export default class WebGpuFramePresenter {
         });
     }
 
-    private replayPacketsOrThrow(surfaceWidth: number, surfaceHeight: number, x: number, y: number): void {
+    private replayPacketsOrThrow(surfaceWidth: number, surfaceHeight: number, x: number, y: number, surfaceId?: number): void {
         if (!this.packetReplayStats.enabled || !this.frameTexture) {
             this.failPacketReplay(this.packetReplayStats.lastError || 'packet replay requested but WebGPU vertex replay is unavailable');
         }
@@ -1365,6 +1365,10 @@ export default class WebGpuFramePresenter {
         }
 
         if (snapshot.packets.length === this.packetCursor && snapshot.dropped === this.packetDropped) {
+            if (this.packetReplayStats.framesReplayed > 0) {
+                return;
+            }
+
             this.failPacketReplay('packet replay requested but no new packets were recorded');
         }
 
@@ -1379,25 +1383,32 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('packet stream dropped packets');
         }
 
-        const surface = snapshot.surfaces.find(item => item.id === snapshot.currentSurface);
+        const targetSurfaceId = surfaceId ?? snapshot.currentSurface;
+        const surface = snapshot.surfaces.find(item => item.id === targetSurfaceId);
         if (!surface || surface.width !== surfaceWidth || surface.height !== surfaceHeight) {
             this.failPacketReplay('current packet surface does not match presentation surface');
         }
 
-        const result = this.buildPacketReplayVertices(snapshot, x | 0, y | 0, surface.width, surface.height);
+        const result = this.buildPacketReplayVertices(snapshot, x | 0, y | 0, surface.width, surface.height, surface.id);
         this.packetReplayStats.lastPacketCount = result.packetCount;
         const vertexCount = result.steps.reduce((total, step) => total + (step.kind === 'vertices' ? step.vertices.length / FLOATS_PER_PRIMITIVE_VERTEX : 6), 0);
         if (result.steps.length === 0) {
+            if (this.packetReplayStats.framesReplayed > 0) {
+                return;
+            }
+
             this.failPacketReplay('no drawable 2D packets');
         }
 
         this.replayPrimitiveSteps(result.steps);
-        this.packetCursor = snapshot.packets.length;
+        const consumedPackets = snapshot.packets.length;
         this.packetDropped = snapshot.dropped;
         this.packetReplayStats.framesReplayed++;
         this.packetReplayStats.packetsReplayed += result.packetCount;
         this.packetReplayStats.lastVertexCount = vertexCount;
         this.packetReplayStats.lastError = '';
+        gpuRenderPackets.discard(consumedPackets);
+        this.packetCursor = 0;
     }
 
     private buildPacketReplayVertices(
@@ -1405,13 +1416,13 @@ export default class WebGpuFramePresenter {
         offsetX: number,
         offsetY: number,
         surfaceWidth: number,
-        surfaceHeight: number
+        surfaceHeight: number,
+        targetSurface: number
     ): PacketReplayBuildResult {
         const steps: PacketReplayStep[] = [];
         let vertices: number[] = [];
         let packetCount = 0;
         let clip: PacketClip = { minX: 0, minY: 0, maxX: surfaceWidth, maxY: surfaceHeight };
-        const targetSurface = snapshot.currentSurface;
         const packets = snapshot.packets.slice(this.packetCursor);
 
         const flushVertices = (): void => {

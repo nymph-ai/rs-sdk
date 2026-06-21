@@ -143,6 +143,7 @@ export type GpuRenderPacketState = {
     readonly currentSurface: number;
     readonly surfaces: SurfaceInfo[];
     reset(): void;
+    discard(count: number): void;
     setEnabled(enabled: boolean): void;
     snapshot(): GpuRenderPacketSnapshot;
 };
@@ -153,7 +154,7 @@ declare global {
     }
 }
 
-const DEFAULT_MAX_PACKETS = 8192;
+const DEFAULT_MAX_PACKETS = 0;
 const surfaceIds = new WeakMap<Int32Array, number>();
 const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
@@ -260,7 +261,7 @@ function getSurfaceId(pixels: Int32Array, width: number, height: number): number
 }
 
 function pushPacket(packet: GpuRenderPacket): void {
-    if (gpuRenderPackets.maxPackets > 0 && packets.length < gpuRenderPackets.maxPackets) {
+    if (gpuRenderPackets.maxPackets <= 0 || packets.length < gpuRenderPackets.maxPackets) {
         packets.push(packet);
     } else {
         gpuRenderPackets.dropped++;
@@ -281,6 +282,18 @@ export const gpuRenderPackets: GpuRenderPacketState = {
     reset(): void {
         packets.length = 0;
         this.dropped = 0;
+    },
+    discard(count: number): void {
+        if (count <= 0) {
+            return;
+        }
+
+        if (count >= packets.length) {
+            packets.length = 0;
+            return;
+        }
+
+        packets.splice(0, count);
     },
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
@@ -310,6 +323,10 @@ export function recordSurfaceTarget(pixels: Int32Array, width: number, height: n
 
     currentSurface = getSurfaceId(pixels, width, height);
     pushPacket({ kind: 'surface', surface: currentSurface, width, height });
+}
+
+export function getGpuRenderSurfaceId(pixels: Int32Array, width: number, height: number): number {
+    return getSurfaceId(pixels, width, height);
 }
 
 export function recordClip(minX: number, minY: number, maxX: number, maxY: number): void {

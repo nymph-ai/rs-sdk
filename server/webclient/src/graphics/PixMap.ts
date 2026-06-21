@@ -27,7 +27,7 @@ export default class PixMap {
     }
 
     draw(x: number, y: number): void {
-        if (presentGpuRenderPackets(this.width, this.height, x, y, this.ctx)) {
+        if (presentGpuRenderPackets(this.width, this.height, x, y, this.ctx, this.data)) {
             return;
         }
 
