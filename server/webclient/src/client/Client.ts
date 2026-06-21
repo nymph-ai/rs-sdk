@@ -4073,19 +4073,25 @@ export class Client extends GameShell {
         this.imageTitle8 = null;
 
         this.areaChat = new PixMap(479, 96);
+        this.areaChat.markCpuRasterWritesSkippable();
 
         this.areaMap = new PixMap(172, 156);
         Pix2D.cls();
         this.mapback?.plotSprite(0, 0);
 
         this.areaSide = new PixMap(190, 261);
+        this.areaSide.markCpuRasterWritesSkippable();
 
         this.areaGame = new PixMap(512, 334);
+        this.areaGame.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.areaBackbase1 = new PixMap(496, 50);
         this.areaBackbase2 = new PixMap(269, 37);
         this.areaBackhmid1 = new PixMap(249, 45);
+        this.areaBackbase1.markCpuRasterWritesSkippable();
+        this.areaBackbase2.markCpuRasterWritesSkippable();
+        this.areaBackhmid1.markCpuRasterWritesSkippable();
 
         this.redrawFrame = true;
     }
