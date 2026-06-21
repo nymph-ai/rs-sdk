@@ -45,6 +45,14 @@ export type GpuIndexedSpriteResource = {
     version: number;
 };
 
+export type GpuGlyphResource = {
+    id: number;
+    width: number;
+    height: number;
+    maskRgba: Uint8Array;
+    version: number;
+};
+
 type PacketBase = {
     surface: number;
 };
@@ -81,6 +89,19 @@ export type GpuRenderPacket =
           srcX: number;
           srcY: number;
           mode: 'direct' | 'titleFlameLeft' | 'titleFlameRight';
+          clip: ClipBounds;
+      })
+    | (PacketBase & {
+          kind: 'glyphSprite';
+          resource: number;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          srcX: number;
+          srcY: number;
+          rgb: number;
+          alpha: number | null;
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -190,6 +211,7 @@ export type GpuRenderPacketSnapshot = {
     colourTableResource: GpuColourTableResource | null;
     textureResources: GpuTextureResource[];
     indexedSpriteResources: GpuIndexedSpriteResource[];
+    glyphResources: GpuGlyphResource[];
 };
 
 export type GpuRenderPacketState = {
@@ -226,17 +248,20 @@ const DEFAULT_MAX_PACKETS = 0;
 const surfaceIds = new WeakMap<Int32Array, number>();
 const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const indexedSpriteResourceIds = new WeakMap<object, Map<string, number>>();
+const glyphResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
 const spriteResources: GpuSpriteResource[] = [];
 let colourTableResource: GpuColourTableResource | null = null;
 const textureResources: GpuTextureResource[] = [];
 const indexedSpriteResources: GpuIndexedSpriteResource[] = [];
+const glyphResources: GpuGlyphResource[] = [];
 const recordableSurfaces = new Set<number>();
 const cpuRasterWriteSkipSurfaces = new Set<number>();
 let nextSurface = 1;
 let nextSpriteResource = 1;
 let nextIndexedSpriteResource = 1;
+let nextGlyphResource = 1;
 let currentSurface = 0;
 
 function parseFlag(value: string | null): boolean | null {
@@ -419,6 +444,28 @@ function setIndexedSpriteResource(
     return resource;
 }
 
+function getGlyphResource(key: object, variant: string): number | null {
+    return glyphResourceIds.get(key)?.get(variant) ?? null;
+}
+
+function setGlyphResource(key: object, variant: string, width: number, height: number, maskRgba: Uint8Array): number {
+    let variants = glyphResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        glyphResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextGlyphResource++;
+        variants.set(variant, resource);
+        glyphResources.push({ id: resource, width, height, maskRgba, version: 0 });
+        return resource;
+    }
+
+    return resource;
+}
+
 function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
     const rgba = new Uint8Array(256 * 256 * 4);
     const length = Math.min(colourTable.length, 256 * 256);
@@ -428,6 +475,21 @@ function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
         rgba[offset] = (rgb >> 16) & 0xff;
         rgba[offset + 1] = (rgb >> 8) & 0xff;
         rgba[offset + 2] = rgb & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
+function makeGlyphMaskRgba(mask: Int8Array, width: number, height: number): Uint8Array {
+    const rgba = new Uint8Array(width * height * 4);
+    const length = Math.min(mask.length, width * height);
+    for (let i = 0; i < length; i++) {
+        if (mask[i] === 0) {
+            continue;
+        }
+
+        const offset = i * 4;
+        rgba[offset] = 0xff;
         rgba[offset + 3] = 0xff;
     }
     return rgba;
@@ -569,7 +631,8 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             spriteResources: spriteResources.slice(),
             colourTableResource,
             textureResources: textureResources.slice(),
-            indexedSpriteResources: indexedSpriteResources.slice()
+            indexedSpriteResources: indexedSpriteResources.slice(),
+            glyphResources: glyphResources.slice()
         };
     }
 };
@@ -732,6 +795,47 @@ export function recordDynamicIndexedSprite(
         srcX,
         srcY,
         mode,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
+}
+
+export function recordGlyphSprite(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    mask: Int8Array,
+    x: number,
+    y: number,
+    drawWidth: number,
+    drawHeight: number,
+    srcX: number,
+    srcY: number,
+    rgb: number,
+    alpha: number | null,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+): void {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
+        return;
+    }
+
+    const resource = getGlyphResource(key, variant) ?? setGlyphResource(key, variant, width, height, makeGlyphMaskRgba(mask, width, height));
+
+    pushPacket({
+        kind: 'glyphSprite',
+        surface: currentSurface,
+        resource,
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+        srcX,
+        srcY,
+        rgb,
+        alpha,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }

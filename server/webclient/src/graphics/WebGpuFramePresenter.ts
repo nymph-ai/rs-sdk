@@ -1,4 +1,4 @@
-import { gpuRenderPackets, type GpuColourTableResource, type GpuIndexedSpriteResource, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource, type GpuTextureResource } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, type GpuColourTableResource, type GpuGlyphResource, type GpuIndexedSpriteResource, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource, type GpuTextureResource } from '#/graphics/GpuRenderPackets.js';
 
 type BrowserGpu = {
     requestAdapter(options?: { powerPreference?: 'high-performance' | 'low-power' }): Promise<GpuAdapter | null>;
@@ -1078,6 +1078,92 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const GLYPH_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct GlyphParams {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    srcX: i32,
+    srcY: i32,
+    rgb: i32,
+    alpha: i32,
+    _pad0: i32,
+    _pad1: i32,
+    _pad2: i32,
+    _pad3: i32,
+    _pad4: i32,
+    _pad5: i32,
+    _pad6: i32,
+    _pad7: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var glyphTexture: texture_2d<u32>;
+@group(0) @binding(2) var<uniform> params: GlyphParams;
+
+fn toByte(channel: f32) -> u32 {
+    return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
+}
+
+fn blendGlyphChannel(src: u32, dst: u32, alpha: u32) -> u32 {
+    return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+
+    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let glyphPixel = vec2<i32>(params.srcX + pixel.x - params.x, params.srcY + pixel.y - params.y);
+    let glyphSize = textureDimensions(glyphTexture);
+    if (glyphPixel.x < 0 || glyphPixel.y < 0 || glyphPixel.x >= i32(glyphSize.x) || glyphPixel.y >= i32(glyphSize.y)) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    if (textureLoad(glyphTexture, glyphPixel, 0).r == 0u) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let srcR = u32((params.rgb >> 16) & 255);
+    let srcG = u32((params.rgb >> 8) & 255);
+    let srcB = u32(params.rgb & 255);
+    let alpha = u32(params.alpha);
+    if (alpha >= 256u) {
+        return vec4f(f32(srcR) / 255.0, f32(srcG) / 255.0, f32(srcB) / 255.0, 1.0);
+    }
+
+    let outR = blendGlyphChannel(srcR, toByte(base.r), alpha);
+    let outG = blendGlyphChannel(srcG, toByte(base.g), alpha);
+    let outB = blendGlyphChannel(srcB, toByte(base.b), alpha);
+    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
 const INDEXED_SPRITE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -1378,6 +1464,7 @@ const ALPHA_UNIFORM_INTS = 16;
 const GOURAUD_UNIFORM_INTS = 16;
 const TEXTURE_TRIANGLE_UNIFORM_INTS = 32;
 const SPRITE_ALPHA_UNIFORM_INTS = 16;
+const GLYPH_UNIFORM_INTS = 16;
 const INDEXED_SPRITE_UNIFORM_INTS = 16;
 const TRANSFORM_SPRITE_UNIFORM_INTS = 16;
 const MASKED_SPRITE_UNIFORM_INTS = 16;
@@ -1420,6 +1507,9 @@ type PacketReplayStep = {
 } | {
     kind: 'indexedSprite';
     op: IndexedSpriteReplayOp;
+} | {
+    kind: 'glyphSprite';
+    op: GlyphReplayOp;
 } | {
     kind: 'transformSprite';
     op: TransformSpriteReplayOp;
@@ -1516,6 +1606,15 @@ type IndexedSpriteReplayOp = {
     srcX: number;
     srcY: number;
     mode: number;
+};
+
+type GlyphReplayOp = {
+    resource: number;
+    rect: Rect;
+    srcX: number;
+    srcY: number;
+    rgb: number;
+    alpha: number | null;
 };
 
 type TransformSpriteReplayOp = {
@@ -1782,6 +1881,7 @@ export type WebGpuPacketReplayStats = {
     nativeTextureTrianglesReplayed: number;
     gpuRectInstancesReplayed: number;
     gpuDynamicIndexedSpritesReplayed: number;
+    gpuGlyphSpritesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -1931,6 +2031,7 @@ export default class WebGpuFramePresenter {
     private textureTriangleUniformBuffer: GpuBuffer | null = null;
     private rectInstanceUniformBuffer: GpuBuffer | null = null;
     private spriteAlphaUniformBuffer: GpuBuffer | null = null;
+    private glyphUniformBuffer: GpuBuffer | null = null;
     private indexedSpriteUniformBuffer: GpuBuffer | null = null;
     private transformSpriteUniformBuffer: GpuBuffer | null = null;
     private maskedSpriteUniformBuffer: GpuBuffer | null = null;
@@ -1941,6 +2042,7 @@ export default class WebGpuFramePresenter {
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
+    private readonly glyphTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
     private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
     private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
@@ -1966,6 +2068,7 @@ export default class WebGpuFramePresenter {
         private readonly rectInstancePipeline: GpuRenderPipeline,
         private readonly spritePipeline: GpuRenderPipeline,
         private readonly spriteAlphaPipeline: GpuRenderPipeline,
+        private readonly glyphPipeline: GpuRenderPipeline,
         private readonly indexedSpritePipeline: GpuRenderPipeline,
         private readonly transformSpritePipeline: GpuRenderPipeline,
         private readonly maskedSpritePipeline: GpuRenderPipeline,
@@ -1989,6 +2092,7 @@ export default class WebGpuFramePresenter {
             nativeTextureTrianglesReplayed: 0,
             gpuRectInstancesReplayed: 0,
             gpuDynamicIndexedSpritesReplayed: 0,
+            gpuGlyphSpritesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2176,6 +2280,7 @@ export default class WebGpuFramePresenter {
         const gouraudShaderModule = device.createShaderModule({ code: GOURAUD_SHADER });
         const textureTriangleShaderModule = device.createShaderModule({ code: TEXTURE_TRIANGLE_SHADER });
         const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
+        const glyphShaderModule = device.createShaderModule({ code: GLYPH_SHADER });
         const indexedSpriteShaderModule = device.createShaderModule({ code: INDEXED_SPRITE_SHADER });
         const transformSpriteShaderModule = device.createShaderModule({ code: TRANSFORM_SPRITE_SHADER });
         const maskedSpriteShaderModule = device.createShaderModule({ code: MASKED_SPRITE_SHADER });
@@ -2239,6 +2344,21 @@ export default class WebGpuFramePresenter {
                 topology: 'triangle-list'
             }
         });
+        const glyphPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: glyphShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: glyphShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
         const indexedSpritePipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -2290,7 +2410,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -2707,6 +2827,38 @@ export default class WebGpuFramePresenter {
                     });
                     break;
                 }
+                case 'glyphSprite': {
+                    const sourceRect = { x: packet.x, y: packet.y, width: packet.width, height: packet.height };
+                    const clippedSurfaceRect = clipRect(sourceRect, packet.clip);
+                    if (!clippedSurfaceRect) {
+                        break;
+                    }
+
+                    const unclippedTargetRect = {
+                        x: clippedSurfaceRect.x + offsetX,
+                        y: clippedSurfaceRect.y + offsetY,
+                        width: clippedSurfaceRect.width,
+                        height: clippedSurfaceRect.height
+                    };
+                    const targetRect = clipRect(unclippedTargetRect, { minX: 0, minY: 0, maxX: this.width, maxY: this.height });
+                    if (!targetRect) {
+                        break;
+                    }
+
+                    flushBatches();
+                    steps.push({
+                        kind: 'glyphSprite',
+                        op: {
+                            resource: packet.resource,
+                            rect: targetRect,
+                            srcX: packet.srcX + (clippedSurfaceRect.x - packet.x) + (targetRect.x - unclippedTargetRect.x),
+                            srcY: packet.srcY + (clippedSurfaceRect.y - packet.y) + (targetRect.y - unclippedTargetRect.y),
+                            rgb: packet.rgb,
+                            alpha: packet.alpha
+                        }
+                    });
+                    break;
+                }
                 case 'transformSprite': {
                     const targetRect = clipSurfaceRectToTarget(
                         { x: packet.x, y: packet.y, width: packet.width, height: packet.height },
@@ -2905,6 +3057,13 @@ export default class WebGpuFramePresenter {
                 }
 
                 this.replayIndexedSpriteOp(step.op, resource);
+            } else if (step.kind === 'glyphSprite') {
+                const resource = gpuRenderPackets.snapshot().glyphResources.find(item => item.id === step.op.resource);
+                if (!resource) {
+                    this.failPacketReplay(`glyph resource ${step.op.resource} is missing`);
+                }
+
+                this.replayGlyphOp(step.op, resource);
             } else if (step.kind === 'maskedSprite') {
                 const resources = gpuRenderPackets.snapshot().spriteResources;
                 const resource = resources.find(item => item.id === step.op.resource);
@@ -3322,6 +3481,68 @@ export default class WebGpuFramePresenter {
         this.recreateDisplayBindGroup();
     }
 
+    private replayGlyphOp(op: GlyphReplayOp, resource: GpuGlyphResource): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('glyph replay requested before frame textures exist');
+        }
+
+        const cached = this.getGlyphTexture(resource);
+        this.ensureGlyphUniformBuffer();
+        const params = new Int32Array(GLYPH_UNIFORM_INTS);
+        params[0] = op.rect.x;
+        params[1] = op.rect.y;
+        params[2] = op.rect.width;
+        params[3] = op.rect.height;
+        params[4] = op.srcX;
+        params[5] = op.srcY;
+        params[6] = op.rgb;
+        params[7] = op.alpha ?? 256;
+        this.device.queue.writeBuffer(this.glyphUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.glyphPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: cached.texture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.glyphUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.glyphPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+        this.packetReplayStats.gpuGlyphSpritesReplayed++;
+    }
+
     private replayIndexedSpriteOp(op: IndexedSpriteReplayOp, resource: GpuIndexedSpriteResource): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('indexed sprite replay requested before frame textures exist');
@@ -3591,6 +3812,52 @@ export default class WebGpuFramePresenter {
         this.device.queue.writeTexture(
             { texture },
             resource.rgba,
+            {
+                offset: 0,
+                bytesPerRow: resource.width * 4,
+                rowsPerImage: resource.height
+            },
+            {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private getGlyphTexture(resource: GpuGlyphResource): { texture: GpuTexture; width: number; height: number; version: number } {
+        const cached = this.glyphTextures.get(resource.id);
+        if (cached && cached.width === resource.width && cached.height === resource.height) {
+            if (cached.version !== resource.version) {
+                this.writeGlyphTexture(cached.texture, resource);
+                cached.version = resource.version;
+            }
+            return cached;
+        }
+        if (cached) {
+            cached.texture.destroy();
+            this.glyphTextures.delete(resource.id);
+        }
+
+        const texture = this.device.createTexture({
+            size: {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        this.writeGlyphTexture(texture, resource);
+        const value = { texture, width: resource.width, height: resource.height, version: resource.version };
+        this.glyphTextures.set(resource.id, value);
+        return value;
+    }
+
+    private writeGlyphTexture(texture: GpuTexture, resource: GpuGlyphResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.maskRgba,
             {
                 offset: 0,
                 bytesPerRow: resource.width * 4,
@@ -3918,6 +4185,17 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private ensureGlyphUniformBuffer(): void {
+        if (this.glyphUniformBuffer) {
+            return;
+        }
+
+        this.glyphUniformBuffer = this.device.createBuffer({
+            size: GLYPH_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
     private ensureIndexedSpriteUniformBuffer(): void {
         if (this.indexedSpriteUniformBuffer) {
             return;
@@ -3988,11 +4266,15 @@ export default class WebGpuFramePresenter {
         this.textureTriangleUniformBuffer?.destroy();
         this.rectInstanceUniformBuffer?.destroy();
         this.spriteAlphaUniformBuffer?.destroy();
+        this.glyphUniformBuffer?.destroy();
         this.indexedSpriteUniformBuffer?.destroy();
         this.transformSpriteUniformBuffer?.destroy();
         this.maskedSpriteUniformBuffer?.destroy();
         this.colourTableTexture?.texture.destroy();
         for (const cached of this.spriteTextures.values()) {
+            cached.texture.destroy();
+        }
+        for (const cached of this.glyphTextures.values()) {
             cached.texture.destroy();
         }
         for (const cached of this.texelTextures.values()) {
@@ -4005,6 +4287,7 @@ export default class WebGpuFramePresenter {
             cached.lineOffsetTexture.destroy();
         }
         this.spriteTextures.clear();
+        this.glyphTextures.clear();
         this.texelTextures.clear();
         this.indexedSpriteTextures.clear();
         this.frameTexture = null;
@@ -4019,6 +4302,7 @@ export default class WebGpuFramePresenter {
         this.textureTriangleUniformBuffer = null;
         this.rectInstanceUniformBuffer = null;
         this.spriteAlphaUniformBuffer = null;
+        this.glyphUniformBuffer = null;
         this.indexedSpriteUniformBuffer = null;
         this.transformSpriteUniformBuffer = null;
         this.maskedSpriteUniformBuffer = null;

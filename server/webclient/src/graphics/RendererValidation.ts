@@ -473,6 +473,7 @@ async function runValidation(): Promise<void> {
         packetReplayStats.nativeTextureTrianglesReplayed >= nativeTextureTrianglePackets &&
         packetReplayStats.gpuRectInstancesReplayed > 0 &&
         packetReplayStats.gpuDynamicIndexedSpritesReplayed > 0 &&
+        packetReplayStats.gpuGlyphSpritesReplayed > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&

@@ -2,7 +2,7 @@ import Linkable2 from '#/datastruct/Linkable2.js';
 
 import { Colour } from '#/graphics/Colour.js';
 import Pix2D from '#/graphics/Pix2D.js';
-import { gpuRenderPackets, recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordGlyphSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -343,20 +343,20 @@ export default class PixFont extends Linkable2 {
         if (w > 0 && h > 0) {
             const srcX = srcOff % originalW;
             const srcY = (srcOff / originalW) | 0;
-            recordRgbaSprite(
+            recordGlyphSprite(
                 data,
-                `glyph:${rgb}`,
+                'glyph-mask',
                 originalW,
                 originalH,
-                () => this.makeGlyphRgba(data, originalW, originalH, rgb),
+                data,
                 x,
                 y,
                 w,
                 h,
                 srcX,
                 srcY,
-                w,
-                h,
+                rgb,
+                null,
                 Pix2D.clipMinX,
                 Pix2D.clipMinY,
                 Pix2D.clipMaxX,
@@ -369,18 +369,6 @@ export default class PixFont extends Linkable2 {
 
             this.plot(Pix2D.pixels, data, rgb, srcOff, dstOff, w, h, dstStep, srcStep);
         }
-    }
-
-    private makeGlyphRgba(data: Int8Array, w: number, h: number, rgb: number): Uint8Array {
-        const rgba = new Uint8Array(w * h * 4);
-        for (let i = 0; i < data.length; i++) {
-            const offset = i * 4;
-            rgba[offset] = (rgb >> 16) & 0xff;
-            rgba[offset + 1] = (rgb >> 8) & 0xff;
-            rgba[offset + 2] = rgb & 0xff;
-            rgba[offset + 3] = data[i] === 0 ? 0 : 0xff;
-        }
-        return rgba;
     }
 
     private plot(dst: Int32Array, src: Int8Array, rgb: number, srcOff: number, dstOff: number, w: number, h: number, dstStep: number, srcStep: number): void {
@@ -476,25 +464,24 @@ export default class PixFont extends Linkable2 {
         if (w > 0 && h > 0) {
             const srcX = srcOff % originalW;
             const srcY = (srcOff / originalW) | 0;
-            recordRgbaSprite(
+            recordGlyphSprite(
                 data,
-                `glyph:${rgb}`,
+                'glyph-mask',
                 originalW,
                 originalH,
-                () => this.makeGlyphRgba(data, originalW, originalH, rgb),
+                data,
                 x,
                 y,
                 w,
                 h,
                 srcX,
                 srcY,
-                w,
-                h,
+                rgb,
+                alpha,
                 Pix2D.clipMinX,
                 Pix2D.clipMinY,
                 Pix2D.clipMaxX,
-                Pix2D.clipMaxY,
-                alpha
+                Pix2D.clipMaxY
             );
             if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
                 gpuRenderPackets.recordCpuRasterWriteBypass();
