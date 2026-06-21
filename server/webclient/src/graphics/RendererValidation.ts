@@ -63,10 +63,12 @@ function pixelsToImageData(pixels: Int32Array, width: number, height: number): I
     return imageData;
 }
 
-function makePacketReplayFrame(width: number, height: number): ImageData {
+function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrites: boolean = false): ImageData {
     const pixels = new Int32Array(width * height);
     Pix2D.setPixels(pixels, width, height);
-    gpuRenderPackets.reset();
+    if (skipCpuRasterWrites) {
+        gpuRenderPackets.markCurrentSurfaceCpuRasterWritesSkippable();
+    }
 
     Pix2D.cls();
     Pix2D.fillRect(8, 6, 42, 21, 0x2448c8);
@@ -258,7 +260,14 @@ async function runValidation(): Promise<void> {
 
     const previousSamples = packetPresenter.validationStats.samplesCompared;
     const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
+    gpuRenderPackets.clearCpuRasterWriteSkipSurfaces();
+    gpuRenderPackets.setEnabled(false);
+    gpuRenderPackets.setSkipCpuRasterWrites(false);
     const packetFrame = makePacketReplayFrame(width, height);
+    gpuRenderPackets.reset();
+    gpuRenderPackets.setEnabled(true);
+    gpuRenderPackets.setSkipCpuRasterWrites(true);
+    makePacketReplayFrame(width, height, true);
     cpu.putImageData(packetFrame, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrame);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -272,6 +281,7 @@ async function runValidation(): Promise<void> {
         packetReplayStats.framesReplayed > previousReplayed &&
         packetReplayStats.framesFailed === 0 &&
         packetReplayStats.cpuImageDataUploads === 0 &&
+        packetReplayStats.cpuRasterWriteBypasses > 0 &&
         packetReplayStats.lastError === '';
     const packetResult = {
         name: 'packet-replay-2d-primitives',

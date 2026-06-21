@@ -787,6 +787,7 @@ export type WebGpuPacketReplayStats = {
     framesReplayed: number;
     framesFailed: number;
     cpuImageDataUploads: number;
+    cpuRasterWriteBypasses: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -975,6 +976,7 @@ export default class WebGpuFramePresenter {
             framesReplayed: 0,
             framesFailed: 0,
             cpuImageDataUploads: 0,
+            cpuRasterWriteBypasses: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -982,6 +984,7 @@ export default class WebGpuFramePresenter {
         };
         if (this.packetReplayEnabled) {
             gpuRenderPackets.setEnabled(true);
+            gpuRenderPackets.setSkipCpuRasterWrites(true);
             if (!this.packetReplayStats.enabled) {
                 this.packetReplayStats.lastError = 'GPUBufferUsage COPY_DST/VERTEX unavailable';
             }
@@ -1391,6 +1394,7 @@ export default class WebGpuFramePresenter {
 
         const result = this.buildPacketReplayVertices(snapshot, x | 0, y | 0, surface.width, surface.height, surface.id);
         this.packetReplayStats.lastPacketCount = result.packetCount;
+        this.packetReplayStats.cpuRasterWriteBypasses = snapshot.cpuRasterWriteBypasses;
         const vertexCount = result.steps.reduce((total, step) => total + (step.kind === 'vertices' ? step.vertices.length / FLOATS_PER_PRIMITIVE_VERTEX : 6), 0);
         if (result.steps.length === 0) {
             if (this.packetReplayStats.framesReplayed > 0) {

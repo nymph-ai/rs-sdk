@@ -127,16 +127,21 @@ export type GpuRenderPacket =
 
 export type GpuRenderPacketSnapshot = {
     enabled: boolean;
+    skipCpuRasterWrites: boolean;
+    cpuRasterWriteBypasses: number;
     packets: GpuRenderPacket[];
     packetCount: number;
     dropped: number;
     currentSurface: number;
     surfaces: SurfaceInfo[];
+    cpuRasterWriteSkipSurfaces: number[];
     spriteResources: GpuSpriteResource[];
 };
 
 export type GpuRenderPacketState = {
     enabled: boolean;
+    skipCpuRasterWrites: boolean;
+    cpuRasterWriteBypasses: number;
     readonly packets: GpuRenderPacket[];
     maxPackets: number;
     dropped: number;
@@ -145,6 +150,12 @@ export type GpuRenderPacketState = {
     reset(): void;
     discard(count: number): void;
     setEnabled(enabled: boolean): void;
+    setSkipCpuRasterWrites(enabled: boolean): void;
+    markCurrentSurfaceCpuRasterWritesSkippable(): void;
+    markSurfaceCpuRasterWritesSkippable(pixels: Int32Array, width: number, height: number): number;
+    clearCpuRasterWriteSkipSurfaces(): void;
+    shouldSkipCpuRasterWrites(): boolean;
+    recordCpuRasterWriteBypass(): void;
     snapshot(): GpuRenderPacketSnapshot;
 };
 
@@ -160,6 +171,7 @@ const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
 const spriteResources: GpuSpriteResource[] = [];
+const cpuRasterWriteSkipSurfaces = new Set<number>();
 let nextSurface = 1;
 let nextSpriteResource = 1;
 let currentSurface = 0;
@@ -270,6 +282,8 @@ function pushPacket(packet: GpuRenderPacket): void {
 
 export const gpuRenderPackets: GpuRenderPacketState = {
     enabled: readInitialEnabled(),
+    skipCpuRasterWrites: false,
+    cpuRasterWriteBypasses: 0,
     packets,
     maxPackets: readInitialMaxPackets(),
     dropped: 0,
@@ -282,6 +296,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
     reset(): void {
         packets.length = 0;
         this.dropped = 0;
+        this.cpuRasterWriteBypasses = 0;
     },
     discard(count: number): void {
         if (count <= 0) {
@@ -298,14 +313,39 @@ export const gpuRenderPackets: GpuRenderPacketState = {
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
     },
+    setSkipCpuRasterWrites(enabled: boolean): void {
+        this.skipCpuRasterWrites = enabled;
+    },
+    markCurrentSurfaceCpuRasterWritesSkippable(): void {
+        if (currentSurface !== 0) {
+            cpuRasterWriteSkipSurfaces.add(currentSurface);
+        }
+    },
+    markSurfaceCpuRasterWritesSkippable(pixels: Int32Array, width: number, height: number): number {
+        const surface = getSurfaceId(pixels, width, height);
+        cpuRasterWriteSkipSurfaces.add(surface);
+        return surface;
+    },
+    clearCpuRasterWriteSkipSurfaces(): void {
+        cpuRasterWriteSkipSurfaces.clear();
+    },
+    shouldSkipCpuRasterWrites(): boolean {
+        return this.enabled && this.skipCpuRasterWrites && currentSurface !== 0 && cpuRasterWriteSkipSurfaces.has(currentSurface);
+    },
+    recordCpuRasterWriteBypass(): void {
+        this.cpuRasterWriteBypasses++;
+    },
     snapshot(): GpuRenderPacketSnapshot {
         return {
             enabled: this.enabled,
+            skipCpuRasterWrites: this.skipCpuRasterWrites,
+            cpuRasterWriteBypasses: this.cpuRasterWriteBypasses,
             packets: packets.slice(),
             packetCount: packets.length,
             dropped: this.dropped,
             currentSurface,
             surfaces: surfaces.slice(),
+            cpuRasterWriteSkipSurfaces: Array.from(cpuRasterWriteSkipSurfaces),
             spriteResources: spriteResources.slice()
         };
     }

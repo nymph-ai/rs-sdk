@@ -1,5 +1,5 @@
 import Pix2D from '#/graphics/Pix2D.js';
-import { recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -249,6 +249,11 @@ export default class Pix8 extends Pix2D {
                 Pix2D.clipMaxX,
                 Pix2D.clipMaxY
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
     }
@@ -392,6 +397,11 @@ export default class Pix8 extends Pix2D {
                     Pix2D.clipMaxY
                 );
             }
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotScale(Pix2D.pixels, this.data, this.bpal, local7, local9, local133, local137, arg2, arg3, local33, local39, local2);
         } catch (_e) {
             console.log('error in sprite clipping routine');

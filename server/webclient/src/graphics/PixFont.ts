@@ -2,7 +2,7 @@ import Linkable2 from '#/datastruct/Linkable2.js';
 
 import { Colour } from '#/graphics/Colour.js';
 import Pix2D from '#/graphics/Pix2D.js';
-import { recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -362,6 +362,11 @@ export default class PixFont extends Linkable2 {
                 Pix2D.clipMaxX,
                 Pix2D.clipMaxY
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plot(Pix2D.pixels, data, rgb, srcOff, dstOff, w, h, dstStep, srcStep);
         }
     }
@@ -491,6 +496,11 @@ export default class PixFont extends Linkable2 {
                 Pix2D.clipMaxY,
                 alpha
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotTrans(Pix2D.pixels, data, rgb, srcOff, dstOff, w, h, dstStep, srcStep, alpha);
         }
     }

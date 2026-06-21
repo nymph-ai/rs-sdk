@@ -1,6 +1,6 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import { decodeJpeg } from '#/graphics/Jpeg.js';
-import { recordMaskedSprite, recordRgbaSprite, recordTransformSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordMaskedSprite, recordRgbaSprite, recordTransformSprite } from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -252,6 +252,11 @@ export default class Pix32 extends Pix2D {
                 Pix2D.clipMaxX,
                 Pix2D.clipMaxY
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotQuick(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
     }
@@ -344,6 +349,11 @@ export default class Pix32 extends Pix2D {
                 Pix2D.clipMaxX,
                 Pix2D.clipMaxY
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
     }
@@ -492,6 +502,11 @@ export default class Pix32 extends Pix2D {
                 Pix2D.clipMaxY,
                 alpha
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.tranSprite(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, alpha);
         }
     }
@@ -533,6 +548,8 @@ export default class Pix32 extends Pix2D {
             let leftX: number = (anchorX << 16) + centerY * sinZoom + centerX * cosZoom;
             let leftY: number = (anchorY << 16) + (centerY * cosZoom - centerX * sinZoom);
             let leftOff: number = x + y * Pix2D.width;
+            const skipCpuRasterWrites = gpuRenderPackets.shouldSkipCpuRasterWrites();
+            let cpuRasterWriteBypassRecorded = false;
 
             for (let i: number = 0; i < h; i++) {
                 const dstOff: number = lineStart[i];
@@ -561,16 +578,22 @@ export default class Pix32 extends Pix2D {
                         Pix2D.width,
                         Pix2D.height
                     );
+                    if (skipCpuRasterWrites && !cpuRasterWriteBypassRecorded) {
+                        gpuRenderPackets.recordCpuRasterWriteBypass();
+                        cpuRasterWriteBypassRecorded = true;
+                    }
                 }
-                let dstX: number = leftOff + dstOff;
 
-                let srcX: number = leftX + cosZoom * dstOff;
-                let srcY: number = leftY - sinZoom * dstOff;
+                if (!skipCpuRasterWrites) {
+                    let dstX: number = leftOff + dstOff;
+                    let srcX: number = leftX + cosZoom * dstOff;
+                    let srcY: number = leftY - sinZoom * dstOff;
 
-                for (let j: number = -rowWidth; j < 0; j++) {
-                    Pix2D.pixels[dstX++] = this.data[(srcX >> 16) + (srcY >> 16) * this.wi];
-                    srcX += cosZoom;
-                    srcY -= sinZoom;
+                    for (let j: number = -rowWidth; j < 0; j++) {
+                        Pix2D.pixels[dstX++] = this.data[(srcX >> 16) + (srcY >> 16) * this.wi];
+                        srcX += cosZoom;
+                        srcY -= sinZoom;
+                    }
                 }
 
                 leftX += sinZoom;
@@ -622,6 +645,11 @@ export default class Pix32 extends Pix2D {
                 Pix2D.width,
                 Pix2D.height
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             let leftOff: number = x + y * Pix2D.width;
 
             for (let i: number = 0; i < h; i++) {
@@ -717,6 +745,11 @@ export default class Pix32 extends Pix2D {
                 Pix2D.clipMaxX,
                 Pix2D.clipMaxY
             );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotScanline(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, mask.data);
         }
     }
