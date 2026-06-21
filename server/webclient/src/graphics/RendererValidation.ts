@@ -248,6 +248,23 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
     font.plotLetter(glyph, 76, 84, 5, 5, 0xfff080);
     font.plotLetterTrans(glyph, 88, 84, 5, 5, 0x80f0ff, 128);
 
+    Pix3D.setRenderClipping();
+    Pix3D.hclip = false;
+    Pix3D.lowDetail = true;
+    Pix3D.trans = 0;
+    Pix3D.flatTriangle(126, 154, 140, 10, 16, 42, 0xff40c0);
+    Pix3D.gouraudTriangle(106, 126, 112, 12, 42, 24, 16, 96, 220);
+    Pix3D.textureTriangle(
+        18, 46, 32,
+        18, 24, 52,
+        96, 176, 240,
+        64, 64, 96,
+        128, 64,
+        64, 128,
+        96, 96,
+        0
+    );
+
     return pixelsToImageData(pixels, width, height);
 }
 
