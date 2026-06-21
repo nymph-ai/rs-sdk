@@ -11,6 +11,7 @@ type ValidationResult = {
     passed: boolean;
     stats: WebGpuFrameValidationStats | null;
     packetReplayStats: WebGpuPacketReplayStats | null;
+    evidence?: Record<string, number>;
 };
 
 const validationDynamicSpriteKey = {};
@@ -287,7 +288,8 @@ function printResult(result: ValidationResult): void {
     const line = document.createElement('div');
     line.textContent = `${result.passed ? 'PASS' : 'FAIL'} ${result.name}: ${JSON.stringify({
         validation: result.stats,
-        packetReplay: result.packetReplayStats
+        packetReplay: result.packetReplayStats,
+        evidence: result.evidence
     })}`;
     line.style.font = '12px monospace';
     line.style.color = result.passed ? '#1b7f37' : '#b42318';
@@ -353,6 +355,7 @@ async function runValidation(): Promise<void> {
 
     let previousSamples = packetPresenter.validationStats.samplesCompared;
     const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
+    let nativeFlatTrianglePackets = 0;
     gpuRenderPackets.clearCpuRasterWriteSkipSurfaces();
     gpuRenderPackets.setEnabled(false);
     gpuRenderPackets.setSkipCpuRasterWrites(false);
@@ -361,6 +364,7 @@ async function runValidation(): Promise<void> {
     gpuRenderPackets.setEnabled(true);
     gpuRenderPackets.setSkipCpuRasterWrites(true);
     makePacketReplayFrame(width, height, true, 1);
+    nativeFlatTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
     cpu.putImageData(packetFrame, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrame);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -373,6 +377,7 @@ async function runValidation(): Promise<void> {
     gpuRenderPackets.setEnabled(true);
     gpuRenderPackets.setSkipCpuRasterWrites(true);
     makePacketReplayFrame(width, height, true, 2);
+    nativeFlatTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
     cpu.putImageData(packetFrameUpdated, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrameUpdated);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -387,12 +392,15 @@ async function runValidation(): Promise<void> {
         packetReplayStats.framesFailed === 0 &&
         packetReplayStats.cpuImageDataUploads === 0 &&
         packetReplayStats.cpuRasterWriteBypasses > 0 &&
+        packetReplayStats.nativeFlatTrianglesReplayed >= nativeFlatTrianglePackets &&
+        nativeFlatTrianglePackets > 0 &&
         packetReplayStats.lastError === '';
     const packetResult = {
         name: 'packet-replay-2d-primitives',
         passed: packetPassed,
         stats: packetStats,
-        packetReplayStats
+        packetReplayStats,
+        evidence: { nativeFlatTrianglePackets }
     };
     results.push(packetResult);
     printResult(packetResult);

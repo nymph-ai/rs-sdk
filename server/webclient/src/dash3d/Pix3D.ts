@@ -1122,12 +1122,18 @@ export default class Pix3D extends Pix2D {
         yA: number, yB: number, yC: number,
         colour: number
     ): void {
+        const gpuRasterize = this.trans === 0 && gpuRenderPackets.shouldSkipCpuRasterWrites() && this.canGpuRasterizeUnclippedTriangle(xA, xB, xC, yA, yB, yC);
         recordFlatTriangle(
             xA, xB, xC,
             yA, yB, yC,
             colour,
+            gpuRasterize,
             Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
         );
+        if (gpuRasterize) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
 
         let xStepAB: number = 0;
         if (yB !== yA) {
@@ -1613,6 +1619,23 @@ export default class Pix3D extends Pix2D {
                 }
             }
         }
+    }
+
+    private static canGpuRasterizeUnclippedTriangle(
+        xA: number, xB: number, xC: number,
+        yA: number, yB: number, yC: number
+    ): boolean {
+        const minX = Math.min(xA, xB, xC);
+        const maxX = Math.max(xA, xB, xC);
+        const minY = Math.min(yA, yB, yC);
+        const maxY = Math.max(yA, yB, yC);
+        if (!(yA < yB && yB < yC) || minX < Pix2D.clipMinX || maxX >= Pix2D.clipMaxX || minY < Pix2D.clipMinY || maxY >= Pix2D.clipMaxY) {
+            return false;
+        }
+
+        const xStepAB = (((xB - xA) << 16) / (yB - yA)) | 0;
+        const xStepAC = (((xA - xC) << 16) / (yA - yC)) | 0;
+        return xStepAC < xStepAB;
     }
 
     private static flatRaster(

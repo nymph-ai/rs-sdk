@@ -177,6 +177,44 @@ fn inAlphaShape(pixel: vec2<i32>) -> bool {
         return pixel.x >= params.x && pixel.x < params.x + params.width && pixel.y >= params.y && pixel.y < params.y + params.height;
     }
 
+    if (params.op == 2) {
+        let xA = params.x;
+        let yA = params.y;
+        let xB = params.width;
+        let yB = params.height;
+        let xC = params.centerX;
+        let yC = params.centerY;
+        if (!(yA < yB && yB < yC)) {
+            return false;
+        }
+
+        let xStepAB = ((xB - xA) * 65536) / (yB - yA);
+        let xStepBC = ((xC - xB) * 65536) / (yC - yB);
+        let xStepAC = ((xA - xC) * 65536) / (yA - yC);
+        if (!(xStepAC < xStepAB)) {
+            return false;
+        }
+
+        if (pixel.y < yA || pixel.y >= yC) {
+            return false;
+        }
+
+        var startX: i32;
+        var endX: i32;
+        if (pixel.y < yB) {
+            let dy = pixel.y - yA;
+            startX = (xA * 65536 + xStepAC * dy) / 65536;
+            endX = (xA * 65536 + xStepAB * dy) / 65536;
+        } else {
+            let dyTop = yB - yA;
+            let dy = pixel.y - yB;
+            startX = (xA * 65536 + xStepAC * dyTop + xStepAC * dy) / 65536;
+            endX = (xB * 65536 + xStepBC * dy) / 65536;
+        }
+
+        return pixel.x >= startX && pixel.x < endX;
+    }
+
     let dy = pixel.y - params.centerY;
     if (dy < -params.radius || dy > params.radius) {
         return false;
@@ -516,6 +554,7 @@ type Rect = {
 type PacketReplayBuildResult = {
     steps: PacketReplayStep[];
     packetCount: number;
+    nativeFlatTriangleCount: number;
 };
 
 type PacketReplayStep = {
@@ -538,6 +577,17 @@ type PacketReplayStep = {
 type AlphaReplayOp = {
     kind: 'rect';
     rect: Rect;
+    rgb: number;
+    alpha: number;
+} | {
+    kind: 'flatTriangle';
+    xA: number;
+    yA: number;
+    xB: number;
+    yB: number;
+    xC: number;
+    yC: number;
+    clip: Rect;
     rgb: number;
     alpha: number;
 } | {
@@ -788,6 +838,7 @@ export type WebGpuPacketReplayStats = {
     framesFailed: number;
     cpuImageDataUploads: number;
     cpuRasterWriteBypasses: number;
+    nativeFlatTrianglesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -977,6 +1028,7 @@ export default class WebGpuFramePresenter {
             framesFailed: 0,
             cpuImageDataUploads: 0,
             cpuRasterWriteBypasses: 0,
+            nativeFlatTrianglesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -1408,6 +1460,7 @@ export default class WebGpuFramePresenter {
         this.packetDropped = snapshot.dropped;
         this.packetReplayStats.framesReplayed++;
         this.packetReplayStats.packetsReplayed += result.packetCount;
+        this.packetReplayStats.nativeFlatTrianglesReplayed += result.nativeFlatTriangleCount;
         this.packetReplayStats.lastVertexCount = vertexCount;
         this.packetReplayStats.lastError = '';
         gpuRenderPackets.discardSurface(surface.id);
@@ -1425,6 +1478,7 @@ export default class WebGpuFramePresenter {
         const steps: PacketReplayStep[] = [];
         let vertices: number[] = [];
         let packetCount = 0;
+        let nativeFlatTriangleCount = 0;
         let clip: PacketClip = { minX: 0, minY: 0, maxX: surfaceWidth, maxY: surfaceHeight };
         const packets = snapshot.packets.slice(this.packetCursor);
 
@@ -1618,6 +1672,31 @@ export default class WebGpuFramePresenter {
                     break;
                 }
                 case 'triangleFlat':
+                    if (packet.gpuRasterize) {
+                        nativeFlatTriangleCount++;
+                        flushVertices();
+                        steps.push({
+                            kind: 'alpha',
+                            op: {
+                                kind: 'flatTriangle',
+                                xA: packet.xA + offsetX,
+                                yA: packet.yA + offsetY,
+                                xB: packet.xB + offsetX,
+                                yB: packet.yB + offsetY,
+                                xC: packet.xC + offsetX,
+                                yC: packet.yC + offsetY,
+                                clip: {
+                                    x: packet.clip.minX + offsetX,
+                                    y: packet.clip.minY + offsetY,
+                                    width: packet.clip.maxX - packet.clip.minX,
+                                    height: packet.clip.maxY - packet.clip.minY
+                                },
+                                rgb: packet.colour,
+                                alpha: 256
+                            }
+                        });
+                    }
+                    break;
                 case 'triangleGouraud':
                 case 'triangleTexture':
                     break;
@@ -1627,7 +1706,7 @@ export default class WebGpuFramePresenter {
         }
 
         flushVertices();
-        return { steps, packetCount };
+        return { steps, packetCount, nativeFlatTriangleCount };
     }
 
     private replayPrimitiveSteps(steps: PacketReplayStep[]): void {
@@ -1704,11 +1783,23 @@ export default class WebGpuFramePresenter {
             params[11] = op.rect.y;
             params[12] = op.rect.x + op.rect.width;
             params[13] = op.rect.y + op.rect.height;
-        } else {
+        } else if (op.kind === 'circle') {
             params[0] = 1;
             params[5] = op.xCenter;
             params[6] = op.yCenter;
             params[7] = op.yRadius;
+            params[10] = op.clip.x;
+            params[11] = op.clip.y;
+            params[12] = op.clip.x + op.clip.width;
+            params[13] = op.clip.y + op.clip.height;
+        } else {
+            params[0] = 2;
+            params[1] = op.xA;
+            params[2] = op.yA;
+            params[3] = op.xB;
+            params[4] = op.yB;
+            params[5] = op.xC;
+            params[6] = op.yC;
             params[10] = op.clip.x;
             params[11] = op.clip.y;
             params[12] = op.clip.x + op.clip.width;

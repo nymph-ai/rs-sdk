@@ -97,6 +97,7 @@ export type GpuRenderPacket =
           yB: number;
           yC: number;
           colour: number;
+          gpuRasterize: boolean;
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -694,6 +695,7 @@ export function recordFlatTriangle(
     xA: number, xB: number, xC: number,
     yA: number, yB: number, yC: number,
     colour: number,
+    gpuRasterize: boolean,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
     if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
@@ -710,6 +712,7 @@ export function recordFlatTriangle(
         yB,
         yC,
         colour,
+        gpuRasterize,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
