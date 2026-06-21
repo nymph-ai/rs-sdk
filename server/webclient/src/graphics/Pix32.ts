@@ -1,6 +1,6 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import { decodeJpeg } from '#/graphics/Jpeg.js';
-import { recordRgbaSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
+import { recordRgbaSprite, recordTransformSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -542,7 +542,6 @@ export default class Pix32 extends Pix2D {
     }
 
     rotatePlotSprite(x: number, y: number, w: number, h: number, anchorX: number, anchorY: number, theta: number, zoom: number): void {
-        recordUnsupported('Pix32.rotatePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
         w |= 0;
@@ -559,6 +558,29 @@ export default class Pix32 extends Pix2D {
 
             let leftX: number = (anchorX << 16) + (centerY * sinZoom + centerX * cosZoom);
             let leftY: number = (anchorY << 16) + (centerY * cosZoom - centerX * sinZoom);
+            recordTransformSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                leftX,
+                leftY,
+                cosZoom,
+                -sinZoom,
+                sinZoom,
+                cosZoom,
+                this.owi,
+                true,
+                0,
+                0,
+                Pix2D.width,
+                Pix2D.height
+            );
             let leftOff: number = x + y * Pix2D.width;
 
             for (let i: number = 0; i < h; i++) {

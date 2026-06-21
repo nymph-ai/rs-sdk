@@ -97,6 +97,7 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     rgbSprite.plotSprite(36, 84);
     rgbSprite.quickPlotSprite(52, 84);
     rgbSprite.transPlotSprite(68, 84, 128);
+    rgbSprite.rotatePlotSprite(122, 84, 10, 8, 5, 4, 0.35, 256);
 
     const font = new PixFont();
     const glyph = new Int8Array([

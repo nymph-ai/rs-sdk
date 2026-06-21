@@ -45,6 +45,23 @@ export type GpuRenderPacket =
           clip: ClipBounds;
       })
     | (PacketBase & {
+          kind: 'transformSprite';
+          resource: number;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          startX: number;
+          startY: number;
+          stepX: number;
+          stepY: number;
+          rowStepX: number;
+          rowStepY: number;
+          sourceStride: number;
+          transparentZero: boolean;
+          clip: ClipBounds;
+      })
+    | (PacketBase & {
           kind: 'triangleGouraud';
           xA: number;
           xB: number;
@@ -380,6 +397,66 @@ export function recordRgbaSprite(
         srcWidth,
         srcHeight,
         alpha,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
+}
+
+export function recordTransformSprite(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    makeRgba: () => Uint8Array,
+    x: number,
+    y: number,
+    drawWidth: number,
+    drawHeight: number,
+    startX: number,
+    startY: number,
+    stepX: number,
+    stepY: number,
+    rowStepX: number,
+    rowStepY: number,
+    sourceStride: number,
+    transparentZero: boolean,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+): void {
+    if (!gpuRenderPackets.enabled) {
+        return;
+    }
+
+    let variants = spriteResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        spriteResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextSpriteResource++;
+        variants.set(variant, resource);
+        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
+    }
+
+    pushPacket({
+        kind: 'transformSprite',
+        surface: currentSurface,
+        resource,
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+        startX,
+        startY,
+        stepX,
+        stepY,
+        rowStepX,
+        rowStepY,
+        sourceStride,
+        transparentZero,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
