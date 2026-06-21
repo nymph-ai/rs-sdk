@@ -1,4 +1,4 @@
-import { canvas2d } from '#/graphics/Canvas.js';
+import { canvas2d, presentImageData } from '#/graphics/Canvas.js';
 import Pix2D from '#/graphics/Pix2D.js';
 
 export default class PixMap {
@@ -28,6 +28,10 @@ export default class PixMap {
 
     draw(x: number, y: number): void {
         this.prepareCanvas();
+        if (presentImageData(this.img, x, y, this.ctx)) {
+            return;
+        }
+
         this.ctx.putImageData(this.img, x, y);
     }
 
