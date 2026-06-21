@@ -5,7 +5,15 @@ type BrowserGpu = {
     getPreferredCanvasFormat(): string;
 };
 
+export type WebGpuAdapterInfo = {
+    vendor: string;
+    architecture: string;
+    device: string;
+    description: string;
+};
+
 type GpuAdapter = {
+    readonly info?: Partial<WebGpuAdapterInfo>;
     requestDevice(): Promise<GpuDevice>;
 };
 
@@ -2087,6 +2095,8 @@ function installOverlayCanvas(source: HTMLCanvasElement, overlay: HTMLCanvasElem
 
 export type WebGpuFrameValidationStats = {
     enabled: boolean;
+    adapterInfo: WebGpuAdapterInfo | null;
+    hardwareAdapter: boolean;
     framesPresented: number;
     samplesQueued: number;
     samplesCompared: number;
@@ -2146,11 +2156,37 @@ type WebGpuFramePresenterOptions = {
     packetReplay?: boolean;
 };
 
+const SOFTWARE_ADAPTER_PATTERNS = ['swiftshader', 'llvmpipe', 'lavapipe', 'softpipe', 'software rasterizer'];
+
+function normalizeAdapterInfo(info: Partial<WebGpuAdapterInfo> | undefined): WebGpuAdapterInfo | null {
+    if (!info) {
+        return null;
+    }
+
+    return {
+        vendor: info.vendor || '',
+        architecture: info.architecture || '',
+        device: info.device || '',
+        description: info.description || ''
+    };
+}
+
+function isHardwareAdapter(info: WebGpuAdapterInfo | null): boolean {
+    if (!info) {
+        return false;
+    }
+
+    const label = `${info.vendor} ${info.architecture} ${info.device} ${info.description}`.trim().toLowerCase();
+    return label !== '' && !SOFTWARE_ADAPTER_PATTERNS.some(pattern => label.includes(pattern));
+}
+
 class WebGpuFrameValidator {
     private readonly bufferUsage = getBufferUsage();
     private readonly mapMode = getMapMode();
     readonly stats: WebGpuFrameValidationStats = {
         enabled: false,
+        adapterInfo: null,
+        hardwareAdapter: false,
         framesPresented: 0,
         samplesQueued: 0,
         samplesCompared: 0,
@@ -2347,10 +2383,15 @@ export default class WebGpuFramePresenter {
         private readonly modelFlatPipeline: GpuRenderPipeline,
         private readonly gouraudPipeline: GpuRenderPipeline,
         private readonly textureTrianglePipeline: GpuRenderPipeline,
+        adapterInfo: WebGpuAdapterInfo | null,
         options: WebGpuFramePresenterOptions
     ) {
         this.validator = options.validate ? new WebGpuFrameValidator(device, options.validationSampleInterval || 120) : null;
         this.validationStats = this.validator?.stats ?? null;
+        if (this.validationStats) {
+            this.validationStats.adapterInfo = adapterInfo;
+            this.validationStats.hardwareAdapter = isHardwareAdapter(adapterInfo);
+        }
         this.packetReplayEnabled = options.packetReplay ?? false;
         this.packetReplayStats = {
             enabled: this.packetReplayEnabled && Boolean(this.bufferUsage?.COPY_DST && this.bufferUsage?.STORAGE && this.bufferUsage?.VERTEX && this.bufferUsage?.UNIFORM),
@@ -2421,6 +2462,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
+        const adapterInfo = normalizeAdapterInfo(adapter.info);
         const device = await adapter.requestDevice();
         const context = overlayCanvas.getContext('webgpu') as unknown as GpuCanvasContext | null;
         if (!context) {
@@ -2726,7 +2768,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, modelFlatPipeline, gouraudPipeline, textureTrianglePipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, modelFlatPipeline, gouraudPipeline, textureTrianglePipeline, adapterInfo, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
