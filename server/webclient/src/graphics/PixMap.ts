@@ -21,6 +21,7 @@ export default class PixMap {
         this.paint = new Uint32Array(this.img.data.buffer);
 
         this.setPixels();
+        gpuRenderPackets.markSurfaceRecordable(this.data, this.width, this.height);
     }
 
     setPixels(): void {

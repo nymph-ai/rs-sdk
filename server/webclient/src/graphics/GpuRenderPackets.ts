@@ -134,6 +134,7 @@ export type GpuRenderPacketSnapshot = {
     dropped: number;
     currentSurface: number;
     surfaces: SurfaceInfo[];
+    recordableSurfaces: number[];
     cpuRasterWriteSkipSurfaces: number[];
     spriteResources: GpuSpriteResource[];
 };
@@ -149,7 +150,10 @@ export type GpuRenderPacketState = {
     readonly surfaces: SurfaceInfo[];
     reset(): void;
     discard(count: number): void;
+    discardSurface(surface: number): void;
     setEnabled(enabled: boolean): void;
+    markCurrentSurfaceRecordable(): void;
+    markSurfaceRecordable(pixels: Int32Array, width: number, height: number): number;
     setSkipCpuRasterWrites(enabled: boolean): void;
     markCurrentSurfaceCpuRasterWritesSkippable(): void;
     markSurfaceCpuRasterWritesSkippable(pixels: Int32Array, width: number, height: number): number;
@@ -171,6 +175,7 @@ const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
 const spriteResources: GpuSpriteResource[] = [];
+const recordableSurfaces = new Set<number>();
 const cpuRasterWriteSkipSurfaces = new Set<number>();
 let nextSurface = 1;
 let nextSpriteResource = 1;
@@ -280,6 +285,10 @@ function pushPacket(packet: GpuRenderPacket): void {
     }
 }
 
+function shouldRecordCurrentSurface(): boolean {
+    return currentSurface !== 0 && recordableSurfaces.has(currentSurface);
+}
+
 export const gpuRenderPackets: GpuRenderPacketState = {
     enabled: readInitialEnabled(),
     skipCpuRasterWrites: false,
@@ -310,19 +319,38 @@ export const gpuRenderPackets: GpuRenderPacketState = {
 
         packets.splice(0, count);
     },
+    discardSurface(surface: number): void {
+        for (let i = packets.length - 1; i >= 0; i--) {
+            if (packets[i].surface === surface) {
+                packets.splice(i, 1);
+            }
+        }
+    },
     setEnabled(enabled: boolean): void {
         this.enabled = enabled;
+    },
+    markCurrentSurfaceRecordable(): void {
+        if (currentSurface !== 0) {
+            recordableSurfaces.add(currentSurface);
+        }
+    },
+    markSurfaceRecordable(pixels: Int32Array, width: number, height: number): number {
+        const surface = getSurfaceId(pixels, width, height);
+        recordableSurfaces.add(surface);
+        return surface;
     },
     setSkipCpuRasterWrites(enabled: boolean): void {
         this.skipCpuRasterWrites = enabled;
     },
     markCurrentSurfaceCpuRasterWritesSkippable(): void {
         if (currentSurface !== 0) {
+            recordableSurfaces.add(currentSurface);
             cpuRasterWriteSkipSurfaces.add(currentSurface);
         }
     },
     markSurfaceCpuRasterWritesSkippable(pixels: Int32Array, width: number, height: number): number {
         const surface = getSurfaceId(pixels, width, height);
+        recordableSurfaces.add(surface);
         cpuRasterWriteSkipSurfaces.add(surface);
         return surface;
     },
@@ -345,6 +373,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             dropped: this.dropped,
             currentSurface,
             surfaces: surfaces.slice(),
+            recordableSurfaces: Array.from(recordableSurfaces),
             cpuRasterWriteSkipSurfaces: Array.from(cpuRasterWriteSkipSurfaces),
             spriteResources: spriteResources.slice()
         };
@@ -362,6 +391,10 @@ export function recordSurfaceTarget(pixels: Int32Array, width: number, height: n
     }
 
     currentSurface = getSurfaceId(pixels, width, height);
+    if (!shouldRecordCurrentSurface()) {
+        return;
+    }
+
     pushPacket({ kind: 'surface', surface: currentSurface, width, height });
 }
 
@@ -370,7 +403,7 @@ export function getGpuRenderSurfaceId(pixels: Int32Array, width: number, height:
 }
 
 export function recordClip(minX: number, minY: number, maxX: number, maxY: number): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -378,7 +411,7 @@ export function recordClip(minX: number, minY: number, maxX: number, maxY: numbe
 }
 
 export function recordClear(): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -386,7 +419,7 @@ export function recordClear(): void {
 }
 
 export function recordUnsupported(reason: string): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -394,7 +427,7 @@ export function recordUnsupported(reason: string): void {
 }
 
 export function recordFillRect(x: number, y: number, width: number, height: number, rgb: number, alpha: number | null = null): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -402,7 +435,7 @@ export function recordFillRect(x: number, y: number, width: number, height: numb
 }
 
 export function recordLine(axis: 'h' | 'v', x: number, y: number, length: number, rgb: number, alpha: number | null = null): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -410,7 +443,7 @@ export function recordLine(axis: 'h' | 'v', x: number, y: number, length: number
 }
 
 export function recordFillCircle(xCenter: number, yCenter: number, yRadius: number, rgb: number, alpha: number): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -437,7 +470,7 @@ export function recordRgbaSprite(
     maxY: number,
     alpha: number | null = null
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -494,7 +527,7 @@ export function recordTransformSprite(
     maxX: number,
     maxY: number
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -554,7 +587,7 @@ export function recordMaskedSprite(
     maxX: number,
     maxY: number
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -606,7 +639,7 @@ export function recordGouraudTriangle(
     colourA: number, colourB: number, colourC: number,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -632,7 +665,7 @@ export function recordFlatTriangle(
     colour: number,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 
@@ -664,7 +697,7 @@ export function recordTextureTriangle(
     opaque: boolean,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
-    if (!gpuRenderPackets.enabled) {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
         return;
     }
 

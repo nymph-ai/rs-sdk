@@ -1405,13 +1405,12 @@ export default class WebGpuFramePresenter {
         }
 
         this.replayPrimitiveSteps(result.steps);
-        const consumedPackets = snapshot.packets.length;
         this.packetDropped = snapshot.dropped;
         this.packetReplayStats.framesReplayed++;
         this.packetReplayStats.packetsReplayed += result.packetCount;
         this.packetReplayStats.lastVertexCount = vertexCount;
         this.packetReplayStats.lastError = '';
-        gpuRenderPackets.discard(consumedPackets);
+        gpuRenderPackets.discardSurface(surface.id);
         this.packetCursor = 0;
     }
 
