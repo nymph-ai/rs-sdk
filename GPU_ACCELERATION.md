@@ -95,11 +95,13 @@ or:
 localStorage.setItem('rs-sdk.rendererPacketReplay', '1')
 ```
 
-Packet replay currently consumes opaque 2D clear, filled-rectangle, horizontal-line, and vertical-line packets and rasterizes them into the WebGPU frame texture. The existing CPU renderer remains the oracle for validation only. Unsupported packets, alpha-blended 2D packets, dropped packets, packet stream resets, or packet/image surface mismatches are hard replay failures to fix, not CPU renderer recovery paths. Replay counters and failures are exposed at:
+Packet replay currently consumes opaque 2D clear, filled-rectangle, horizontal-line, and vertical-line packets and rasterizes them into the WebGPU frame texture. In replay mode, `PixMap.draw()` presents directly from packets and does not prepare or upload the CPU `ImageData` framebuffer. The existing CPU renderer remains the oracle for validation only. Unsupported packets, alpha-blended 2D packets, dropped packets, packet stream resets, or packet/image surface mismatches are hard replay failures to fix, not CPU renderer recovery paths. Replay counters and failures are exposed at:
 
 ```js
 window.__rsSdkRendererStats.packetReplay
 ```
+
+The standalone validation page asserts `packetReplay.cpuImageDataUploads === 0` for the packet replay case.
 
 ## Full WebGPU Renderer Target
 

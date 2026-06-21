@@ -71,7 +71,11 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     Pix2D.setClipping(24, 20, 112, 82);
     Pix2D.fillRect(0, 0, 140, 104, 0x8a24a8);
     Pix2D.hline(18, 33, 108, 0xffffff);
+    Pix2D.fillRectTrans(36, 28, 52, 24, 0x004080, 128);
+    Pix2D.hlineTrans(26, 46, 84, 0x80c000, 128);
+    Pix2D.vlineTrans(76, 24, 54, 0xc04000, 128);
     Pix2D.resetClipping();
+    Pix2D.fillCircle(124, 38, 18, 0x2080e0, 128);
     Pix2D.fillRect(width - 30, height - 18, 50, 30, 0x102030);
 
     return pixelsToImageData(pixels, width, height);
@@ -164,7 +168,7 @@ async function runValidation(): Promise<void> {
     const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
     const packetFrame = makePacketReplayFrame(width, height);
     cpu.putImageData(packetFrame, 0, 0);
-    packetPresenter.present(packetFrame, 0, 0);
+    packetPresenter.presentPackets(width, height, 0, 0, packetFrame);
     await waitForSample(packetPresenter.validationStats, previousSamples);
 
     const packetStats = { ...packetPresenter.validationStats };
@@ -175,6 +179,7 @@ async function runValidation(): Promise<void> {
         packetStats.mismatches === 0 &&
         packetReplayStats.framesReplayed > previousReplayed &&
         packetReplayStats.framesFailed === 0 &&
+        packetReplayStats.cpuImageDataUploads === 0 &&
         packetReplayStats.lastError === '';
     const packetResult = {
         name: 'packet-replay-2d-primitives',

@@ -130,6 +130,30 @@ export function presentImageData(imageData: ImageData, x: number, y: number, ctx
     return true;
 }
 
+export function presentGpuRenderPackets(width: number, height: number, x: number, y: number, ctx: CanvasRenderingContext2D): boolean {
+    if (!packetReplayRequested) {
+        return false;
+    }
+
+    if (ctx !== canvas2d) {
+        throw new Error('packet replay requested but PixMap is presenting to a non-primary canvas');
+    }
+
+    if (webGpuStartupError) {
+        throw webGpuStartupError;
+    }
+
+    if (!webGpuPresenter) {
+        throw new Error('WebGPU packet presenter initialization has not completed');
+    }
+
+    if (!webGpuPresenter.presentPackets(width, height, x, y)) {
+        throw new Error('WebGPU packet presenter failed to present frame');
+    }
+
+    return true;
+}
+
 export function saveDataURL(dataURL: string, filename: string) {
     const link = document.createElement('a');
     link.href = dataURL;
