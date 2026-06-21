@@ -543,12 +543,15 @@ async function runValidation(): Promise<void> {
         packetReplayStats.gpuFrameCommandSubmits === packetReplayStats.framesReplayed &&
         packetReplayStats.gpuRenderPassesEncoded > packetReplayStats.gpuFrameCommandSubmits &&
         packetReplayStats.gpuBindGroupsCreated > 0 &&
+        packetReplayStats.gpuBindGroupsCreated < packetReplayStats.gpuUniformBufferWrites &&
         packetReplayStats.gpuBufferWrites > 0 &&
         packetReplayStats.gpuUniformBufferWrites > 0 &&
         packetReplayStats.gpuTextureCopies > 0 &&
         packetReplayStats.gpuFrameUniformBytesAllocated > 0 &&
         packetReplayStats.gpuFrameVertexBytesAllocated > 0 &&
         packetReplayStats.gpuDirectDrawsReplayed > packetReplayStats.gpuDirectRenderPassesReplayed &&
+        packetReplayStats.gpuAlphaStorageDrawsReplayed > 0 &&
+        packetReplayStats.gpuAlphaBindGroupsReused > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&

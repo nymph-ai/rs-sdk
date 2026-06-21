@@ -52,7 +52,7 @@ type GpuRenderPass = {
     setPipeline(pipeline: GpuRenderPipeline): void;
     setBindGroup(index: number, bindGroup: object): void;
     setVertexBuffer(slot: number, buffer: GpuBuffer, offset?: number, size?: number): void;
-    draw(vertexCount: number, instanceCount?: number): void;
+    draw(vertexCount: number, instanceCount?: number, firstVertex?: number, firstInstance?: number): void;
     end(): void;
 };
 
@@ -173,10 +173,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const ALPHA_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -188,30 +189,16 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
-struct AlphaParams {
-    op: i32,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    centerX: i32,
-    centerY: i32,
-    radius: i32,
-    rgb: i32,
-    alpha: i32,
-    clipMinX: i32,
-    clipMinY: i32,
-    clipMaxX: i32,
-    clipMaxY: i32,
-    _pad0: i32,
-    _pad1: i32,
-};
-
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: AlphaParams;
+@group(0) @binding(1) var<storage, read> alphaParams: array<i32>;
+
+fn param(base: u32, index: u32) -> i32 {
+    return alphaParams[base + index];
+}
 
 fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
     if (y0 == y1) {
@@ -233,7 +220,7 @@ fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, 
     return edgeX(xMid, yMid, lowerStep, y);
 }
 
-fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
+fn inOrderedTriangle(pixel: vec2<i32>, base: u32, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
     if (yTop >= yBot || pixel.y < yTop || pixel.y >= yBot) {
         return false;
     }
@@ -244,7 +231,7 @@ fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i3
     let longX = edgeX(xTop, yTop, longStep, pixel.y);
     let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, pixel.y);
 
-    var sampleY = max(yTop, params.clipMinY);
+    var sampleY = max(yTop, param(base, 10u));
     if (sampleY >= yBot) {
         sampleY = yTop;
     }
@@ -272,55 +259,55 @@ fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i3
     return pixel.x >= startX && pixel.x < endX;
 }
 
-fn inFlatTriangle(pixel: vec2<i32>) -> bool {
-    let xA = params.x;
-    let yA = params.y;
-    let xB = params.width;
-    let yB = params.height;
-    let xC = params.centerX;
-    let yC = params.centerY;
+fn inFlatTriangle(pixel: vec2<i32>, base: u32) -> bool {
+    let xA = param(base, 1u);
+    let yA = param(base, 2u);
+    let xB = param(base, 3u);
+    let yB = param(base, 4u);
+    let xC = param(base, 5u);
+    let yC = param(base, 6u);
 
     if (yA <= yB && yA <= yC) {
         if (yB < yC) {
-            return inOrderedTriangle(pixel, xA, yA, xB, yB, xC, yC);
+            return inOrderedTriangle(pixel, base, xA, yA, xB, yB, xC, yC);
         }
-        return inOrderedTriangle(pixel, xA, yA, xC, yC, xB, yB);
+        return inOrderedTriangle(pixel, base, xA, yA, xC, yC, xB, yB);
     }
 
     if (yB <= yC) {
         if (yC < yA) {
-            return inOrderedTriangle(pixel, xB, yB, xC, yC, xA, yA);
+            return inOrderedTriangle(pixel, base, xB, yB, xC, yC, xA, yA);
         }
-        return inOrderedTriangle(pixel, xB, yB, xA, yA, xC, yC);
+        return inOrderedTriangle(pixel, base, xB, yB, xA, yA, xC, yC);
     }
 
     if (yA < yB) {
-        return inOrderedTriangle(pixel, xC, yC, xA, yA, xB, yB);
+        return inOrderedTriangle(pixel, base, xC, yC, xA, yA, xB, yB);
     }
-    return inOrderedTriangle(pixel, xC, yC, xB, yB, xA, yA);
+    return inOrderedTriangle(pixel, base, xC, yC, xB, yB, xA, yA);
 }
 
-fn inAlphaShape(pixel: vec2<i32>) -> bool {
-    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+fn inAlphaShape(pixel: vec2<i32>, base: u32) -> bool {
+    if (pixel.x < param(base, 10u) || pixel.x >= param(base, 12u) || pixel.y < param(base, 11u) || pixel.y >= param(base, 13u)) {
         return false;
     }
 
-    if (params.op == 0) {
-        return pixel.x >= params.x && pixel.x < params.x + params.width && pixel.y >= params.y && pixel.y < params.y + params.height;
+    if (param(base, 0u) == 0) {
+        return pixel.x >= param(base, 1u) && pixel.x < param(base, 1u) + param(base, 3u) && pixel.y >= param(base, 2u) && pixel.y < param(base, 2u) + param(base, 4u);
     }
 
-    if (params.op == 2) {
-        return inFlatTriangle(pixel);
+    if (param(base, 0u) == 2) {
+        return inFlatTriangle(pixel, base);
     }
 
-    let dy = pixel.y - params.centerY;
-    if (dy < -params.radius || dy > params.radius) {
+    let dy = pixel.y - param(base, 6u);
+    if (dy < -param(base, 7u) || dy > param(base, 7u)) {
         return false;
     }
 
-    let radiusSquared = params.radius * params.radius;
+    let radiusSquared = param(base, 7u) * param(base, 7u);
     let xRadius = i32(sqrt(f32(radiusSquared - dy * dy)));
-    return pixel.x >= params.centerX - xRadius && pixel.x <= params.centerX + xRadius;
+    return pixel.x >= param(base, 5u) - xRadius && pixel.x <= param(base, 5u) + xRadius;
 }
 
 fn toByte(channel: f32) -> u32 {
@@ -342,17 +329,17 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
 
-    if (!inAlphaShape(pixel)) {
+    if (!inAlphaShape(pixel, input.paramBase)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let rgb = u32(params.rgb);
-    let alpha = u32(params.alpha);
+    let rgb = u32(param(input.paramBase, 8u));
+    let alpha = u32(param(input.paramBase, 9u));
     let srcR = (rgb >> 16u) & 255u;
     let srcG = (rgb >> 8u) & 255u;
     let srcB = rgb & 255u;
     var blendBase = base;
-    if (params.op == 2 && alpha < 256u) {
+    if (param(input.paramBase, 0u) == 2 && alpha < 256u) {
         blendBase = textureLoad(sourceTexture, nextPixel(pixel), 0);
     }
     let dstR = toByte(blendBase.r);
@@ -1735,6 +1722,7 @@ type FrameVertexBinding = {
 type PacketReplayContext = {
     encoder: GpuCommandEncoder;
     directPass: GpuRenderPass | null;
+    alphaBindGroups: Map<GpuTexture, object>;
 };
 
 type PacketReplayStep = {
@@ -1941,6 +1929,7 @@ function getBufferUsage() {
         GPUBufferUsage?: {
             COPY_DST: number;
             MAP_READ: number;
+            STORAGE: number;
             VERTEX: number;
             UNIFORM: number;
         };
@@ -2174,6 +2163,8 @@ export type WebGpuPacketReplayStats = {
     gpuFrameVertexBytesAllocated: number;
     gpuDirectDrawsReplayed: number;
     gpuDirectRenderPassesReplayed: number;
+    gpuAlphaStorageDrawsReplayed: number;
+    gpuAlphaBindGroupsReused: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2383,7 +2374,7 @@ export default class WebGpuFramePresenter {
         this.validationStats = this.validator?.stats ?? null;
         this.packetReplayEnabled = options.packetReplay ?? false;
         this.packetReplayStats = {
-            enabled: this.packetReplayEnabled && Boolean(this.bufferUsage?.COPY_DST && this.bufferUsage?.VERTEX && this.bufferUsage?.UNIFORM),
+            enabled: this.packetReplayEnabled && Boolean(this.bufferUsage?.COPY_DST && this.bufferUsage?.STORAGE && this.bufferUsage?.VERTEX && this.bufferUsage?.UNIFORM),
             framesAttempted: 0,
             framesReplayed: 0,
             framesFailed: 0,
@@ -2407,6 +2398,8 @@ export default class WebGpuFramePresenter {
             gpuFrameVertexBytesAllocated: 0,
             gpuDirectDrawsReplayed: 0,
             gpuDirectRenderPassesReplayed: 0,
+            gpuAlphaStorageDrawsReplayed: 0,
+            gpuAlphaBindGroupsReused: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2416,7 +2409,7 @@ export default class WebGpuFramePresenter {
             gpuRenderPackets.setEnabled(true);
             gpuRenderPackets.setSkipCpuRasterWrites(true);
             if (!this.packetReplayStats.enabled) {
-                this.packetReplayStats.lastError = 'GPUBufferUsage COPY_DST/VERTEX unavailable';
+                this.packetReplayStats.lastError = 'GPUBufferUsage COPY_DST/STORAGE/UNIFORM/VERTEX unavailable';
             }
         }
         this.recreateFrameTexture();
@@ -3419,7 +3412,8 @@ export default class WebGpuFramePresenter {
         this.prepareFrameVertexArenas(steps);
         const context: PacketReplayContext = {
             encoder: this.device.createCommandEncoder(),
-            directPass: null
+            directPass: null,
+            alphaBindGroups: new Map<GpuTexture, object>()
         };
 
         for (const step of steps) {
@@ -3578,23 +3572,7 @@ export default class WebGpuFramePresenter {
         params[9] = op.alpha;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.alphaPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getAlphaBindGroup(context, this.frameTexture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -3608,8 +3586,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.alphaPipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuAlphaStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4720,7 +4699,7 @@ export default class WebGpuFramePresenter {
         this.frameUniformBufferBytes = alignTo(byteLength, UNIFORM_BUFFER_ALIGNMENT);
         this.frameUniformBuffer = this.device.createBuffer({
             size: this.frameUniformBufferBytes,
-            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.STORAGE | this.bufferUsage!.UNIFORM
         });
     }
 
@@ -4842,6 +4821,36 @@ export default class WebGpuFramePresenter {
     private createReplayBindGroup(descriptor: object): object {
         this.packetReplayStats.gpuBindGroupsCreated++;
         return this.device.createBindGroup(descriptor);
+    }
+
+    private getAlphaBindGroup(context: PacketReplayContext, sourceTexture: GpuTexture): object {
+        const cached = context.alphaBindGroups.get(sourceTexture);
+        if (cached) {
+            this.packetReplayStats.gpuAlphaBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('alpha parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.alphaPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        context.alphaBindGroups.set(sourceTexture, bindGroup);
+        return bindGroup;
     }
 
     private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
