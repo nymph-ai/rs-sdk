@@ -940,7 +940,7 @@ export default class WebGpuFramePresenter {
     private primitiveVertexBufferBytes: number = 0;
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
-    private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object }>();
+    private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private packetCursor: number = 0;
     private packetDropped: number = 0;
     private readonly bufferUsage = getBufferUsage();
@@ -1996,10 +1996,18 @@ export default class WebGpuFramePresenter {
         ]);
     }
 
-    private getSpriteTexture(resource: GpuSpriteResource): { texture: GpuTexture; bindGroup: object } {
+    private getSpriteTexture(resource: GpuSpriteResource): { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number } {
         const cached = this.spriteTextures.get(resource.id);
-        if (cached) {
+        if (cached && cached.width === resource.width && cached.height === resource.height) {
+            if (cached.version !== resource.version) {
+                this.writeSpriteTexture(cached.texture, resource);
+                cached.version = resource.version;
+            }
             return cached;
+        }
+        if (cached) {
+            cached.texture.destroy();
+            this.spriteTextures.delete(resource.id);
         }
 
         const texture = this.device.createTexture({
@@ -2011,6 +2019,26 @@ export default class WebGpuFramePresenter {
             format: 'rgba8unorm',
             usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
         });
+        this.writeSpriteTexture(texture, resource);
+        const bindGroup = this.device.createBindGroup({
+            layout: this.spritePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: texture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: this.sampler
+                }
+            ]
+        });
+        const value = { texture, bindGroup, width: resource.width, height: resource.height, version: resource.version };
+        this.spriteTextures.set(resource.id, value);
+        return value;
+    }
+
+    private writeSpriteTexture(texture: GpuTexture, resource: GpuSpriteResource): void {
         this.device.queue.writeTexture(
             { texture },
             resource.rgba,
@@ -2025,22 +2053,6 @@ export default class WebGpuFramePresenter {
                 depthOrArrayLayers: 1
             }
         );
-        const bindGroup = this.device.createBindGroup({
-            layout: this.spritePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: texture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: this.sampler
-                }
-            ]
-        });
-        const value = { texture, bindGroup };
-        this.spriteTextures.set(resource.id, value);
-        return value;
     }
 
     private ensurePrimitiveVertexBuffer(byteLength: number): void {

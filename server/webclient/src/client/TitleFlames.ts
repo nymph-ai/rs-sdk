@@ -4,10 +4,12 @@ import { Colour } from '#/graphics/Colour.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
 import PixMap from '#/graphics/PixMap.js';
+import { gpuRenderPackets, recordDynamicRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 const FLAME_WIDTH = 128;
 const FLAME_HEIGHT = 256;
 const TITLE_FLAME_PIXELS = 33920;
+const TITLE_FLAME_HEIGHT = 265;
 
 export default class TitleFlames {
     private readonly runes: Pix8[];
@@ -17,6 +19,8 @@ export default class TitleFlames {
     private titleRight: PixMap | null = null;
     private flameLeft: Pix32 | null = null;
     private flameRight: Pix32 | null = null;
+    private flameLeftRgba: Uint8Array | null = null;
+    private flameRightRgba: Uint8Array | null = null;
     private flameBuffer1: Int32Array | null = null;
     private flameBuffer0: Int32Array | null = null;
     private flameBuffer3: Int32Array | null = null;
@@ -36,14 +40,13 @@ export default class TitleFlames {
         this.runes = runes;
     }
 
-    setupFire(titleLeft: PixMap, titleRight: PixMap): void {
+    setupFire(titleLeft: PixMap, titleRight: PixMap, flameLeft: Pix32, flameRight: Pix32): void {
         this.titleLeft = titleLeft;
         this.titleRight = titleRight;
-        this.flameLeft = new Pix32(FLAME_WIDTH, 265);
-        this.flameRight = new Pix32(FLAME_WIDTH, 265);
-
-        this.flameLeft.data.set(titleLeft.data.subarray(0, TITLE_FLAME_PIXELS));
-        this.flameRight.data.set(titleRight.data.subarray(0, TITLE_FLAME_PIXELS));
+        this.flameLeft = flameLeft;
+        this.flameRight = flameRight;
+        this.flameLeftRgba = new Uint8Array(TITLE_FLAME_PIXELS * 4);
+        this.flameRightRgba = new Uint8Array(TITLE_FLAME_PIXELS * 4);
 
         this.flameGradient0 = new Int32Array(256);
         for (let index: number = 0; index < 64; index++) {
@@ -118,6 +121,8 @@ export default class TitleFlames {
         this.titleRight = null;
         this.flameLeft = null;
         this.flameRight = null;
+        this.flameLeftRgba = null;
+        this.flameRightRgba = null;
         this.flameGradient = null;
         this.flameGradient0 = null;
         this.flameGradient1 = null;
@@ -244,7 +249,7 @@ export default class TitleFlames {
     }
 
     drawFlames(): void {
-        if (!this.flameGradient || !this.flameGradient0 || !this.flameGradient1 || !this.flameGradient2 || !this.titleLeft || !this.titleRight || !this.flameLeft || !this.flameRight || !this.flameBuffer3) {
+        if (!this.flameGradient || !this.flameGradient0 || !this.flameGradient1 || !this.flameGradient2 || !this.titleLeft || !this.titleRight || !this.flameLeft || !this.flameRight || !this.flameLeftRgba || !this.flameRightRgba || !this.flameBuffer3) {
             return;
         }
 
@@ -256,15 +261,43 @@ export default class TitleFlames {
             this.flameGradient.set(this.flameGradient0);
         }
 
-        this.drawSingleFlame(this.titleLeft, this.flameLeft, 0);
+        this.drawSingleFlame(this.titleLeft, this.flameLeft, this.flameLeftRgba, 0);
         this.titleLeft.draw(0, 0);
 
-        this.drawSingleFlame(this.titleRight, this.flameRight, 1);
+        this.drawSingleFlame(this.titleRight, this.flameRight, this.flameRightRgba, 1);
         this.titleRight.draw(637, 0);
     }
 
-    drawSingleFlame(title: PixMap, base: Pix32, side: number): void {
+    drawSingleFlame(title: PixMap, base: Pix32, rgba: Uint8Array, side: number): void {
         if (!this.flameGradient || !this.flameBuffer3) {
+            return;
+        }
+
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            title.setPixels();
+            base.quickPlotSprite(0, 0);
+            rgba.fill(0);
+            this.drawSingleFlameGpu(rgba, side);
+            recordDynamicRgbaSprite(
+                this,
+                side === 0 ? 'title-flame-left' : 'title-flame-right',
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT,
+                () => rgba,
+                0,
+                0,
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT,
+                0,
+                0,
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT,
+                0,
+                0,
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT
+            );
+            gpuRenderPackets.recordCpuRasterWriteBypass();
             return;
         }
 
@@ -295,6 +328,44 @@ export default class TitleFlames {
 
                 for (let x: number = 0; x < step; x++) {
                     dstOffset = this.blendPixel(title, srcOffset++, dstOffset);
+                }
+
+                srcOffset += FLAME_WIDTH - step;
+                dstOffset += FLAME_WIDTH - step - offset;
+            }
+        }
+    }
+
+    private drawSingleFlameGpu(rgba: Uint8Array, side: number): void {
+        if (!this.flameGradient || !this.flameBuffer3) {
+            return;
+        }
+
+        let srcOffset: number = 0;
+        let dstOffset: number = side === 0 ? 1152 : 1176;
+
+        for (let y: number = 1; y < FLAME_HEIGHT - 1; y++) {
+            const offset: number = ((this.flameLineOffset[y] * (FLAME_HEIGHT - y)) / FLAME_HEIGHT) | 0;
+
+            if (side === 0) {
+                let step: number = offset + 22;
+                if (step < 0) {
+                    step = 0;
+                }
+
+                srcOffset += step;
+
+                for (let x: number = step; x < FLAME_WIDTH; x++) {
+                    dstOffset = this.writeFlamePixel(rgba, srcOffset++, dstOffset);
+                }
+
+                dstOffset += step;
+            } else {
+                const step: number = 103 - offset;
+                dstOffset += offset;
+
+                for (let x: number = 0; x < step; x++) {
+                    dstOffset = this.writeFlamePixel(rgba, srcOffset++, dstOffset);
                 }
 
                 srcOffset += FLAME_WIDTH - step;
@@ -340,6 +411,25 @@ export default class TitleFlames {
 
         const background: number = title.data[dstOffset];
         title.data[dstOffset] = ((((value & 0xff00ff) * alpha + (background & 0xff00ff) * invAlpha) & 0xff00ff00) + (((value & 0xff00) * alpha + (background & 0xff00) * invAlpha) & 0xff0000)) >> 8;
+        return dstOffset + 1;
+    }
+
+    private writeFlamePixel(rgba: Uint8Array, srcOffset: number, dstOffset: number): number {
+        if (!this.flameGradient || !this.flameBuffer3) {
+            return dstOffset;
+        }
+
+        const alpha: number = this.flameBuffer3[srcOffset];
+        if (alpha === 0 || dstOffset < 0 || dstOffset >= TITLE_FLAME_PIXELS) {
+            return dstOffset + 1;
+        }
+
+        const rgb: number = this.flameGradient[alpha];
+        const rgbaOffset: number = dstOffset * 4;
+        rgba[rgbaOffset] = (rgb >> 16) & 0xff;
+        rgba[rgbaOffset + 1] = (rgb >> 8) & 0xff;
+        rgba[rgbaOffset + 2] = rgb & 0xff;
+        rgba[rgbaOffset + 3] = alpha;
         return dstOffset + 1;
     }
 }

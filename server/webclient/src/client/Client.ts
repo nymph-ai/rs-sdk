@@ -46,7 +46,7 @@ import { Int32Array2d, TypedArray1d, TypedArray3d, Int32Array3d, Uint8Array3d } 
 import { downloadUrl, sleep } from '#/util/JsUtil.js';
 
 import AnimFrame from '#/dash3d/AnimFrame.js';
-import { canvas2d } from '#/graphics/Canvas.js';
+import { canvas2d, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 import { Colour } from '#/graphics/Colour.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
@@ -290,6 +290,8 @@ export class Client extends GameShell {
     private imageTitle8: PixMap | null = null;
     private imageTitlebox: Pix8 | null = null;
     private imageTitlebutton: Pix8 | null = null;
+    private imageTitleFlame0: Pix32 | null = null;
+    private imageTitleFlame1: Pix32 | null = null;
     private loginscreen: number = 0;
     private loginSelect: number = 0;
     private loginMes1: string = '';
@@ -2634,6 +2636,11 @@ export class Client extends GameShell {
     }
 
     private drawError(): void {
+        if (isGpuPacketReplayRequested()) {
+            console.error(`[Client] Fatal client error in strict GPU packet mode: ${this.errorMessage || 'see error flags'}`);
+            return;
+        }
+
         canvas2d.fillStyle = 'black';
         canvas2d.fillRect(0, 0, this.sWid, this.sHei);
 
@@ -3632,9 +3639,11 @@ export class Client extends GameShell {
         this.areaBackhmid1 = null;
 
         this.imageTitle0 = new PixMap(128, 265);
+        this.imageTitle0.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle1 = new PixMap(128, 265);
+        this.imageTitle1.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle2 = new PixMap(509, 171);
@@ -3679,11 +3688,17 @@ export class Client extends GameShell {
         }
 
         const background: Pix32 = await Pix32.fromJpeg(this.title, 'title.dat');
+        this.imageTitleFlame0 = new Pix32(128, 265);
+        this.imageTitleFlame1 = new Pix32(128, 265);
 
         this.imageTitle0?.setPixels();
         background.quickPlotSprite(0, 0);
+        this.imageTitleFlame0.setPixels();
+        background.quickPlotSprite(0, 0);
 
         this.imageTitle1?.setPixels();
+        background.quickPlotSprite(-637, 0);
+        this.imageTitleFlame1.setPixels();
         background.quickPlotSprite(-637, 0);
 
         this.imageTitle2?.setPixels();
@@ -3712,8 +3727,12 @@ export class Client extends GameShell {
 
         this.imageTitle0?.setPixels();
         background.quickPlotSprite(382, 0);
+        this.imageTitleFlame0.setPixels();
+        background.quickPlotSprite(382, 0);
 
         this.imageTitle1?.setPixels();
+        background.quickPlotSprite(-255, 0);
+        this.imageTitleFlame1.setPixels();
         background.quickPlotSprite(-255, 0);
 
         this.imageTitle2?.setPixels();
@@ -3756,9 +3775,9 @@ export class Client extends GameShell {
         }
 
         this.drawProgress('Connecting to fileserver', 10).then((): void => {
-            if (!this.titleFlames && this.imageTitle0 && this.imageTitle1) {
+            if (!this.titleFlames && this.imageTitle0 && this.imageTitle1 && this.imageTitleFlame0 && this.imageTitleFlame1) {
                 this.titleFlames = new TitleFlames(this.imageRunes);
-                this.titleFlames.setupFire(this.imageTitle0, this.imageTitle1);
+                this.titleFlames.setupFire(this.imageTitle0, this.imageTitle1, this.imageTitleFlame0, this.imageTitleFlame1);
                 this.titleFlames.start();
             }
         });
@@ -4067,6 +4086,8 @@ export class Client extends GameShell {
 
         this.imageTitlebox = null;
         this.imageTitlebutton = null;
+        this.imageTitleFlame0 = null;
+        this.imageTitleFlame1 = null;
         this.imageRunes = [];
     }
 

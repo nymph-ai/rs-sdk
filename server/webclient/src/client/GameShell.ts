@@ -1,7 +1,8 @@
 import { CanvasEnabledKeys, KeyCodes } from '#/client/KeyCodes.js';
 
-import { canvas, canvas2d } from '#/graphics/Canvas.js';
+import { canvas, canvas2d, isGpuPacketReplayPending, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import Pix2D from '#/graphics/Pix2D.js';
 import PixMap from '#/graphics/PixMap.js';
 
 import { sleep } from '#/util/JsUtil.js';
@@ -59,8 +60,10 @@ export default abstract class GameShell {
 
     constructor(resizetoFit: boolean = false) {
         canvas.tabIndex = -1;
-        canvas2d.fillStyle = 'black';
-        canvas2d.fillRect(0, 0, canvas.width, canvas.height);
+        if (!isGpuPacketReplayRequested()) {
+            canvas2d.fillStyle = 'black';
+            canvas2d.fillRect(0, 0, canvas.width, canvas.height);
+        }
 
         this.resizeToFit = resizetoFit;
         if (this.resizeToFit) {
@@ -82,6 +85,7 @@ export default abstract class GameShell {
         canvas.width = width;
         canvas.height = height;
         this.drawArea = new PixMap(width, height);
+        this.drawArea.markCpuRasterWritesSkippable();
         Pix3D.setRenderClipping();
     }
 
@@ -274,6 +278,24 @@ export default abstract class GameShell {
     protected async drawProgress(message: string, progress: number): Promise<void> {
         const width: number = this.sWid;
         const height: number = this.sHei;
+
+        if (isGpuPacketReplayRequested() && this.drawArea) {
+            while (isGpuPacketReplayPending()) {
+                await sleep(5);
+            }
+
+            this.drawArea.setPixels();
+            Pix2D.cls();
+
+            const y: number = height / 2 - 18;
+            Pix2D.drawRect(((width / 2) | 0) - 152, y, 304, 34, 0x8c1111);
+            Pix2D.fillRect(((width / 2) | 0) - 150, y + 2, progress * 3, 30, 0x8c1111);
+            Pix2D.fillRect(((width / 2) | 0) - 150 + progress * 3, y + 2, 300 - progress * 3, 30, 0);
+            this.drawArea.draw(0, 0);
+
+            await sleep(5);
+            return;
+        }
 
         if (this.fullredraw) {
             canvas2d.fillStyle = 'black';

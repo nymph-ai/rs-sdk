@@ -1,4 +1,4 @@
-import { gpuRenderPackets } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordDynamicRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
@@ -12,6 +12,8 @@ type ValidationResult = {
     stats: WebGpuFrameValidationStats | null;
     packetReplayStats: WebGpuPacketReplayStats | null;
 };
+
+const validationDynamicSpriteKey = {};
 
 declare global {
     interface Window {
@@ -63,7 +65,79 @@ function pixelsToImageData(pixels: Int32Array, width: number, height: number): I
     return imageData;
 }
 
-function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrites: boolean = false): ImageData {
+function makeDynamicValidationSprite(seed: number): Uint8Array {
+    const spriteWidth = 12;
+    const spriteHeight = 10;
+    const rgba = new Uint8Array(spriteWidth * spriteHeight * 4);
+
+    for (let y = 0; y < spriteHeight; y++) {
+        for (let x = 0; x < spriteWidth; x++) {
+            if (((x + y + seed) & 3) === 0) {
+                continue;
+            }
+
+            const offset = (x + y * spriteWidth) * 4;
+            rgba[offset] = (0x30 + x * 11 + seed * 17) & 0xff;
+            rgba[offset + 1] = (0x70 + y * 13 + seed * 19) & 0xff;
+            rgba[offset + 2] = (0xc0 + x * 3 + y * 5 + seed * 23) & 0xff;
+            rgba[offset + 3] = 0xff;
+        }
+    }
+
+    return rgba;
+}
+
+function plotDynamicValidationSprite(seed: number, x: number, y: number): void {
+    const spriteWidth = 12;
+    const spriteHeight = 10;
+    const rgba = makeDynamicValidationSprite(seed);
+    recordDynamicRgbaSprite(
+        validationDynamicSpriteKey,
+        'validation-dynamic-sprite',
+        spriteWidth,
+        spriteHeight,
+        () => rgba,
+        x,
+        y,
+        spriteWidth,
+        spriteHeight,
+        0,
+        0,
+        spriteWidth,
+        spriteHeight,
+        Pix2D.clipMinX,
+        Pix2D.clipMinY,
+        Pix2D.clipMaxX,
+        Pix2D.clipMaxY
+    );
+    if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+        gpuRenderPackets.recordCpuRasterWriteBypass();
+        return;
+    }
+
+    for (let yy = 0; yy < spriteHeight; yy++) {
+        const dstY = y + yy;
+        if (dstY < Pix2D.clipMinY || dstY >= Pix2D.clipMaxY) {
+            continue;
+        }
+
+        for (let xx = 0; xx < spriteWidth; xx++) {
+            const dstX = x + xx;
+            if (dstX < Pix2D.clipMinX || dstX >= Pix2D.clipMaxX) {
+                continue;
+            }
+
+            const rgbaOffset = (xx + yy * spriteWidth) * 4;
+            if (rgba[rgbaOffset + 3] === 0) {
+                continue;
+            }
+
+            Pix2D.pixels[dstX + dstY * Pix2D.width] = (rgba[rgbaOffset] << 16) | (rgba[rgbaOffset + 1] << 8) | rgba[rgbaOffset + 2];
+        }
+    }
+}
+
+function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrites: boolean = false, dynamicSeed: number = 0): ImageData {
     const pixels = new Int32Array(width * height);
     Pix2D.setPixels(pixels, width, height);
     if (skipCpuRasterWrites) {
@@ -160,6 +234,8 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
         Int32Array.of(1, 0, 0, 1, 2, 1, 0, 3),
         Int32Array.of(6, 8, 7, 6, 5, 7, 8, 4)
     );
+
+    plotDynamicValidationSprite(dynamicSeed, 18, 68);
 
     const font = new PixFont();
     const glyph = new Int8Array([
@@ -258,18 +334,30 @@ async function runValidation(): Promise<void> {
         throw new Error(`WebGPU packet replay unavailable: ${packetPresenter?.validationStats?.lastError || packetPresenter?.packetReplayStats.lastError || 'no presenter'}`);
     }
 
-    const previousSamples = packetPresenter.validationStats.samplesCompared;
+    let previousSamples = packetPresenter.validationStats.samplesCompared;
     const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
     gpuRenderPackets.clearCpuRasterWriteSkipSurfaces();
     gpuRenderPackets.setEnabled(false);
     gpuRenderPackets.setSkipCpuRasterWrites(false);
-    const packetFrame = makePacketReplayFrame(width, height);
+    const packetFrame = makePacketReplayFrame(width, height, false, 1);
     gpuRenderPackets.reset();
     gpuRenderPackets.setEnabled(true);
     gpuRenderPackets.setSkipCpuRasterWrites(true);
-    makePacketReplayFrame(width, height, true);
+    makePacketReplayFrame(width, height, true, 1);
     cpu.putImageData(packetFrame, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrame);
+    await waitForSample(packetPresenter.validationStats, previousSamples);
+
+    previousSamples = packetPresenter.validationStats.samplesCompared;
+    gpuRenderPackets.setEnabled(false);
+    gpuRenderPackets.setSkipCpuRasterWrites(false);
+    const packetFrameUpdated = makePacketReplayFrame(width, height, false, 2);
+    gpuRenderPackets.reset();
+    gpuRenderPackets.setEnabled(true);
+    gpuRenderPackets.setSkipCpuRasterWrites(true);
+    makePacketReplayFrame(width, height, true, 2);
+    cpu.putImageData(packetFrameUpdated, 0, 0);
+    packetPresenter.presentPackets(width, height, 0, 0, packetFrameUpdated);
     await waitForSample(packetPresenter.validationStats, previousSamples);
 
     const packetStats = { ...packetPresenter.validationStats };
@@ -278,7 +366,7 @@ async function runValidation(): Promise<void> {
         packetStats.lastError === '' &&
         packetStats.lastDiffPixels === 0 &&
         packetStats.mismatches === 0 &&
-        packetReplayStats.framesReplayed > previousReplayed &&
+        packetReplayStats.framesReplayed >= previousReplayed + 2 &&
         packetReplayStats.framesFailed === 0 &&
         packetReplayStats.cpuImageDataUploads === 0 &&
         packetReplayStats.cpuRasterWriteBypasses > 0 &&

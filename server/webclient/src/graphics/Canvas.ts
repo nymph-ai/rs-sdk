@@ -36,7 +36,7 @@ function getRendererPreference(): string | null {
 }
 
 function shouldUseWebGpu(): boolean {
-    return packetReplayRequested || (getRendererParam('renderer') !== 'canvas' && getRendererPreference() !== 'canvas');
+    return getRendererParam('renderer') !== 'canvas' && getRendererPreference() !== 'canvas';
 }
 
 function shouldValidateWebGpu(): boolean {
@@ -59,23 +59,33 @@ function parseRendererFlag(value: string | null): boolean | null {
     return null;
 }
 
-function shouldReplayPackets(): boolean {
+function readPacketReplayPreference(): boolean | null {
     const queryValue = parseRendererFlag(getRendererParam('rendererPacketReplay'));
     if (queryValue !== null) {
         return queryValue;
     }
 
     try {
-        return parseRendererFlag(localStorage.getItem('rs-sdk.rendererPacketReplay')) ?? false;
+        return parseRendererFlag(localStorage.getItem('rs-sdk.rendererPacketReplay'));
     } catch (_err) {
-        return false;
+        return null;
     }
 }
 
-const packetReplayRequested = shouldReplayPackets();
 const webGpuRequested = Boolean(canvas && shouldUseWebGpu());
+const packetReplayPreference = readPacketReplayPreference();
+const packetReplayExplicitlyRequested = packetReplayPreference === true;
+const packetReplayRequested = webGpuRequested && (packetReplayPreference ?? true);
 
-if (webGpuRequested) {
+if (webGpuRequested && !packetReplayRequested) {
+    webGpuStartupError = new Error('WebGPU renderer requires packet replay; use renderer=canvas to disable GPU rendering');
+    window.__rsSdkRendererStats = {
+        backend: 'failed',
+        validation: null,
+        packetReplay: null,
+        error: webGpuStartupError.message
+    };
+} else if (webGpuRequested) {
     void WebGpuFramePresenter.create(canvas, { validate: shouldValidateWebGpu(), packetReplay: packetReplayRequested })
         .then(presenter => {
             webGpuPresenter = presenter;
@@ -100,11 +110,11 @@ if (webGpuRequested) {
             console.error('[WebGPU] renderer startup failed', err);
         });
 } else {
-    if (packetReplayRequested) {
+    if (packetReplayExplicitlyRequested) {
         webGpuStartupError = new Error('packet replay requested but WebGPU renderer startup was disabled');
     }
     window.__rsSdkRendererStats = {
-        backend: packetReplayRequested ? 'failed' : 'canvas',
+        backend: packetReplayExplicitlyRequested ? 'failed' : 'canvas',
         validation: null,
         packetReplay: null,
         error: webGpuStartupError?.message
@@ -158,6 +168,14 @@ export function presentGpuRenderPackets(width: number, height: number, x: number
     }
 
     return true;
+}
+
+export function isGpuPacketReplayRequested(): boolean {
+    return packetReplayRequested;
+}
+
+export function isGpuPacketReplayPending(): boolean {
+    return packetReplayRequested && !webGpuPresenter && !webGpuStartupError;
 }
 
 export function saveDataURL(dataURL: string, filename: string) {

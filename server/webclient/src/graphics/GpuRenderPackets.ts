@@ -16,6 +16,7 @@ export type GpuSpriteResource = {
     width: number;
     height: number;
     rgba: Uint8Array;
+    version: number;
 };
 
 type PacketBase = {
@@ -289,6 +290,38 @@ function shouldRecordCurrentSurface(): boolean {
     return currentSurface !== 0 && recordableSurfaces.has(currentSurface);
 }
 
+function getSpriteResource(key: object, variant: string): number | null {
+    return spriteResourceIds.get(key)?.get(variant) ?? null;
+}
+
+function setSpriteResource(key: object, variant: string, width: number, height: number, rgba: Uint8Array, dynamic: boolean): number {
+    let variants = spriteResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        spriteResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextSpriteResource++;
+        variants.set(variant, resource);
+        spriteResources.push({ id: resource, width, height, rgba, version: 0 });
+        return resource;
+    }
+
+    if (dynamic) {
+        const existing = spriteResources.find(item => item.id === resource);
+        if (existing) {
+            existing.width = width;
+            existing.height = height;
+            existing.rgba = rgba;
+            existing.version++;
+        }
+    }
+
+    return resource;
+}
+
 export const gpuRenderPackets: GpuRenderPacketState = {
     enabled: readInitialEnabled(),
     skipCpuRasterWrites: false,
@@ -474,18 +507,7 @@ export function recordRgbaSprite(
         return;
     }
 
-    let variants = spriteResourceIds.get(key);
-    if (!variants) {
-        variants = new Map();
-        spriteResourceIds.set(key, variants);
-    }
-
-    let resource = variants.get(variant);
-    if (!resource) {
-        resource = nextSpriteResource++;
-        variants.set(variant, resource);
-        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
-    }
+    const resource = getSpriteResource(key, variant) ?? setSpriteResource(key, variant, width, height, makeRgba(), false);
 
     pushPacket({
         kind: 'rgbaSprite',
@@ -500,6 +522,49 @@ export function recordRgbaSprite(
         srcWidth,
         srcHeight,
         alpha,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
+}
+
+export function recordDynamicRgbaSprite(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    makeRgba: () => Uint8Array,
+    x: number,
+    y: number,
+    drawWidth: number,
+    drawHeight: number,
+    srcX: number,
+    srcY: number,
+    srcWidth: number,
+    srcHeight: number,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+): void {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
+        return;
+    }
+
+    const rgba = makeRgba().slice();
+    const resource = setSpriteResource(key, variant, width, height, rgba, true);
+
+    pushPacket({
+        kind: 'rgbaSprite',
+        surface: currentSurface,
+        resource,
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+        srcX,
+        srcY,
+        srcWidth,
+        srcHeight,
+        alpha: null,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
@@ -531,18 +596,7 @@ export function recordTransformSprite(
         return;
     }
 
-    let variants = spriteResourceIds.get(key);
-    if (!variants) {
-        variants = new Map();
-        spriteResourceIds.set(key, variants);
-    }
-
-    let resource = variants.get(variant);
-    if (!resource) {
-        resource = nextSpriteResource++;
-        variants.set(variant, resource);
-        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
-    }
+    const resource = getSpriteResource(key, variant) ?? setSpriteResource(key, variant, width, height, makeRgba(), false);
 
     pushPacket({
         kind: 'transformSprite',
@@ -591,31 +645,8 @@ export function recordMaskedSprite(
         return;
     }
 
-    let variants = spriteResourceIds.get(key);
-    if (!variants) {
-        variants = new Map();
-        spriteResourceIds.set(key, variants);
-    }
-
-    let resource = variants.get(variant);
-    if (!resource) {
-        resource = nextSpriteResource++;
-        variants.set(variant, resource);
-        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
-    }
-
-    let maskVariants = spriteResourceIds.get(maskKey);
-    if (!maskVariants) {
-        maskVariants = new Map();
-        spriteResourceIds.set(maskKey, maskVariants);
-    }
-
-    let maskResource = maskVariants.get(maskVariant);
-    if (!maskResource) {
-        maskResource = nextSpriteResource++;
-        maskVariants.set(maskVariant, maskResource);
-        spriteResources.push({ id: maskResource, width: maskWidth, height: maskHeight, rgba: makeMaskRgba() });
-    }
+    const resource = getSpriteResource(key, variant) ?? setSpriteResource(key, variant, width, height, makeRgba(), false);
+    const maskResource = getSpriteResource(maskKey, maskVariant) ?? setSpriteResource(maskKey, maskVariant, maskWidth, maskHeight, makeMaskRgba(), false);
 
     pushPacket({
         kind: 'maskedSprite',
