@@ -1,5 +1,6 @@
 import WebGpuFramePresenter from '#/graphics/WebGpuFramePresenter.js';
 import { getGpuRenderSurfaceId, gpuRenderPackets } from '#/graphics/GpuRenderPackets.js';
+import { isStreamClientProfileRequested, shouldUseGpuPacketReplay, shouldUseWebGpuRenderer } from '#/client/StreamClientProfile.js';
 
 export const canvas: HTMLCanvasElement = document.getElementById('canvas') as HTMLCanvasElement;
 export const canvas2d: CanvasRenderingContext2D = canvas?.getContext('2d', {
@@ -36,7 +37,7 @@ function getRendererPreference(): string | null {
 }
 
 function shouldUseWebGpu(): boolean {
-    return getRendererParam('renderer') !== 'canvas' && getRendererPreference() !== 'canvas';
+    return shouldUseWebGpuRenderer(getRendererParam('renderer'), getRendererPreference(), isStreamClientProfileRequested());
 }
 
 function shouldValidateWebGpu(): boolean {
@@ -72,10 +73,11 @@ function readPacketReplayPreference(): boolean | null {
     }
 }
 
+const streamClientRequested = isStreamClientProfileRequested();
 const webGpuRequested = Boolean(canvas && shouldUseWebGpu());
 const packetReplayPreference = readPacketReplayPreference();
 const packetReplayExplicitlyRequested = packetReplayPreference === true;
-const packetReplayRequested = webGpuRequested && (packetReplayPreference ?? true);
+const packetReplayRequested = shouldUseGpuPacketReplay(webGpuRequested, packetReplayPreference, streamClientRequested);
 
 if (webGpuRequested && !packetReplayRequested) {
     webGpuStartupError = new Error('WebGPU renderer requires packet replay; use renderer=canvas to disable GPU rendering');

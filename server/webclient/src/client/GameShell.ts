@@ -1,4 +1,5 @@
 import { CanvasEnabledKeys, KeyCodes } from '#/client/KeyCodes.js';
+import { getStreamClientProfile, publishStreamClientProfile, type StreamClientProfile } from '#/client/StreamClientProfile.js';
 
 import { canvas, canvas2d, isGpuPacketReplayPending, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 import Pix3D from '#/dash3d/Pix3D.js';
@@ -38,6 +39,7 @@ export default abstract class GameShell {
 
     /// custom
     protected resizeToFit: boolean = false;
+    protected readonly streamClientProfile: StreamClientProfile = getStreamClientProfile();
     protected tfps: number = 50;
     private absMouseX: number = 0;
     private absMouseY: number = 0;
@@ -66,7 +68,15 @@ export default abstract class GameShell {
         }
 
         this.resizeToFit = resizetoFit;
-        if (this.resizeToFit) {
+        if (this.streamClientProfile.enabled) {
+            this.applyStreamClientDocumentState();
+            this.resize(
+                this.streamClientProfile.backingWidth,
+                this.streamClientProfile.backingHeight,
+                this.streamClientProfile.logicalWidth,
+                this.streamClientProfile.logicalHeight
+            );
+        } else if (this.resizeToFit) {
             this.resize(window.innerWidth, window.innerHeight);
         } else {
             this.resize(canvas.width, canvas.height);
@@ -81,12 +91,37 @@ export default abstract class GameShell {
         return canvas.height;
     }
 
-    protected resize(width: number, height: number) {
+    protected resize(width: number, height: number, cssWidth: number = width, cssHeight: number = height) {
         canvas.width = width;
         canvas.height = height;
+        this.applyCanvasCssSize(cssWidth, cssHeight);
         this.drawArea = new PixMap(width, height);
         this.drawArea.markCpuRasterWritesSkippable();
         Pix3D.setRenderClipping();
+        publishStreamClientProfile(this.streamClientProfile, {
+            game: { x: 0, y: 0, width, height }
+        });
+    }
+
+    private applyStreamClientDocumentState(): void {
+        document.documentElement.dataset.rsSdkStreamClient = this.streamClientProfile.name;
+        document.body.classList.add('stream-client');
+    }
+
+    private applyCanvasCssSize(width: number, height: number): void {
+        if (this.streamClientProfile.enabled) {
+            canvas.style.setProperty('width', `${width}px`, 'important');
+            canvas.style.setProperty('height', `${height}px`, 'important');
+        } else {
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+        }
+
+        const stack = canvas.parentElement?.dataset.rsSdkCanvasStack === 'webgpu' ? canvas.parentElement : null;
+        if (stack) {
+            stack.style.width = canvas.style.width;
+            stack.style.height = canvas.style.height;
+        }
     }
 
     async run() {

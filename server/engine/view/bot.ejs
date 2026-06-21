@@ -36,15 +36,27 @@
             overflow: hidden;
         }
 
+        body.stream-client {
+            overflow: hidden;
+        }
+
         body.minimal #controls,
         body.minimal #bot-controls,
-        body.minimal #sdk-panel-container {
+        body.minimal #sdk-panel-container,
+        body.stream-client #controls,
+        body.stream-client #bot-controls,
+        body.stream-client #sdk-panel-container {
             display: none !important;
         }
 
         body.minimal #game {
             width: 100vw;
             height: 100vh;
+        }
+
+        body.stream-client #game {
+            width: auto;
+            height: auto;
         }
 
         body.minimal canvas {
@@ -184,15 +196,24 @@
 
         function loadSettings() {
             const urlParams = new URLSearchParams(window.location.search);
+            const streamClient = urlParams.get('streamProfile') === 'stream-1080p' ||
+                urlParams.get('streamClient') === '1' ||
+                urlParams.get('stream') === '1' ||
+                urlParams.has('renderSize');
 
             // Minimal mode: canvas only, no chrome
-            if (urlParams.has('minimal')) {
+            if (urlParams.has('minimal') || streamClient) {
                 document.body.classList.add('minimal');
+            }
+            if (streamClient) {
+                document.body.classList.add('stream-client');
             }
 
             // Apply canvas size (default to auto)
-            let size = localStorage.getItem('canvasSize') || 'auto';
-            setSize(size);
+            if (!streamClient) {
+                let size = localStorage.getItem('canvasSize') || 'auto';
+                setSize(size);
+            }
 
             // Load username from URL ?bot= param, or generate random if none
             const botUsername = urlParams.get('bot');
@@ -313,6 +334,14 @@
 
         function setSize(size) {
             let canvas = document.getElementById('canvas');
+            const urlParams = new URLSearchParams(window.location.search);
+            const streamClient = urlParams.get('streamProfile') === 'stream-1080p' ||
+                urlParams.get('streamClient') === '1' ||
+                urlParams.get('stream') === '1' ||
+                urlParams.has('renderSize');
+            if (streamClient) {
+                return;
+            }
             if (size == null) { size = document.getElementById('size').value; }
             switch (size) {
                 default:

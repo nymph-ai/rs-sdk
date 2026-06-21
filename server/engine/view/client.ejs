@@ -32,6 +32,16 @@
             display: none;
         }
 
+        body.stream-client {
+            overflow: hidden;
+        }
+
+        body.stream-client #controls,
+        body.stream-client #mobilekeyboard-container,
+        body.stream-client #hide-message {
+            display: none !important;
+        }
+
         center {
             display: flex;
             flex-direction: column;
@@ -240,6 +250,15 @@
         window.setFaviconConnected = setFaviconConnected;
 
         function loadSettings() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const streamClient = urlParams.get('streamProfile') === 'stream-1080p' ||
+                urlParams.get('streamClient') === '1' ||
+                urlParams.get('stream') === '1' ||
+                urlParams.has('renderSize');
+            if (streamClient) {
+                document.body.classList.add('stream-client');
+            }
+
             setFilter((localStorage.getItem('filtering') == 'true') ? 'pixelated' : 'auto');
             if (isMobile()) {
                 const keyboardChoiceContainerElement = document.getElementById('mobilekeyboard-container');
@@ -255,8 +274,10 @@
                     keyboardChoiceElement.value = 'hybrid';
                 }
             } else {
-                let size = localStorage.getItem('canvasSize') || 'auto';
-                setSize(size);
+                if (!streamClient) {
+                    let size = localStorage.getItem('canvasSize') || 'auto';
+                    setSize(size);
+                }
 
                 let controls = localStorage.getItem('hideControls');
                 if (controls === 'true') { hideControls(); }
@@ -271,6 +292,14 @@
 
         function setSize(size) {
             let canvas = document.getElementById('canvas');
+            const urlParams = new URLSearchParams(window.location.search);
+            const streamClient = urlParams.get('streamProfile') === 'stream-1080p' ||
+                urlParams.get('streamClient') === '1' ||
+                urlParams.get('stream') === '1' ||
+                urlParams.has('renderSize');
+            if (streamClient) {
+                return;
+            }
             if (size == null) { size = document.getElementById('size').value; }
 
             switch (size) {
