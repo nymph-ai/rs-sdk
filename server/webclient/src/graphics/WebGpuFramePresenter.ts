@@ -1,4 +1,4 @@
-import { gpuRenderPackets, type GpuColourTableResource, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource, type GpuTextureResource } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, type GpuColourTableResource, type GpuIndexedSpriteResource, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource, type GpuTextureResource } from '#/graphics/GpuRenderPackets.js';
 
 type BrowserGpu = {
     requestAdapter(options?: { powerPreference?: 'high-performance' | 'low-power' }): Promise<GpuAdapter | null>;
@@ -1078,6 +1078,131 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const INDEXED_SPRITE_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct IndexedSpriteParams {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    originX: i32,
+    originY: i32,
+    srcX: i32,
+    srcY: i32,
+    mode: i32,
+    _pad0: i32,
+    _pad1: i32,
+    _pad2: i32,
+    _pad3: i32,
+    _pad4: i32,
+    _pad5: i32,
+    _pad6: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var intensityTexture: texture_2d<u32>;
+@group(0) @binding(2) var paletteTexture: texture_2d<u32>;
+@group(0) @binding(3) var lineOffsetTexture: texture_2d<u32>;
+@group(0) @binding(4) var<uniform> params: IndexedSpriteParams;
+
+fn toByte(channel: f32) -> u32 {
+    return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
+}
+
+fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
+    return (src * alpha + dst * (256u - alpha)) >> 8u;
+}
+
+fn intensityAt(src: vec2<i32>) -> u32 {
+    let size = textureDimensions(intensityTexture);
+    if (src.x < 0 || src.y < 0 || src.x >= i32(size.x) || src.y >= i32(size.y)) {
+        return 0u;
+    }
+
+    return textureLoad(intensityTexture, src, 0).r;
+}
+
+fn titleFlameIntensity(pixel: vec2<i32>, mode: i32) -> u32 {
+    let localX = pixel.x - params.originX;
+    let localY = pixel.y - params.originY;
+    let flameY = localY - 8;
+    let size = textureDimensions(intensityTexture);
+    if (localX < 0 || localX >= i32(size.x) || flameY < 1 || flameY >= i32(size.y) - 1) {
+        return 0u;
+    }
+
+    let lineOffset = i32(textureLoad(lineOffsetTexture, vec2<i32>(flameY, 0), 0).r) - 128;
+    let offset = (lineOffset * (i32(size.y) - flameY)) / i32(size.y);
+    var srcX = 0;
+    if (mode == 1) {
+        let step = max(offset + 22, 0);
+        if (localX >= i32(size.x) - step) {
+            return 0u;
+        }
+        srcX = localX + step;
+    } else {
+        let step = 103 - offset;
+        let startX = 24 + offset;
+        if (localX < startX || localX >= startX + step) {
+            return 0u;
+        }
+        srcX = localX - startX;
+    }
+
+    return intensityAt(vec2<i32>(srcX, flameY));
+}
+
+fn spriteIntensity(pixel: vec2<i32>) -> u32 {
+    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+        return 0u;
+    }
+
+    if (params.mode == 1 || params.mode == 2) {
+        return titleFlameIntensity(pixel, params.mode);
+    }
+
+    return intensityAt(vec2<i32>(
+        params.srcX + pixel.x - params.x,
+        params.srcY + pixel.y - params.y
+    ));
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+    let alpha = spriteIntensity(pixel);
+    if (alpha == 0u) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let palette = textureLoad(paletteTexture, vec2<i32>(i32(alpha), 0), 0);
+    let outR = blendChannel(palette.r, toByte(base.r), alpha);
+    let outG = blendChannel(palette.g, toByte(base.g), alpha);
+    let outB = blendChannel(palette.b, toByte(base.b), alpha);
+    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
 const TRANSFORM_SPRITE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -1253,6 +1378,7 @@ const ALPHA_UNIFORM_INTS = 16;
 const GOURAUD_UNIFORM_INTS = 16;
 const TEXTURE_TRIANGLE_UNIFORM_INTS = 32;
 const SPRITE_ALPHA_UNIFORM_INTS = 16;
+const INDEXED_SPRITE_UNIFORM_INTS = 16;
 const TRANSFORM_SPRITE_UNIFORM_INTS = 16;
 const MASKED_SPRITE_UNIFORM_INTS = 16;
 
@@ -1291,6 +1417,9 @@ type PacketReplayStep = {
 } | {
     kind: 'sprite';
     op: SpriteReplayOp;
+} | {
+    kind: 'indexedSprite';
+    op: IndexedSpriteReplayOp;
 } | {
     kind: 'transformSprite';
     op: TransformSpriteReplayOp;
@@ -1377,6 +1506,16 @@ type SpriteReplayOp = {
     srcWidth: number;
     srcHeight: number;
     alpha: number | null;
+};
+
+type IndexedSpriteReplayOp = {
+    resource: number;
+    rect: Rect;
+    originX: number;
+    originY: number;
+    srcX: number;
+    srcY: number;
+    mode: number;
 };
 
 type TransformSpriteReplayOp = {
@@ -1642,6 +1781,7 @@ export type WebGpuPacketReplayStats = {
     nativeGouraudTrianglesReplayed: number;
     nativeTextureTrianglesReplayed: number;
     gpuRectInstancesReplayed: number;
+    gpuDynamicIndexedSpritesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -1791,6 +1931,7 @@ export default class WebGpuFramePresenter {
     private textureTriangleUniformBuffer: GpuBuffer | null = null;
     private rectInstanceUniformBuffer: GpuBuffer | null = null;
     private spriteAlphaUniformBuffer: GpuBuffer | null = null;
+    private indexedSpriteUniformBuffer: GpuBuffer | null = null;
     private transformSpriteUniformBuffer: GpuBuffer | null = null;
     private maskedSpriteUniformBuffer: GpuBuffer | null = null;
     private primitiveVertexBuffer: GpuBuffer | null = null;
@@ -1802,6 +1943,7 @@ export default class WebGpuFramePresenter {
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
     private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
+    private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
     private packetCursor: number = 0;
     private packetDropped: number = 0;
     private readonly bufferUsage = getBufferUsage();
@@ -1824,6 +1966,7 @@ export default class WebGpuFramePresenter {
         private readonly rectInstancePipeline: GpuRenderPipeline,
         private readonly spritePipeline: GpuRenderPipeline,
         private readonly spriteAlphaPipeline: GpuRenderPipeline,
+        private readonly indexedSpritePipeline: GpuRenderPipeline,
         private readonly transformSpritePipeline: GpuRenderPipeline,
         private readonly maskedSpritePipeline: GpuRenderPipeline,
         private readonly alphaPipeline: GpuRenderPipeline,
@@ -1845,6 +1988,7 @@ export default class WebGpuFramePresenter {
             nativeGouraudTrianglesReplayed: 0,
             nativeTextureTrianglesReplayed: 0,
             gpuRectInstancesReplayed: 0,
+            gpuDynamicIndexedSpritesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2032,6 +2176,7 @@ export default class WebGpuFramePresenter {
         const gouraudShaderModule = device.createShaderModule({ code: GOURAUD_SHADER });
         const textureTriangleShaderModule = device.createShaderModule({ code: TEXTURE_TRIANGLE_SHADER });
         const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
+        const indexedSpriteShaderModule = device.createShaderModule({ code: INDEXED_SPRITE_SHADER });
         const transformSpriteShaderModule = device.createShaderModule({ code: TRANSFORM_SPRITE_SHADER });
         const maskedSpriteShaderModule = device.createShaderModule({ code: MASKED_SPRITE_SHADER });
         const alphaPipeline = device.createRenderPipeline({
@@ -2094,6 +2239,21 @@ export default class WebGpuFramePresenter {
                 topology: 'triangle-list'
             }
         });
+        const indexedSpritePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: indexedSpriteShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: indexedSpriteShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
         const transformSpritePipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -2130,7 +2290,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -2514,6 +2674,39 @@ export default class WebGpuFramePresenter {
                     });
                     break;
                 }
+                case 'indexedSprite': {
+                    const sourceRect = { x: packet.x, y: packet.y, width: packet.width, height: packet.height };
+                    const clippedSurfaceRect = clipRect(sourceRect, packet.clip);
+                    if (!clippedSurfaceRect) {
+                        break;
+                    }
+
+                    const unclippedTargetRect = {
+                        x: clippedSurfaceRect.x + offsetX,
+                        y: clippedSurfaceRect.y + offsetY,
+                        width: clippedSurfaceRect.width,
+                        height: clippedSurfaceRect.height
+                    };
+                    const targetRect = clipRect(unclippedTargetRect, { minX: 0, minY: 0, maxX: this.width, maxY: this.height });
+                    if (!targetRect) {
+                        break;
+                    }
+
+                    flushBatches();
+                    steps.push({
+                        kind: 'indexedSprite',
+                        op: {
+                            resource: packet.resource,
+                            rect: targetRect,
+                            originX: packet.x + offsetX,
+                            originY: packet.y + offsetY,
+                            srcX: packet.srcX + (clippedSurfaceRect.x - packet.x) + (targetRect.x - unclippedTargetRect.x),
+                            srcY: packet.srcY + (clippedSurfaceRect.y - packet.y) + (targetRect.y - unclippedTargetRect.y),
+                            mode: packet.mode === 'titleFlameLeft' ? 1 : packet.mode === 'titleFlameRight' ? 2 : 0
+                        }
+                    });
+                    break;
+                }
                 case 'transformSprite': {
                     const targetRect = clipSurfaceRectToTarget(
                         { x: packet.x, y: packet.y, width: packet.width, height: packet.height },
@@ -2705,6 +2898,13 @@ export default class WebGpuFramePresenter {
                 }
 
                 this.replayTextureTriangleOp(step.op, resource);
+            } else if (step.kind === 'indexedSprite') {
+                const resource = gpuRenderPackets.snapshot().indexedSpriteResources.find(item => item.id === step.op.resource);
+                if (!resource) {
+                    this.failPacketReplay(`indexed sprite resource ${step.op.resource} is missing`);
+                }
+
+                this.replayIndexedSpriteOp(step.op, resource);
             } else if (step.kind === 'maskedSprite') {
                 const resources = gpuRenderPackets.snapshot().spriteResources;
                 const resource = resources.find(item => item.id === step.op.resource);
@@ -3122,6 +3322,77 @@ export default class WebGpuFramePresenter {
         this.recreateDisplayBindGroup();
     }
 
+    private replayIndexedSpriteOp(op: IndexedSpriteReplayOp, resource: GpuIndexedSpriteResource): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('indexed sprite replay requested before frame textures exist');
+        }
+
+        const cached = this.getIndexedSpriteTexture(resource);
+        this.ensureIndexedSpriteUniformBuffer();
+        const params = new Int32Array(INDEXED_SPRITE_UNIFORM_INTS);
+        params[0] = op.rect.x;
+        params[1] = op.rect.y;
+        params[2] = op.rect.width;
+        params[3] = op.rect.height;
+        params[4] = op.originX;
+        params[5] = op.originY;
+        params[6] = op.srcX;
+        params[7] = op.srcY;
+        params[8] = op.mode;
+        this.device.queue.writeBuffer(this.indexedSpriteUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.indexedSpritePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: cached.intensityTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: cached.paletteTexture.createView()
+                },
+                {
+                    binding: 3,
+                    resource: cached.lineOffsetTexture.createView()
+                },
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: this.indexedSpriteUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.indexedSpritePipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+        this.packetReplayStats.gpuDynamicIndexedSpritesReplayed++;
+    }
+
     private replayTransformSpriteOp(op: TransformSpriteReplayOp, resource: GpuSpriteResource): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('transform sprite replay requested before frame textures exist');
@@ -3328,6 +3599,110 @@ export default class WebGpuFramePresenter {
             {
                 width: resource.width,
                 height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private getIndexedSpriteTexture(resource: GpuIndexedSpriteResource): { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number } {
+        const cached = this.indexedSpriteTextures.get(resource.id);
+        if (cached && cached.width === resource.width && cached.height === resource.height) {
+            if (cached.version !== resource.version) {
+                this.writeIndexedSpriteIntensityTexture(cached.intensityTexture, resource);
+                this.writeIndexedSpritePaletteTexture(cached.paletteTexture, resource);
+                this.writeIndexedSpriteLineOffsetTexture(cached.lineOffsetTexture, resource);
+                cached.version = resource.version;
+            }
+            return cached;
+        }
+        if (cached) {
+            cached.intensityTexture.destroy();
+            cached.paletteTexture.destroy();
+            cached.lineOffsetTexture.destroy();
+            this.indexedSpriteTextures.delete(resource.id);
+        }
+
+        const intensityTexture = this.device.createTexture({
+            size: {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        const paletteTexture = this.device.createTexture({
+            size: {
+                width: 256,
+                height: 1,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        const lineOffsetTexture = this.device.createTexture({
+            size: {
+                width: 256,
+                height: 1,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        this.writeIndexedSpriteIntensityTexture(intensityTexture, resource);
+        this.writeIndexedSpritePaletteTexture(paletteTexture, resource);
+        this.writeIndexedSpriteLineOffsetTexture(lineOffsetTexture, resource);
+        const value = { intensityTexture, paletteTexture, lineOffsetTexture, width: resource.width, height: resource.height, version: resource.version };
+        this.indexedSpriteTextures.set(resource.id, value);
+        return value;
+    }
+
+    private writeIndexedSpriteIntensityTexture(texture: GpuTexture, resource: GpuIndexedSpriteResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.intensityRgba,
+            {
+                offset: 0,
+                bytesPerRow: resource.width * 4,
+                rowsPerImage: resource.height
+            },
+            {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private writeIndexedSpritePaletteTexture(texture: GpuTexture, resource: GpuIndexedSpriteResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.paletteRgba,
+            {
+                offset: 0,
+                bytesPerRow: 256 * 4,
+                rowsPerImage: 1
+            },
+            {
+                width: 256,
+                height: 1,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private writeIndexedSpriteLineOffsetTexture(texture: GpuTexture, resource: GpuIndexedSpriteResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.lineOffsetRgba,
+            {
+                offset: 0,
+                bytesPerRow: 256 * 4,
+                rowsPerImage: 1
+            },
+            {
+                width: 256,
+                height: 1,
                 depthOrArrayLayers: 1
             }
         );
@@ -3543,6 +3918,17 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private ensureIndexedSpriteUniformBuffer(): void {
+        if (this.indexedSpriteUniformBuffer) {
+            return;
+        }
+
+        this.indexedSpriteUniformBuffer = this.device.createBuffer({
+            size: INDEXED_SPRITE_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
     private ensureTransformSpriteUniformBuffer(): void {
         if (this.transformSpriteUniformBuffer) {
             return;
@@ -3602,6 +3988,7 @@ export default class WebGpuFramePresenter {
         this.textureTriangleUniformBuffer?.destroy();
         this.rectInstanceUniformBuffer?.destroy();
         this.spriteAlphaUniformBuffer?.destroy();
+        this.indexedSpriteUniformBuffer?.destroy();
         this.transformSpriteUniformBuffer?.destroy();
         this.maskedSpriteUniformBuffer?.destroy();
         this.colourTableTexture?.texture.destroy();
@@ -3612,8 +3999,14 @@ export default class WebGpuFramePresenter {
             cached.indexTexture.destroy();
             cached.paletteTexture.destroy();
         }
+        for (const cached of this.indexedSpriteTextures.values()) {
+            cached.intensityTexture.destroy();
+            cached.paletteTexture.destroy();
+            cached.lineOffsetTexture.destroy();
+        }
         this.spriteTextures.clear();
         this.texelTextures.clear();
+        this.indexedSpriteTextures.clear();
         this.frameTexture = null;
         this.scratchFrameTexture = null;
         this.bindGroup = null;
@@ -3626,6 +4019,7 @@ export default class WebGpuFramePresenter {
         this.textureTriangleUniformBuffer = null;
         this.rectInstanceUniformBuffer = null;
         this.spriteAlphaUniformBuffer = null;
+        this.indexedSpriteUniformBuffer = null;
         this.transformSpriteUniformBuffer = null;
         this.maskedSpriteUniformBuffer = null;
         this.colourTableTexture = null;

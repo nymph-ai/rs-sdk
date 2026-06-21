@@ -1,4 +1,4 @@
-import { gpuRenderPackets, recordDynamicRgbaSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordDynamicIndexedSprite } from '#/graphics/GpuRenderPackets.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
@@ -66,10 +66,16 @@ function pixelsToImageData(pixels: Int32Array, width: number, height: number): I
     return imageData;
 }
 
-function makeDynamicValidationSprite(seed: number): Uint8Array {
+function makeDynamicValidationSprite(seed: number): { intensities: Uint8Array; palette: Int32Array; lineOffsets: Int32Array } {
     const spriteWidth = 12;
     const spriteHeight = 10;
-    const rgba = new Uint8Array(spriteWidth * spriteHeight * 4);
+    const intensities = new Uint8Array(spriteWidth * spriteHeight);
+    const palette = new Int32Array(256);
+    const lineOffsets = new Int32Array(256);
+
+    for (let i = 1; i < palette.length; i++) {
+        palette[i] = (((0x30 + i * 3 + seed * 17) & 0xff) << 16) | (((0x70 + i * 5 + seed * 19) & 0xff) << 8) | ((0xc0 + i * 7 + seed * 23) & 0xff);
+    }
 
     for (let y = 0; y < spriteHeight; y++) {
         for (let x = 0; x < spriteWidth; x++) {
@@ -77,35 +83,37 @@ function makeDynamicValidationSprite(seed: number): Uint8Array {
                 continue;
             }
 
-            const offset = (x + y * spriteWidth) * 4;
-            rgba[offset] = (0x30 + x * 11 + seed * 17) & 0xff;
-            rgba[offset + 1] = (0x70 + y * 13 + seed * 19) & 0xff;
-            rgba[offset + 2] = (0xc0 + x * 3 + y * 5 + seed * 23) & 0xff;
-            rgba[offset + 3] = 0xff;
+            intensities[x + y * spriteWidth] = (0x40 + x * 11 + y * 13 + seed * 17) & 0xff;
         }
     }
 
-    return rgba;
+    return { intensities, palette, lineOffsets };
+}
+
+function blendRgb(src: number, dst: number, alpha: number): number {
+    const invAlpha = 256 - alpha;
+    return ((((src & 0xff00ff) * alpha + (dst & 0xff00ff) * invAlpha) & 0xff00ff00) + (((src & 0xff00) * alpha + (dst & 0xff00) * invAlpha) & 0xff0000)) >> 8;
 }
 
 function plotDynamicValidationSprite(seed: number, x: number, y: number): void {
     const spriteWidth = 12;
     const spriteHeight = 10;
-    const rgba = makeDynamicValidationSprite(seed);
-    recordDynamicRgbaSprite(
+    const { intensities, palette, lineOffsets } = makeDynamicValidationSprite(seed);
+    recordDynamicIndexedSprite(
         validationDynamicSpriteKey,
-        'validation-dynamic-sprite',
+        'validation-dynamic-indexed-sprite',
         spriteWidth,
         spriteHeight,
-        () => rgba,
+        intensities,
+        palette,
+        lineOffsets,
+        'direct',
         x,
         y,
         spriteWidth,
         spriteHeight,
         0,
         0,
-        spriteWidth,
-        spriteHeight,
         Pix2D.clipMinX,
         Pix2D.clipMinY,
         Pix2D.clipMaxX,
@@ -128,12 +136,13 @@ function plotDynamicValidationSprite(seed: number, x: number, y: number): void {
                 continue;
             }
 
-            const rgbaOffset = (xx + yy * spriteWidth) * 4;
-            if (rgba[rgbaOffset + 3] === 0) {
+            const alpha = intensities[xx + yy * spriteWidth];
+            if (alpha === 0) {
                 continue;
             }
 
-            Pix2D.pixels[dstX + dstY * Pix2D.width] = (rgba[rgbaOffset] << 16) | (rgba[rgbaOffset + 1] << 8) | rgba[rgbaOffset + 2];
+            const dstOffset = dstX + dstY * Pix2D.width;
+            Pix2D.pixels[dstOffset] = blendRgb(palette[alpha], Pix2D.pixels[dstOffset], alpha);
         }
     }
 }
@@ -463,6 +472,7 @@ async function runValidation(): Promise<void> {
         packetReplayStats.nativeGouraudTrianglesReplayed >= nativeGouraudTrianglePackets &&
         packetReplayStats.nativeTextureTrianglesReplayed >= nativeTextureTrianglePackets &&
         packetReplayStats.gpuRectInstancesReplayed > 0 &&
+        packetReplayStats.gpuDynamicIndexedSpritesReplayed > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&

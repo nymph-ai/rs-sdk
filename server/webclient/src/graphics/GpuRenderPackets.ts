@@ -35,6 +35,16 @@ export type GpuTextureResource = {
     version: number;
 };
 
+export type GpuIndexedSpriteResource = {
+    id: number;
+    width: number;
+    height: number;
+    intensityRgba: Uint8Array;
+    paletteRgba: Uint8Array;
+    lineOffsetRgba: Uint8Array;
+    version: number;
+};
+
 type PacketBase = {
     surface: number;
 };
@@ -59,6 +69,18 @@ export type GpuRenderPacket =
           srcWidth: number;
           srcHeight: number;
           alpha: number | null;
+          clip: ClipBounds;
+      })
+    | (PacketBase & {
+          kind: 'indexedSprite';
+          resource: number;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          srcX: number;
+          srcY: number;
+          mode: 'direct' | 'titleFlameLeft' | 'titleFlameRight';
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -167,6 +189,7 @@ export type GpuRenderPacketSnapshot = {
     spriteResources: GpuSpriteResource[];
     colourTableResource: GpuColourTableResource | null;
     textureResources: GpuTextureResource[];
+    indexedSpriteResources: GpuIndexedSpriteResource[];
 };
 
 export type GpuRenderPacketState = {
@@ -202,15 +225,18 @@ declare global {
 const DEFAULT_MAX_PACKETS = 0;
 const surfaceIds = new WeakMap<Int32Array, number>();
 const spriteResourceIds = new WeakMap<object, Map<string, number>>();
+const indexedSpriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
 const spriteResources: GpuSpriteResource[] = [];
 let colourTableResource: GpuColourTableResource | null = null;
 const textureResources: GpuTextureResource[] = [];
+const indexedSpriteResources: GpuIndexedSpriteResource[] = [];
 const recordableSurfaces = new Set<number>();
 const cpuRasterWriteSkipSurfaces = new Set<number>();
 let nextSurface = 1;
 let nextSpriteResource = 1;
+let nextIndexedSpriteResource = 1;
 let currentSurface = 0;
 
 function parseFlag(value: string | null): boolean | null {
@@ -353,6 +379,46 @@ function setSpriteResource(key: object, variant: string, width: number, height: 
     return resource;
 }
 
+function getIndexedSpriteResource(key: object, variant: string): number | null {
+    return indexedSpriteResourceIds.get(key)?.get(variant) ?? null;
+}
+
+function setIndexedSpriteResource(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    intensityRgba: Uint8Array,
+    paletteRgba: Uint8Array,
+    lineOffsetRgba: Uint8Array
+): number {
+    let variants = indexedSpriteResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        indexedSpriteResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextIndexedSpriteResource++;
+        variants.set(variant, resource);
+        indexedSpriteResources.push({ id: resource, width, height, intensityRgba, paletteRgba, lineOffsetRgba, version: 0 });
+        return resource;
+    }
+
+    const existing = indexedSpriteResources.find(item => item.id === resource);
+    if (existing) {
+        existing.width = width;
+        existing.height = height;
+        existing.intensityRgba = intensityRgba;
+        existing.paletteRgba = paletteRgba;
+        existing.lineOffsetRgba = lineOffsetRgba;
+        existing.version++;
+    }
+
+    return resource;
+}
+
 function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
     const rgba = new Uint8Array(256 * 256 * 4);
     const length = Math.min(colourTable.length, 256 * 256);
@@ -362,6 +428,28 @@ function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
         rgba[offset] = (rgb >> 16) & 0xff;
         rgba[offset + 1] = (rgb >> 8) & 0xff;
         rgba[offset + 2] = rgb & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
+function makeIntensityRgba(intensities: ArrayLike<number>, width: number, height: number): Uint8Array {
+    const rgba = new Uint8Array(width * height * 4);
+    const length = Math.min(intensities.length, width * height);
+    for (let i = 0; i < length; i++) {
+        const offset = i * 4;
+        rgba[offset] = intensities[i] & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
+function makeLineOffsetRgba(lineOffsets: ArrayLike<number>): Uint8Array {
+    const rgba = new Uint8Array(256 * 4);
+    const length = Math.min(lineOffsets.length, 256);
+    for (let i = 0; i < length; i++) {
+        const offset = i * 4;
+        rgba[offset] = Math.max(0, Math.min(255, (lineOffsets[i] | 0) + 128));
         rgba[offset + 3] = 0xff;
     }
     return rgba;
@@ -480,7 +568,8 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             cpuRasterWriteSkipSurfaces: Array.from(cpuRasterWriteSkipSurfaces),
             spriteResources: spriteResources.slice(),
             colourTableResource,
-            textureResources: textureResources.slice()
+            textureResources: textureResources.slice(),
+            indexedSpriteResources: indexedSpriteResources.slice()
         };
     }
 };
@@ -598,20 +687,21 @@ export function recordRgbaSprite(
     });
 }
 
-export function recordDynamicRgbaSprite(
+export function recordDynamicIndexedSprite(
     key: object,
     variant: string,
     width: number,
     height: number,
-    makeRgba: () => Uint8Array,
+    intensities: ArrayLike<number>,
+    palette: Int32Array,
+    lineOffsets: ArrayLike<number>,
+    mode: 'direct' | 'titleFlameLeft' | 'titleFlameRight',
     x: number,
     y: number,
     drawWidth: number,
     drawHeight: number,
     srcX: number,
     srcY: number,
-    srcWidth: number,
-    srcHeight: number,
     minX: number,
     minY: number,
     maxX: number,
@@ -621,11 +711,18 @@ export function recordDynamicRgbaSprite(
         return;
     }
 
-    const rgba = makeRgba().slice();
-    const resource = setSpriteResource(key, variant, width, height, rgba, true);
+    const resource = setIndexedSpriteResource(
+        key,
+        variant,
+        width,
+        height,
+        makeIntensityRgba(intensities, width, height),
+        makePaletteRgba(palette),
+        makeLineOffsetRgba(lineOffsets)
+    );
 
     pushPacket({
-        kind: 'rgbaSprite',
+        kind: 'indexedSprite',
         surface: currentSurface,
         resource,
         x,
@@ -634,9 +731,7 @@ export function recordDynamicRgbaSprite(
         height: drawHeight,
         srcX,
         srcY,
-        srcWidth,
-        srcHeight,
-        alpha: null,
+        mode,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
