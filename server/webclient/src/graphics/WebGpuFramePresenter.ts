@@ -356,10 +356,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const MODEL_FLAT_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -371,6 +372,7 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
@@ -422,33 +424,37 @@ struct FragmentOutput {
 };
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: ModelFlatParams;
+@group(0) @binding(1) var<storage, read> modelFlatParams: array<i32>;
 
-fn projectLocal(localX: i32, localY: i32, localZ: i32) -> ProjectedVertex {
+fn modelFlatParam(base: u32, index: u32) -> i32 {
+    return modelFlatParams[base + index];
+}
+
+fn projectLocal(base: u32, localX: i32, localY: i32, localZ: i32) -> ProjectedVertex {
     var x = localX;
     var y = localY;
     var z = localZ;
-    var tmp = (z * params.sinYaw + x * params.cosYaw) >> 16;
-    z = (z * params.cosYaw - x * params.sinYaw) >> 16;
+    var tmp = (z * modelFlatParam(base, 9u) + x * modelFlatParam(base, 10u)) >> 16;
+    z = (z * modelFlatParam(base, 10u) - x * modelFlatParam(base, 9u)) >> 16;
     x = tmp;
 
-    x = x + params.relativeX;
-    y = y + params.relativeY;
-    z = z + params.relativeZ;
+    x = x + modelFlatParam(base, 15u);
+    y = y + modelFlatParam(base, 16u);
+    z = z + modelFlatParam(base, 17u);
 
-    tmp = (z * params.sinEyeYaw + x * params.cosEyeYaw) >> 16;
-    z = (z * params.cosEyeYaw - x * params.sinEyeYaw) >> 16;
+    tmp = (z * modelFlatParam(base, 13u) + x * modelFlatParam(base, 14u)) >> 16;
+    z = (z * modelFlatParam(base, 14u) - x * modelFlatParam(base, 13u)) >> 16;
     x = tmp;
 
-    tmp = (y * params.cosEyePitch - z * params.sinEyePitch) >> 16;
-    z = (y * params.sinEyePitch + z * params.cosEyePitch) >> 16;
+    tmp = (y * modelFlatParam(base, 12u) - z * modelFlatParam(base, 11u)) >> 16;
+    z = (y * modelFlatParam(base, 11u) + z * modelFlatParam(base, 12u)) >> 16;
     y = tmp;
 
     if (z < 50) {
         return ProjectedVertex(0, 0, z, 0);
     }
 
-    return ProjectedVertex(params.originX + ((x << 9) / z), params.originY + ((y << 9) / z), z, 1);
+    return ProjectedVertex(modelFlatParam(base, 18u) + ((x << 9) / z), modelFlatParam(base, 19u) + ((y << 9) / z), z, 1);
 }
 
 fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
@@ -471,7 +477,7 @@ fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, 
     return edgeX(xMid, yMid, lowerStep, y);
 }
 
-fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
+fn inOrderedTriangle(base: u32, pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
     if (yTop >= yBot || pixel.y < yTop || pixel.y >= yBot) {
         return false;
     }
@@ -482,7 +488,7 @@ fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i3
     let longX = edgeX(xTop, yTop, longStep, pixel.y);
     let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, pixel.y);
 
-    var sampleY = max(yTop, params.clipMinY);
+    var sampleY = max(yTop, modelFlatParam(base, 23u));
     if (sampleY >= yBot) {
         sampleY = yTop;
     }
@@ -510,36 +516,36 @@ fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i3
     return pixel.x >= startX && pixel.x < endX;
 }
 
-fn inProjectedTriangle(pixel: vec2<i32>) -> bool {
-    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+fn inProjectedTriangle(base: u32, pixel: vec2<i32>) -> bool {
+    if (pixel.x < modelFlatParam(base, 22u) || pixel.x >= modelFlatParam(base, 24u) || pixel.y < modelFlatParam(base, 23u) || pixel.y >= modelFlatParam(base, 25u)) {
         return false;
     }
 
-    let a = projectLocal(params.xA, params.yA, params.zA);
-    let b = projectLocal(params.xB, params.yB, params.zB);
-    let c = projectLocal(params.xC, params.yC, params.zC);
+    let a = projectLocal(base, modelFlatParam(base, 0u), modelFlatParam(base, 1u), modelFlatParam(base, 2u));
+    let b = projectLocal(base, modelFlatParam(base, 3u), modelFlatParam(base, 4u), modelFlatParam(base, 5u));
+    let c = projectLocal(base, modelFlatParam(base, 6u), modelFlatParam(base, 7u), modelFlatParam(base, 8u));
     if (a.valid == 0 || b.valid == 0 || c.valid == 0) {
         return false;
     }
 
     if (a.y <= b.y && a.y <= c.y) {
         if (b.y < c.y) {
-            return inOrderedTriangle(pixel, a.x, a.y, b.x, b.y, c.x, c.y);
+            return inOrderedTriangle(base, pixel, a.x, a.y, b.x, b.y, c.x, c.y);
         }
-        return inOrderedTriangle(pixel, a.x, a.y, c.x, c.y, b.x, b.y);
+        return inOrderedTriangle(base, pixel, a.x, a.y, c.x, c.y, b.x, b.y);
     }
 
     if (b.y <= c.y) {
         if (c.y < a.y) {
-            return inOrderedTriangle(pixel, b.x, b.y, c.x, c.y, a.x, a.y);
+            return inOrderedTriangle(base, pixel, b.x, b.y, c.x, c.y, a.x, a.y);
         }
-        return inOrderedTriangle(pixel, b.x, b.y, a.x, a.y, c.x, c.y);
+        return inOrderedTriangle(base, pixel, b.x, b.y, a.x, a.y, c.x, c.y);
     }
 
     if (a.y < b.y) {
-        return inOrderedTriangle(pixel, c.x, c.y, a.x, a.y, b.x, b.y);
+        return inOrderedTriangle(base, pixel, c.x, c.y, a.x, a.y, b.x, b.y);
     }
-    return inOrderedTriangle(pixel, c.x, c.y, b.x, b.y, a.x, a.y);
+    return inOrderedTriangle(base, pixel, c.x, c.y, b.x, b.y, a.x, a.y);
 }
 
 fn toByte(channel: f32) -> u32 {
@@ -559,17 +565,18 @@ fn nextPixel(pixel: vec2<i32>) -> vec2<i32> {
 @fragment
 fn fs(input: VertexOutput) -> FragmentOutput {
     let pixel = vec2<i32>(floor(input.position.xy));
-    if (!inProjectedTriangle(pixel)) {
+    let paramBase = input.paramBase;
+    if (!inProjectedTriangle(paramBase, pixel)) {
         discard;
     }
 
-    let a = projectLocal(params.xA, params.yA, params.zA);
-    let b = projectLocal(params.xB, params.yB, params.zB);
-    let c = projectLocal(params.xC, params.yC, params.zC);
+    let a = projectLocal(paramBase, modelFlatParam(paramBase, 0u), modelFlatParam(paramBase, 1u), modelFlatParam(paramBase, 2u));
+    let b = projectLocal(paramBase, modelFlatParam(paramBase, 3u), modelFlatParam(paramBase, 4u), modelFlatParam(paramBase, 5u));
+    let c = projectLocal(paramBase, modelFlatParam(paramBase, 6u), modelFlatParam(paramBase, 7u), modelFlatParam(paramBase, 8u));
     let faceDepth = clamp(f32((a.z + b.z + c.z) / 3) / 3500.0, 0.0, 1.0);
     let base = textureLoad(sourceTexture, pixel, 0);
-    let rgb = u32(params.rgb);
-    let alpha = u32(params.alpha);
+    let rgb = u32(modelFlatParam(paramBase, 20u));
+    let alpha = u32(modelFlatParam(paramBase, 21u));
     let srcR = (rgb >> 16u) & 255u;
     let srcG = (rgb >> 8u) & 255u;
     let srcB = rgb & 255u;
@@ -844,10 +851,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const TEXTURE_TRIANGLE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -859,6 +867,7 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
@@ -907,7 +916,11 @@ struct TextureSpan {
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var textureIndices: texture_2d<u32>;
 @group(0) @binding(2) var texturePalette: texture_2d<u32>;
-@group(0) @binding(3) var<uniform> params: TextureTriangleParams;
+@group(0) @binding(3) var<storage, read> textureTriangleParams: array<i32>;
+
+fn textureParam(base: u32, index: u32) -> i32 {
+    return textureTriangleParams[base + index];
+}
 
 fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
     if (y0 == y1) {
@@ -953,7 +966,7 @@ fn shortEdgeShade(shadeTop: i32, yTop: i32, shadeMid: i32, yMid: i32, shadeBot: 
     return edgeShade(shadeMid, yMid, lowerStep, y);
 }
 
-fn orderedTextureSpan(pixelY: i32, xTop: i32, yTop: i32, shadeTop: i32, xMid: i32, yMid: i32, shadeMid: i32, xBot: i32, yBot: i32, shadeBot: i32) -> TextureSpan {
+fn orderedTextureSpan(base: u32, pixelY: i32, xTop: i32, yTop: i32, shadeTop: i32, xMid: i32, yMid: i32, shadeMid: i32, xBot: i32, yBot: i32, shadeBot: i32) -> TextureSpan {
     if (yTop >= yBot || pixelY < yTop || pixelY >= yBot) {
         return emptyTextureSpan();
     }
@@ -970,7 +983,7 @@ fn orderedTextureSpan(pixelY: i32, xTop: i32, yTop: i32, shadeTop: i32, xMid: i3
     let longShade = edgeShade(shadeTop, yTop, longShadeStep, pixelY);
     let shortShade = shortEdgeShade(shadeTop, yTop, shadeMid, yMid, shadeBot, yBot, upperShadeStep, lowerShadeStep, pixelY);
 
-    var sampleY = max(yTop, params.clipMinY);
+    var sampleY = max(yTop, textureParam(base, 24u));
     if (sampleY >= yBot) {
         sampleY = yTop;
     }
@@ -991,25 +1004,25 @@ fn orderedTextureSpan(pixelY: i32, xTop: i32, yTop: i32, shadeTop: i32, xMid: i3
     return TextureSpan(shortX, longX, shortShade, longShade, 1);
 }
 
-fn textureSpan(pixelY: i32) -> TextureSpan {
-    if (params.yA <= params.yB && params.yA <= params.yC) {
-        if (params.yB < params.yC) {
-            return orderedTextureSpan(pixelY, params.xA, params.yA, params.shadeA, params.xB, params.yB, params.shadeB, params.xC, params.yC, params.shadeC);
+fn textureSpan(base: u32, pixelY: i32) -> TextureSpan {
+    if (textureParam(base, 1u) <= textureParam(base, 3u) && textureParam(base, 1u) <= textureParam(base, 5u)) {
+        if (textureParam(base, 3u) < textureParam(base, 5u)) {
+            return orderedTextureSpan(base, pixelY, textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u), textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u), textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u));
         }
-        return orderedTextureSpan(pixelY, params.xA, params.yA, params.shadeA, params.xC, params.yC, params.shadeC, params.xB, params.yB, params.shadeB);
+        return orderedTextureSpan(base, pixelY, textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u), textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u), textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u));
     }
 
-    if (params.yB <= params.yC) {
-        if (params.yC < params.yA) {
-            return orderedTextureSpan(pixelY, params.xB, params.yB, params.shadeB, params.xC, params.yC, params.shadeC, params.xA, params.yA, params.shadeA);
+    if (textureParam(base, 3u) <= textureParam(base, 5u)) {
+        if (textureParam(base, 5u) < textureParam(base, 1u)) {
+            return orderedTextureSpan(base, pixelY, textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u), textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u), textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u));
         }
-        return orderedTextureSpan(pixelY, params.xB, params.yB, params.shadeB, params.xA, params.yA, params.shadeA, params.xC, params.yC, params.shadeC);
+        return orderedTextureSpan(base, pixelY, textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u), textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u), textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u));
     }
 
-    if (params.yA < params.yB) {
-        return orderedTextureSpan(pixelY, params.xC, params.yC, params.shadeC, params.xA, params.yA, params.shadeA, params.xB, params.yB, params.shadeB);
+    if (textureParam(base, 1u) < textureParam(base, 3u)) {
+        return orderedTextureSpan(base, pixelY, textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u), textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u), textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u));
     }
-    return orderedTextureSpan(pixelY, params.xC, params.yC, params.shadeC, params.xB, params.yB, params.shadeB, params.xA, params.yA, params.shadeA);
+    return orderedTextureSpan(base, pixelY, textureParam(base, 4u), textureParam(base, 5u), textureParam(base, 8u), textureParam(base, 2u), textureParam(base, 3u), textureParam(base, 7u), textureParam(base, 0u), textureParam(base, 1u), textureParam(base, 6u));
 }
 
 fn shadePaletteRgb(index: u32, shadePlane: i32, shadeShift: i32) -> u32 {
@@ -1026,13 +1039,13 @@ fn shadePaletteRgb(index: u32, shadePlane: i32, shadeShift: i32) -> u32 {
     return rgb >> u32(shadeShift);
 }
 
-fn textureIndexAt(x: i32, y: i32) -> u32 {
-    let clampedX = clamp(x, 0, max(params.textureWidth - 1, 0));
-    let clampedY = clamp(y, 0, max(params.textureHeight - 1, 0));
+fn textureIndexAt(base: u32, x: i32, y: i32) -> u32 {
+    let clampedX = clamp(x, 0, max(textureParam(base, 27u) - 1, 0));
+    let clampedY = clamp(y, 0, max(textureParam(base, 28u) - 1, 0));
     return textureLoad(textureIndices, vec2<i32>(clampedX, clampedY), 0).r;
 }
 
-fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
+fn textureRawRgb(base: u32, span: TextureSpan, pixel: vec2<i32>) -> u32 {
     if (span.valid == 0 || span.startX >= span.endX || pixel.x < span.startX || pixel.x >= span.endX) {
         return 0xffffffffu;
     }
@@ -1041,14 +1054,14 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
     var endX = span.endX;
     var startShade = span.startShade;
     var shadeStride: i32;
-    if (params.hclip != 0) {
+    if (textureParam(base, 20u) != 0) {
         shadeStride = (span.endShade - span.startShade) / (span.endX - span.startX);
-        if (endX > params.clipMaxX - 1) {
-            endX = params.clipMaxX - 1;
+        if (endX > textureParam(base, 25u) - 1) {
+            endX = textureParam(base, 25u) - 1;
         }
-        if (startX < params.clipMinX) {
-            startShade -= (startX - params.clipMinX) * shadeStride;
-            startX = params.clipMinX;
+        if (startX < textureParam(base, 23u)) {
+            startShade -= (startX - textureParam(base, 23u)) * shadeStride;
+            startX = textureParam(base, 23u);
         }
         if (startX >= endX || pixel.x < startX || pixel.x >= endX) {
             return 0xffffffffu;
@@ -1068,25 +1081,25 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
     let groupPixel = localX & 7;
     let shadeBase = (startShade << 9) + shadeStride * group;
 
-    let verticalX = params.texOriginX - params.txB;
-    let verticalY = params.texOriginY - params.tyB;
-    let verticalZ = params.texOriginZ - params.tzB;
-    let horizontalX = params.txC - params.texOriginX;
-    let horizontalY = params.tyC - params.texOriginY;
-    let horizontalZ = params.tzC - params.texOriginZ;
+    let verticalX = textureParam(base, 9u) - textureParam(base, 12u);
+    let verticalY = textureParam(base, 10u) - textureParam(base, 14u);
+    let verticalZ = textureParam(base, 11u) - textureParam(base, 16u);
+    let horizontalX = textureParam(base, 13u) - textureParam(base, 9u);
+    let horizontalY = textureParam(base, 15u) - textureParam(base, 10u);
+    let horizontalZ = textureParam(base, 17u) - textureParam(base, 11u);
 
-    let baseU = (horizontalX * params.texOriginY - horizontalY * params.texOriginX) << 14;
-    let uStride = (horizontalY * params.texOriginZ - horizontalZ * params.texOriginY) << 8;
-    let uStepVertical = (horizontalZ * params.texOriginX - horizontalX * params.texOriginZ) << 5;
-    let baseV = (verticalX * params.texOriginY - verticalY * params.texOriginX) << 14;
-    let vStride = (verticalY * params.texOriginZ - verticalZ * params.texOriginY) << 8;
-    let vStepVertical = (verticalZ * params.texOriginX - verticalX * params.texOriginZ) << 5;
+    let baseU = (horizontalX * textureParam(base, 10u) - horizontalY * textureParam(base, 9u)) << 14;
+    let uStride = (horizontalY * textureParam(base, 11u) - horizontalZ * textureParam(base, 10u)) << 8;
+    let uStepVertical = (horizontalZ * textureParam(base, 9u) - horizontalX * textureParam(base, 11u)) << 5;
+    let baseV = (verticalX * textureParam(base, 10u) - verticalY * textureParam(base, 9u)) << 14;
+    let vStride = (verticalY * textureParam(base, 11u) - verticalZ * textureParam(base, 10u)) << 8;
+    let vStepVertical = (verticalZ * textureParam(base, 9u) - verticalX * textureParam(base, 11u)) << 5;
     let baseW = (verticalY * horizontalX - verticalX * horizontalY) << 14;
     let wStride = (verticalZ * horizontalY - verticalY * horizontalZ) << 8;
     let wStepVertical = (verticalX * horizontalZ - verticalZ * horizontalX) << 5;
 
-    let rowDelta = pixel.y - params.screenOriginY;
-    let dx = startX - params.screenOriginX;
+    let rowDelta = pixel.y - textureParam(base, 22u);
+    let dx = startX - textureParam(base, 21u);
     let uStart = baseU + uStepVertical * rowDelta + (uStride >> 3) * dx;
     let vStart = baseV + vStepVertical * rowDelta + (vStride >> 3) * dx;
     let wStart = baseW + wStepVertical * rowDelta + (wStride >> 3) * dx;
@@ -1101,7 +1114,7 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
     var curV = 0;
     var nextU = 0;
     var nextV = 0;
-    if (params.lowMem != 0) {
+    if (textureParam(base, 18u) != 0) {
         let curW = wGroup >> 12;
         if (curW != 0) {
             curU = uGroup / curW;
@@ -1130,7 +1143,7 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
         let shadeShift = shadeBase >> 23;
         let sampleU = curU + stepU * groupPixel;
         let sampleV = curV + stepV * groupPixel;
-        let index = textureIndexAt(sampleU >> 6, (sampleV & 0xfc0) >> 6);
+        let index = textureIndexAt(base, sampleU >> 6, (sampleV & 0xfc0) >> 6);
         return shadePaletteRgb(index, shadePlane, shadeShift);
     }
 
@@ -1164,11 +1177,11 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
     let sampleV = curV + stepV * groupPixel;
     var texX = sampleU >> 7;
     var texY = (sampleV & 0x3f80) >> 7;
-    if (params.textureWidth == 64) {
+    if (textureParam(base, 27u) == 64) {
         texX = texX >> 1;
         texY = texY >> 1;
     }
-    let index = textureIndexAt(texX, texY);
+    let index = textureIndexAt(base, texX, texY);
     return shadePaletteRgb(index, shadePlane, shadeShift);
 }
 
@@ -1176,13 +1189,14 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
-    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+    let paramBase = input.paramBase;
+    if (pixel.x < textureParam(paramBase, 23u) || pixel.x >= textureParam(paramBase, 25u) || pixel.y < textureParam(paramBase, 24u) || pixel.y >= textureParam(paramBase, 26u)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let span = textureSpan(pixel.y);
-    let rgb = textureRawRgb(span, pixel);
-    if (rgb == 0xffffffffu || (params.opaque == 0 && rgb == 0u)) {
+    let span = textureSpan(paramBase, pixel.y);
+    let rgb = textureRawRgb(paramBase, span, pixel);
+    if (rgb == 0xffffffffu || (textureParam(paramBase, 19u) == 0 && rgb == 0u)) {
         return vec4f(base.rgb, 1.0);
     }
 
@@ -2117,6 +2131,8 @@ export type WebGpuPacketReplayStats = {
     gpuGlyphBindGroupsReused: number;
     gpuSpriteFamilyStorageDrawsReplayed: number;
     gpuSpriteFamilyBindGroupsReused: number;
+    gpuTriangleStorageDrawsReplayed: number;
+    gpuTriangleBindGroupsReused: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2291,6 +2307,8 @@ export default class WebGpuFramePresenter {
     private readonly indexedSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
     private readonly transformSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
     private readonly maskedSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, Map<GpuTexture, object>>>();
+    private readonly modelFlatReplayBindGroups = new Map<GpuTexture, object>();
+    private readonly textureTriangleReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
     private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
     private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
@@ -2363,6 +2381,8 @@ export default class WebGpuFramePresenter {
             gpuGlyphBindGroupsReused: 0,
             gpuSpriteFamilyStorageDrawsReplayed: 0,
             gpuSpriteFamilyBindGroupsReused: 0,
+            gpuTriangleStorageDrawsReplayed: 0,
+            gpuTriangleBindGroupsReused: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2809,6 +2829,7 @@ export default class WebGpuFramePresenter {
         this.modelDepthTexture?.destroy();
         this.glyphReplayBindGroups.clear();
         this.clearSpriteFamilyReplayBindGroups();
+        this.clearTriangleReplayBindGroups();
         this.width = Math.max(1, this.sourceCanvas.width);
         this.height = Math.max(1, this.sourceCanvas.height);
 
@@ -3596,23 +3617,7 @@ export default class WebGpuFramePresenter {
         params[25] = op.clip.y + op.clip.height;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.modelFlatPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getModelFlatBindGroup(this.frameTexture);
         const clearDepth = this.modelDepthClearPending;
         this.modelDepthClearPending = false;
         this.copyReplayTextureToTexture(
@@ -3644,7 +3649,7 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.modelFlatPipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
 
         const oldFrameTexture = this.frameTexture;
@@ -3652,6 +3657,7 @@ export default class WebGpuFramePresenter {
         this.scratchFrameTexture = oldFrameTexture;
         this.packetReplayStats.gpuModelFlatTrianglesReplayed++;
         this.packetReplayStats.gpuRetainedDepthPassesReplayed++;
+        this.packetReplayStats.gpuTriangleStorageDrawsReplayed++;
     }
 
     private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource, context: PacketReplayContext): void {
@@ -3742,31 +3748,7 @@ export default class WebGpuFramePresenter {
         params[28] = resource.height;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.textureTrianglePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: texels.indexTexture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: texels.paletteTexture.createView()
-                },
-                {
-                    binding: 3,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getTextureTriangleBindGroup(this.frameTexture, texels.indexTexture, texels.paletteTexture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -3780,8 +3762,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.textureTrianglePipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuTriangleStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4303,6 +4286,7 @@ export default class WebGpuFramePresenter {
         if (cached) {
             cached.indexTexture.destroy();
             cached.paletteTexture.destroy();
+            this.textureTriangleReplayBindGroups.clear();
             this.texelTextures.delete(resource.id);
         }
 
@@ -4541,6 +4525,7 @@ export default class WebGpuFramePresenter {
         this.frameUniformBuffer?.destroy();
         this.glyphReplayBindGroups.clear();
         this.clearSpriteFamilyReplayBindGroups();
+        this.clearTriangleReplayBindGroups();
         this.frameUniformBufferBytes = alignTo(byteLength, UNIFORM_BUFFER_ALIGNMENT);
         this.frameUniformBuffer = this.device.createBuffer({
             size: this.frameUniformBufferBytes,
@@ -4957,6 +4942,85 @@ export default class WebGpuFramePresenter {
         return bindGroup;
     }
 
+    private clearTriangleReplayBindGroups(): void {
+        this.modelFlatReplayBindGroups.clear();
+        this.textureTriangleReplayBindGroups.clear();
+    }
+
+    private getModelFlatBindGroup(sourceTexture: GpuTexture): object {
+        const cached = this.modelFlatReplayBindGroups.get(sourceTexture);
+        if (cached) {
+            this.packetReplayStats.gpuTriangleBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('model flat parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.modelFlatPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        this.modelFlatReplayBindGroups.set(sourceTexture, bindGroup);
+        return bindGroup;
+    }
+
+    private getTextureTriangleBindGroup(sourceTexture: GpuTexture, indexTexture: GpuTexture, paletteTexture: GpuTexture): object {
+        let sourceBindGroups = this.textureTriangleReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, object>();
+            this.textureTriangleReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        const cached = sourceBindGroups.get(indexTexture);
+        if (cached) {
+            this.packetReplayStats.gpuTriangleBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('texture triangle parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.textureTrianglePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: indexTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: paletteTexture.createView()
+                },
+                {
+                    binding: 3,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        sourceBindGroups.set(indexTexture, bindGroup);
+        return bindGroup;
+    }
+
     private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
         this.packetReplayStats.gpuRenderPassesEncoded++;
         return context.encoder.beginRenderPass(descriptor);
@@ -5067,6 +5131,7 @@ export default class WebGpuFramePresenter {
         this.glyphTextures.clear();
         this.glyphReplayBindGroups.clear();
         this.clearSpriteFamilyReplayBindGroups();
+        this.clearTriangleReplayBindGroups();
         this.texelTextures.clear();
         this.indexedSpriteTextures.clear();
         this.frameTexture = null;
