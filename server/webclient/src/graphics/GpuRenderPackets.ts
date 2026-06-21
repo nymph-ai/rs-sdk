@@ -62,6 +62,19 @@ export type GpuRenderPacket =
           clip: ClipBounds;
       })
     | (PacketBase & {
+          kind: 'maskedSprite';
+          resource: number;
+          maskResource: number;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          srcX: number;
+          srcY: number;
+          maskStride: number;
+          clip: ClipBounds;
+      })
+    | (PacketBase & {
           kind: 'triangleGouraud';
           xA: number;
           xB: number;
@@ -457,6 +470,75 @@ export function recordTransformSprite(
         rowStepY,
         sourceStride,
         transparentZero,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
+}
+
+export function recordMaskedSprite(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    makeRgba: () => Uint8Array,
+    maskKey: object,
+    maskVariant: string,
+    maskWidth: number,
+    maskHeight: number,
+    makeMaskRgba: () => Uint8Array,
+    x: number,
+    y: number,
+    drawWidth: number,
+    drawHeight: number,
+    srcX: number,
+    srcY: number,
+    maskStride: number,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+): void {
+    if (!gpuRenderPackets.enabled) {
+        return;
+    }
+
+    let variants = spriteResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        spriteResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextSpriteResource++;
+        variants.set(variant, resource);
+        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
+    }
+
+    let maskVariants = spriteResourceIds.get(maskKey);
+    if (!maskVariants) {
+        maskVariants = new Map();
+        spriteResourceIds.set(maskKey, maskVariants);
+    }
+
+    let maskResource = maskVariants.get(maskVariant);
+    if (!maskResource) {
+        maskResource = nextSpriteResource++;
+        maskVariants.set(maskVariant, maskResource);
+        spriteResources.push({ id: maskResource, width: maskWidth, height: maskHeight, rgba: makeMaskRgba() });
+    }
+
+    pushPacket({
+        kind: 'maskedSprite',
+        surface: currentSurface,
+        resource,
+        maskResource,
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+        srcX,
+        srcY,
+        maskStride,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }

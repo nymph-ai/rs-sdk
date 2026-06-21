@@ -99,6 +99,29 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     rgbSprite.transPlotSprite(68, 84, 128);
     rgbSprite.rotatePlotSprite(122, 84, 10, 8, 5, 4, 0.35, 256);
 
+    const mask = new Pix8(width, height, Int32Array.of(0, 0xffffff));
+    for (let yy = 98; yy < 106; yy++) {
+        for (let xx = 118; xx < 128; xx++) {
+            if (((xx + yy) % 3) === 0) {
+                mask.data[xx + yy * width] = 1;
+            }
+        }
+    }
+    rgbSprite.scanlinePlotSprite(mask, 118, 98);
+
+    rgbSprite.scanlineRotatePlotSprite(
+        140,
+        98,
+        10,
+        8,
+        5,
+        4,
+        120,
+        256,
+        Int32Array.of(1, 0, 0, 1, 2, 1, 0, 3),
+        Int32Array.of(6, 8, 7, 6, 5, 7, 8, 4)
+    );
+
     const font = new PixFont();
     const glyph = new Int8Array([
         1, 1, 1, 0, 1,

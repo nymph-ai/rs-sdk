@@ -1,6 +1,6 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import { decodeJpeg } from '#/graphics/Jpeg.js';
-import { recordRgbaSprite, recordTransformSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
+import { recordMaskedSprite, recordRgbaSprite, recordTransformSprite } from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -361,6 +361,22 @@ export default class Pix32 extends Pix2D {
         return rgba;
     }
 
+    private static makeMaskRgba(mask: Pix8): Uint8Array {
+        const rgba = new Uint8Array(mask.wi * mask.hi * 4);
+        for (let i = 0; i < mask.data.length; i++) {
+            if (mask.data[i] === 0) {
+                continue;
+            }
+
+            const offset = i * 4;
+            rgba[offset] = 0xff;
+            rgba[offset + 1] = 0xff;
+            rgba[offset + 2] = 0xff;
+            rgba[offset + 3] = 0xff;
+        }
+        return rgba;
+    }
+
     private plot(w: number, h: number, src: Int32Array, srcOff: number, srcStep: number, dst: Int32Array, dstOff: number, dstStep: number): void {
         const qw: number = -(w >> 2);
         w = -(w & 0x3);
@@ -500,7 +516,6 @@ export default class Pix32 extends Pix2D {
     }
 
     scanlineRotatePlotSprite(x: number, y: number, w: number, h: number, anchorX: number, anchorY: number, theta: number, zoom: number, lineStart: Int32Array, lineWidth: Int32Array): void {
-        recordUnsupported('Pix32.scanlineRotatePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
         w |= 0;
@@ -521,12 +536,38 @@ export default class Pix32 extends Pix2D {
 
             for (let i: number = 0; i < h; i++) {
                 const dstOff: number = lineStart[i];
+                const rowWidth: number = lineWidth[i];
+                if (rowWidth > 0) {
+                    recordTransformSprite(
+                        this,
+                        'pix32:opaque-linear',
+                        this.wi,
+                        this.hi,
+                        () => this.makeRgba(false),
+                        x + dstOff,
+                        y + i,
+                        rowWidth,
+                        1,
+                        leftX + cosZoom * dstOff,
+                        leftY - sinZoom * dstOff,
+                        cosZoom,
+                        -sinZoom,
+                        sinZoom,
+                        cosZoom,
+                        this.wi,
+                        false,
+                        0,
+                        0,
+                        Pix2D.width,
+                        Pix2D.height
+                    );
+                }
                 let dstX: number = leftOff + dstOff;
 
                 let srcX: number = leftX + cosZoom * dstOff;
                 let srcY: number = leftY - sinZoom * dstOff;
 
-                for (let j: number = -lineWidth[i]; j < 0; j++) {
+                for (let j: number = -rowWidth; j < 0; j++) {
                     Pix2D.pixels[dstX++] = this.data[(srcX >> 16) + (srcY >> 16) * this.wi];
                     srcX += cosZoom;
                     srcY -= sinZoom;
@@ -610,7 +651,6 @@ export default class Pix32 extends Pix2D {
     }
 
     scanlinePlotSprite(mask: Pix8, x: number, y: number): void {
-        recordUnsupported('Pix32.scanlinePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
 
@@ -654,6 +694,29 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            recordMaskedSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                mask,
+                `pix8-mask:${mask.wi}x${mask.hi}`,
+                mask.wi,
+                mask.hi,
+                () => Pix32.makeMaskRgba(mask),
+                x,
+                y,
+                w,
+                h,
+                srcStep % this.wi,
+                (srcStep / this.wi) | 0,
+                Pix2D.width,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
             this.plotScanline(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, mask.data);
         }
     }
