@@ -156,6 +156,42 @@ if (viewerScript) {
 }
 fs.copyFileSync('src/3rdparty/tinymidipcm/tinymidipcm.wasm', 'out/viewer/tinymidipcm.wasm');
 
+// Build standalone renderer validation page. This is intentionally separate from
+// the game client so WebGPU readback can be tested against the CPU canvas oracle
+// without requiring a login session.
+console.log('Building renderer validation...');
+if (!fs.existsSync('out/renderer-validation')) {
+    fs.mkdirSync('out/renderer-validation', { recursive: true });
+}
+const validationScript = await bunBuild(
+    'src/graphics/RendererValidation.ts',
+    [],
+    prod,
+    prod ? ['console'] : []
+);
+if (validationScript) {
+    if (prod) {
+        await applyTerser(validationScript);
+    }
+    fs.writeFileSync('out/renderer-validation/renderer-validation.js', validationScript.source);
+    fs.writeFileSync('out/renderer-validation/renderer-validation.js.map', validationScript.sourcemap);
+    fs.writeFileSync(
+        'out/renderer-validation/index.html',
+        `<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>RS-SDK Renderer Validation</title>
+</head>
+<body>
+    <h1>RS-SDK Renderer Validation</h1>
+    <script type="module" src="./renderer-validation.js"></script>
+</body>
+</html>
+`
+    );
+}
+
 // Copy bot client to root out for backwards compatibility
 if (buildMode === 'both' || buildMode === 'bot') {
     for (const ep of entrypoints) {

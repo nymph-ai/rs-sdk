@@ -1,4 +1,9 @@
 import Pix2D from '#/graphics/Pix2D.js';
+import {
+    recordFlatTriangle,
+    recordGouraudTriangle,
+    recordTextureTriangle
+} from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -330,6 +335,13 @@ export default class Pix3D extends Pix2D {
         yA: number, yB: number, yC: number,
         colourA: number, colourB: number, colourC: number
     ): void {
+        recordGouraudTriangle(
+            xA, xB, xC,
+            yA, yB, yC,
+            colourA, colourB, colourC,
+            Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
+        );
+
         let xStepAB: number = 0;
         let colourStepAB: number = 0;
         if (yB !== yA) {
@@ -1055,6 +1067,13 @@ export default class Pix3D extends Pix2D {
         yA: number, yB: number, yC: number,
         colour: number
     ): void {
+        recordFlatTriangle(
+            xA, xB, xC,
+            yA, yB, yC,
+            colour,
+            Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
+        );
+
         let xStepAB: number = 0;
         if (yB !== yA) {
             xStepAB = (((xB - xA) << 16) / (yB - yA)) | 0;
@@ -1628,6 +1647,20 @@ export default class Pix3D extends Pix2D {
     ): void {
         const texels: Int32Array | null = this.getTexels(texture);
         this.opaque = !this.texTrans[texture];
+        recordTextureTriangle(
+            xA, xB, xC,
+            yA, yB, yC,
+            shadeA, shadeB, shadeC,
+            originX, originY, originZ,
+            txB, txC,
+            tyB, tyC,
+            tzB, tzC,
+            texture,
+            Boolean(texels),
+            this.lowDetail,
+            this.opaque,
+            Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
+        );
 
         const verticalX: number = originX - txB;
         const verticalY: number = originY - tyB;

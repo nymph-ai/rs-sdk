@@ -24,6 +24,65 @@ localStorage.setItem('rs-sdk.renderer', 'canvas')
 
 This does not yet make the client "fully GPU rendered." It removes the browser 2D canvas `putImageData` presentation path from the hot path when WebGPU is available, but the software rasterizer still produces the source pixels on the CPU.
 
+## CPU Oracle Validation
+
+The WebGPU presentation path has an opt-in readback validator. It copies sampled GPU texture regions back into a mapped buffer and compares them byte-for-byte against the classical CPU renderer's `ImageData`.
+
+Enable validation in the live client with:
+
+```text
+?rendererValidation=1
+```
+
+Runtime stats are exposed at:
+
+```js
+window.__rsSdkRendererStats
+```
+
+There is also a standalone deterministic validation page:
+
+```sh
+cd server/webclient
+bun run serve:renderer-validation
+```
+
+Then open:
+
+```text
+http://localhost:8890/
+```
+
+This page exercises full-frame uploads, offset uploads, negative-origin clipping, and right/bottom clipping against the CPU canvas oracle. It reports final status through:
+
+```js
+window.__rsSdkRendererValidation
+```
+
+## Render Packet Boundary
+
+The branch also records the current software renderer's draw intent behind an opt-in packet stream. This is the handoff format for replacing CPU `Pix2D` primitives and `Pix3D` triangle scan conversion with WebGPU render passes while the CPU renderer remains available as the oracle.
+
+Enable packet capture with:
+
+```text
+?rendererPackets=1
+```
+
+or:
+
+```js
+localStorage.setItem('rs-sdk.rendererPackets', '1')
+```
+
+Captured packets and counters are exposed at:
+
+```js
+window.__rsSdkGpuRenderPackets
+```
+
+The stream currently covers surface targets, clipping, clears, filled rectangles, alpha rectangles, horizontal/vertical lines, filled circles, flat triangles, Gouraud triangles, and textured triangles. When packet capture is disabled, hot-path hooks return before allocating packet objects.
+
 ## Full WebGPU Renderer Target
 
 The real performance target is to replace the `Pix2D`/`Pix3D` software renderer with GPU-native passes:
