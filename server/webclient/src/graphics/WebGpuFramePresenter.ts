@@ -1306,10 +1306,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const GLYPH_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -1321,31 +1322,17 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
-struct GlyphParams {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    srcX: i32,
-    srcY: i32,
-    rgb: i32,
-    alpha: i32,
-    _pad0: i32,
-    _pad1: i32,
-    _pad2: i32,
-    _pad3: i32,
-    _pad4: i32,
-    _pad5: i32,
-    _pad6: i32,
-    _pad7: i32,
-};
-
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var glyphTexture: texture_2d<u32>;
-@group(0) @binding(2) var<uniform> params: GlyphParams;
+@group(0) @binding(2) var<storage, read> glyphParams: array<i32>;
+
+fn glyphParam(base: u32, index: u32) -> i32 {
+    return glyphParams[base + index];
+}
 
 fn toByte(channel: f32) -> u32 {
     return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
@@ -1360,11 +1347,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
 
-    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+    if (pixel.x < glyphParam(input.paramBase, 0u) || pixel.x >= glyphParam(input.paramBase, 0u) + glyphParam(input.paramBase, 2u) || pixel.y < glyphParam(input.paramBase, 1u) || pixel.y >= glyphParam(input.paramBase, 1u) + glyphParam(input.paramBase, 3u)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let glyphPixel = vec2<i32>(params.srcX + pixel.x - params.x, params.srcY + pixel.y - params.y);
+    let glyphPixel = vec2<i32>(glyphParam(input.paramBase, 4u) + pixel.x - glyphParam(input.paramBase, 0u), glyphParam(input.paramBase, 5u) + pixel.y - glyphParam(input.paramBase, 1u));
     let glyphSize = textureDimensions(glyphTexture);
     if (glyphPixel.x < 0 || glyphPixel.y < 0 || glyphPixel.x >= i32(glyphSize.x) || glyphPixel.y >= i32(glyphSize.y)) {
         return vec4f(base.rgb, 1.0);
@@ -1374,10 +1361,10 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
         return vec4f(base.rgb, 1.0);
     }
 
-    let srcR = u32((params.rgb >> 16) & 255);
-    let srcG = u32((params.rgb >> 8) & 255);
-    let srcB = u32(params.rgb & 255);
-    let alpha = u32(params.alpha);
+    let srcR = u32((glyphParam(input.paramBase, 6u) >> 16) & 255);
+    let srcG = u32((glyphParam(input.paramBase, 6u) >> 8) & 255);
+    let srcB = u32(glyphParam(input.paramBase, 6u) & 255);
+    let alpha = u32(glyphParam(input.paramBase, 7u));
     if (alpha >= 256u) {
         return vec4f(f32(srcR) / 255.0, f32(srcG) / 255.0, f32(srcB) / 255.0, 1.0);
     }
@@ -2174,6 +2161,8 @@ export type WebGpuPacketReplayStats = {
     gpuAlphaBindGroupsReused: number;
     gpuGouraudStorageDrawsReplayed: number;
     gpuGouraudBindGroupsReused: number;
+    gpuGlyphStorageDrawsReplayed: number;
+    gpuGlyphBindGroupsReused: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2343,6 +2332,7 @@ export default class WebGpuFramePresenter {
     private spriteVertexFrameOffset: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private readonly glyphTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
+    private readonly glyphReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
     private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
     private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
@@ -2411,6 +2401,8 @@ export default class WebGpuFramePresenter {
             gpuAlphaBindGroupsReused: 0,
             gpuGouraudStorageDrawsReplayed: 0,
             gpuGouraudBindGroupsReused: 0,
+            gpuGlyphStorageDrawsReplayed: 0,
+            gpuGlyphBindGroupsReused: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2855,6 +2847,7 @@ export default class WebGpuFramePresenter {
         this.frameTexture?.destroy();
         this.scratchFrameTexture?.destroy();
         this.modelDepthTexture?.destroy();
+        this.glyphReplayBindGroups.clear();
         this.width = Math.max(1, this.sourceCanvas.width);
         this.height = Math.max(1, this.sourceCanvas.height);
 
@@ -3927,27 +3920,7 @@ export default class WebGpuFramePresenter {
         params[7] = op.alpha ?? 256;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.glyphPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: cached.texture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getGlyphBindGroup(this.frameTexture, cached.texture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -3961,8 +3934,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.glyphPipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuGlyphStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4260,6 +4234,7 @@ export default class WebGpuFramePresenter {
         }
         if (cached) {
             cached.texture.destroy();
+            this.glyphReplayBindGroups.clear();
             this.glyphTextures.delete(resource.id);
         }
 
@@ -4689,6 +4664,7 @@ export default class WebGpuFramePresenter {
         }
 
         this.frameUniformBuffer?.destroy();
+        this.glyphReplayBindGroups.clear();
         this.frameUniformBufferBytes = alignTo(byteLength, UNIFORM_BUFFER_ALIGNMENT);
         this.frameUniformBuffer = this.device.createBuffer({
             size: this.frameUniformBufferBytes,
@@ -4880,6 +4856,46 @@ export default class WebGpuFramePresenter {
         return bindGroup;
     }
 
+    private getGlyphBindGroup(sourceTexture: GpuTexture, glyphTexture: GpuTexture): object {
+        let sourceBindGroups = this.glyphReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, object>();
+            this.glyphReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        const cached = sourceBindGroups.get(glyphTexture);
+        if (cached) {
+            this.packetReplayStats.gpuGlyphBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('glyph parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.glyphPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: glyphTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        sourceBindGroups.set(glyphTexture, bindGroup);
+        return bindGroup;
+    }
+
     private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
         this.packetReplayStats.gpuRenderPassesEncoded++;
         return context.encoder.beginRenderPass(descriptor);
@@ -4988,6 +5004,7 @@ export default class WebGpuFramePresenter {
         }
         this.spriteTextures.clear();
         this.glyphTextures.clear();
+        this.glyphReplayBindGroups.clear();
         this.texelTextures.clear();
         this.indexedSpriteTextures.clear();
         this.frameTexture = null;

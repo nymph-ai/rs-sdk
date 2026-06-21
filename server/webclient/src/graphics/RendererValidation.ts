@@ -343,6 +343,7 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
     ]);
     font.plotLetter(glyph, 76, 84, 5, 5, 0xfff080);
     font.plotLetterTrans(glyph, 88, 84, 5, 5, 0x80f0ff, 128);
+    font.plotLetter(glyph, 100, 84, 5, 5, 0xff80d0);
 
     Pix3D.setRenderClipping();
     Pix3D.hclip = false;
@@ -554,6 +555,8 @@ async function runValidation(): Promise<void> {
         packetReplayStats.gpuAlphaBindGroupsReused > 0 &&
         packetReplayStats.gpuGouraudStorageDrawsReplayed > 0 &&
         packetReplayStats.gpuGouraudBindGroupsReused > 0 &&
+        packetReplayStats.gpuGlyphStorageDrawsReplayed > 0 &&
+        packetReplayStats.gpuGlyphBindGroupsReused > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&
