@@ -2109,6 +2109,7 @@ export type WebGpuPacketReplayStats = {
     nativeGouraudTrianglesReplayed: number;
     nativeTextureTrianglesReplayed: number;
     gpuRectInstancesReplayed: number;
+    gpuRectBindGroupsReused: number;
     gpuDynamicIndexedSpritesReplayed: number;
     gpuGlyphSpritesReplayed: number;
     gpuModelFlatTrianglesReplayed: number;
@@ -2282,6 +2283,9 @@ export default class WebGpuFramePresenter {
     private gouraudUniformBuffer: GpuBuffer | null = null;
     private textureTriangleUniformBuffer: GpuBuffer | null = null;
     private rectInstanceUniformBuffer: GpuBuffer | null = null;
+    private rectInstanceBindGroup: object | null = null;
+    private rectInstanceUniformWidth: number = 0;
+    private rectInstanceUniformHeight: number = 0;
     private spriteAlphaUniformBuffer: GpuBuffer | null = null;
     private glyphUniformBuffer: GpuBuffer | null = null;
     private indexedSpriteUniformBuffer: GpuBuffer | null = null;
@@ -2359,6 +2363,7 @@ export default class WebGpuFramePresenter {
             nativeGouraudTrianglesReplayed: 0,
             nativeTextureTrianglesReplayed: 0,
             gpuRectInstancesReplayed: 0,
+            gpuRectBindGroupsReused: 0,
             gpuDynamicIndexedSpritesReplayed: 0,
             gpuGlyphSpritesReplayed: 0,
             gpuModelFlatTrianglesReplayed: 0,
@@ -3491,21 +3496,7 @@ export default class WebGpuFramePresenter {
         }
 
         const instanceBinding = this.allocateRectInstances(instances);
-        const uniform = this.allocateFrameUniform(new Float32Array([this.width, this.height, 0, 0]));
-
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.rectInstancePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getRectInstanceBindGroup();
         const pass = this.beginDirectReplayPass(context);
 
         pass.setPipeline(this.rectInstancePipeline);
@@ -4653,6 +4644,39 @@ export default class WebGpuFramePresenter {
         return this.device.createBindGroup(descriptor);
     }
 
+    private getRectInstanceBindGroup(): object {
+        if (!this.rectInstanceUniformBuffer) {
+            this.rectInstanceUniformBuffer = this.device.createBuffer({
+                size: RECT_INSTANCE_UNIFORM_FLOATS * 4,
+                usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+            });
+        }
+
+        if (this.rectInstanceUniformWidth !== this.width || this.rectInstanceUniformHeight !== this.height) {
+            this.writeReplayBuffer(this.rectInstanceUniformBuffer, 0, new Float32Array([this.width, this.height, 0, 0]));
+            this.rectInstanceUniformWidth = this.width;
+            this.rectInstanceUniformHeight = this.height;
+        }
+
+        if (this.rectInstanceBindGroup) {
+            this.packetReplayStats.gpuRectBindGroupsReused++;
+            return this.rectInstanceBindGroup;
+        }
+
+        this.rectInstanceBindGroup = this.createReplayBindGroup({
+            layout: this.rectInstancePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.rectInstanceUniformBuffer
+                    }
+                }
+            ]
+        });
+        return this.rectInstanceBindGroup;
+    }
+
     private getAlphaBindGroup(context: PacketReplayContext, sourceTexture: GpuTexture): object {
         const cached = context.alphaBindGroups.get(sourceTexture);
         if (cached) {
@@ -5155,6 +5179,9 @@ export default class WebGpuFramePresenter {
         this.gouraudUniformBuffer = null;
         this.textureTriangleUniformBuffer = null;
         this.rectInstanceUniformBuffer = null;
+        this.rectInstanceBindGroup = null;
+        this.rectInstanceUniformWidth = 0;
+        this.rectInstanceUniformHeight = 0;
         this.spriteAlphaUniformBuffer = null;
         this.glyphUniformBuffer = null;
         this.indexedSpriteUniformBuffer = null;
