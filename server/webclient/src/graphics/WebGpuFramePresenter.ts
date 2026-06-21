@@ -192,7 +192,7 @@ fn toByte(channel: f32) -> u32 {
 }
 
 fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
-    return (src * alpha + dst * (256u - alpha)) >> 8u;
+    return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
 }
 
 @fragment
@@ -297,7 +297,7 @@ fn toByte(channel: f32) -> u32 {
 }
 
 fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
-    return (src * alpha + dst * (256u - alpha)) >> 8u;
+    return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
 }
 
 @fragment
@@ -665,14 +665,26 @@ function pushVertex(vertices: number[], x: number, y: number, r: number, g: numb
     vertices.push(x, y, r, g, b, a);
 }
 
+function byteToStableUnorm(byte: number): number {
+    if (byte <= 0) {
+        return 0;
+    }
+
+    if (byte >= 255) {
+        return 1;
+    }
+
+    return (byte - 0.25) / 255;
+}
+
 function pushRectVertices(vertices: number[], rect: Rect, rgb: number, targetWidth: number, targetHeight: number, alpha: number = 1): void {
     const x0 = (rect.x / targetWidth) * 2 - 1;
     const x1 = ((rect.x + rect.width) / targetWidth) * 2 - 1;
     const y0 = 1 - (rect.y / targetHeight) * 2;
     const y1 = 1 - ((rect.y + rect.height) / targetHeight) * 2;
-    const r = ((rgb >> 16) & 0xff) / 255;
-    const g = ((rgb >> 8) & 0xff) / 255;
-    const b = (rgb & 0xff) / 255;
+    const r = byteToStableUnorm((rgb >> 16) & 0xff);
+    const g = byteToStableUnorm((rgb >> 8) & 0xff);
+    const b = byteToStableUnorm(rgb & 0xff);
     const a = alpha;
 
     pushVertex(vertices, x0, y0, r, g, b, a);
@@ -1591,8 +1603,12 @@ export default class WebGpuFramePresenter {
                     });
                     break;
                 }
+                case 'triangleFlat':
+                case 'triangleGouraud':
+                case 'triangleTexture':
+                    break;
                 default:
-                    this.failPacketReplay(`${packet.kind} packets are not replayed yet`);
+                    this.failPacketReplay('unknown packet kind');
             }
         }
 

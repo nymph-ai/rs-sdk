@@ -3,6 +3,7 @@ import Pix2D from '#/graphics/Pix2D.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
 import PixFont from '#/graphics/PixFont.js';
+import Pix3D from '#/dash3d/Pix3D.js';
 import WebGpuFramePresenter, { type WebGpuFrameValidationStats, type WebGpuPacketReplayStats } from '#/graphics/WebGpuFramePresenter.js';
 
 type ValidationResult = {
@@ -80,6 +81,42 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     Pix2D.resetClipping();
     Pix2D.fillCircle(124, 38, 18, 0x2080e0, 128);
     Pix2D.fillRect(width - 30, height - 18, 50, 30, 0x102030);
+
+    Pix3D.setRenderClipping();
+    Pix3D.hclip = false;
+    Pix3D.lowDetail = true;
+    Pix3D.trans = 0;
+    for (let i = 0; i < 256; i++) {
+        Pix3D.colourTable[i] = ((i * 3) & 0xff) << 16 | ((i * 5) & 0xff) << 8 | ((i * 7) & 0xff);
+    }
+    Pix3D.flatTriangle(114, 146, 128, 58, 62, 78, 0x50b0e0);
+    Pix3D.gouraudTriangle(18, 48, 34, 62, 66, 82, 24, 96, 168);
+
+    const texturePalette = new Int32Array(64);
+    for (let i = 1; i < texturePalette.length; i++) {
+        texturePalette[i] = ((i * 29) & 0xff) << 16 | ((i * 47) & 0xff) << 8 | ((i * 71) & 0xff);
+    }
+    const texture = new Pix8(128, 128, texturePalette);
+    for (let yy = 0; yy < texture.hi; yy++) {
+        for (let xx = 0; xx < texture.wi; xx++) {
+            texture.data[xx + yy * texture.wi] = (((xx >> 4) + (yy >> 4)) % 63) + 1;
+        }
+    }
+    Pix3D.clearTexels();
+    Pix3D.initPool(1);
+    Pix3D.textures[0] = texture;
+    Pix3D.texPal[0] = texturePalette;
+    Pix3D.numTextures = Math.max(Pix3D.numTextures, 1);
+    Pix3D.textureTriangle(
+        82, 118, 98,
+        84, 88, 106,
+        96, 160, 224,
+        64, 64, 96,
+        128, 64,
+        64, 128,
+        96, 96,
+        0
+    );
 
     const indexedSprite = new Pix8(8, 8, Int32Array.of(0, 0xff2020, 0x20ff20, 0x2020ff));
     for (let i = 0; i < indexedSprite.data.length; i++) {

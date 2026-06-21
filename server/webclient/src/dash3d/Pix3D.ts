@@ -1,6 +1,7 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import {
     recordFlatTriangle,
+    recordFillRect,
     recordGouraudTriangle,
     recordTextureTriangle
 } from '#/graphics/GpuRenderPackets.js';
@@ -918,6 +919,7 @@ export default class Pix3D extends Pix2D {
         dst: Int32Array, off: number, len: number
     ): void {
         let rgb: number;
+        const row: number = (off / Pix2D.width) | 0;
 
         if (this.lowDetail) {
             let colourStep: number;
@@ -958,6 +960,7 @@ export default class Pix3D extends Pix2D {
                 return;
             }
 
+            let spanX: number = xA;
             if (this.trans === 0) {
                 while (true) {
                     len--;
@@ -967,6 +970,7 @@ export default class Pix3D extends Pix2D {
 
                         if (len > 0) {
                             rgb = this.colourTable[colourA >> 8];
+                            recordFillRect(spanX, row, len, 1, rgb);
 
                             do {
                                 dst[off++] = rgb;
@@ -981,6 +985,8 @@ export default class Pix3D extends Pix2D {
 
                     rgb = this.colourTable[colourA >> 8];
                     colourA += colourStep;
+                    recordFillRect(spanX, row, 4, 1, rgb);
+                    spanX += 4;
                     dst[off++] = rgb;
                     dst[off++] = rgb;
                     dst[off++] = rgb;
@@ -998,6 +1004,7 @@ export default class Pix3D extends Pix2D {
 
                         if (len > 0) {
                             rgb = this.colourTable[colourA >> 8];
+                            recordFillRect(spanX, row, len, 1, rgb, invAlpha);
                             rgb = ((((rgb & 0xff00ff) * invAlpha) >> 8) & 0xff00ff) + ((((rgb & 0xff00) * invAlpha) >> 8) & 0xff00);
 
                             do {
@@ -1011,6 +1018,8 @@ export default class Pix3D extends Pix2D {
 
                     rgb = this.colourTable[colourA >> 8];
                     colourA += colourStep;
+                    recordFillRect(spanX, row, 4, 1, rgb, invAlpha);
+                    spanX += 4;
                     rgb = ((((rgb & 0xff00ff) * invAlpha) >> 8) & 0xff00ff) + ((((rgb & 0xff00) * invAlpha) >> 8) & 0xff00);
 
                     dst[off++] = rgb + ((((dst[off] & 0xff00ff) * alpha) >> 8) & 0xff00ff) + ((((dst[off] & 0xff00) * alpha) >> 8) & 0xff00);
@@ -1039,10 +1048,13 @@ export default class Pix3D extends Pix2D {
 
             off += xA;
             len = xB - xA;
+            let spanX: number = xA;
 
             if (this.trans === 0) {
                 do {
-                    dst[off++] = this.colourTable[colourA >> 8];
+                    rgb = this.colourTable[colourA >> 8];
+                    recordFillRect(spanX++, row, 1, 1, rgb);
+                    dst[off++] = rgb;
                     colourA += colourStep;
                     len--;
                 } while (len > 0);
@@ -1053,6 +1065,7 @@ export default class Pix3D extends Pix2D {
                 do {
                     rgb = this.colourTable[colourA >> 8];
                     colourA += colourStep;
+                    recordFillRect(spanX++, row, 1, 1, rgb, invAlpha);
                     rgb = ((((rgb & 0xff00ff) * invAlpha) >> 8) & 0xff00ff) + ((((rgb & 0xff00) * invAlpha) >> 8) & 0xff00);
 
                     dst[off++] = rgb + ((((dst[off] & 0xff00ff) * alpha) >> 8) & 0xff00ff) + ((((dst[off] & 0xff00) * alpha) >> 8) & 0xff00);
@@ -1579,6 +1592,8 @@ export default class Pix3D extends Pix2D {
             return;
         }
 
+        recordFillRect(xA, (off / Pix2D.width) | 0, xB - xA, 1, colour, this.trans === 0 ? null : 256 - this.trans);
+
         off += xA;
         let len: number = (xB - xA) >> 2;
 
@@ -1633,6 +1648,10 @@ export default class Pix3D extends Pix2D {
                 dst[off++] = colour + ((((dst[off] & 0xff00ff) * alpha) >> 8) & 0xff00ff) + ((((dst[off] & 0xff00) * alpha) >> 8) & 0xff00);
             }
         }
+    }
+
+    private static recordTexturePixel(off: number, rgb: number): void {
+        recordFillRect(off % Pix2D.width, (off / Pix2D.width) | 0, 1, 1, rgb);
     }
 
     static textureTriangle(
@@ -2501,6 +2520,7 @@ export default class Pix3D extends Pix2D {
         let stepU: number;
         let stepV: number;
         let shadeShift: number;
+        let rgb: number;
 
         if (this.lowMem) {
             nextU = 0;
@@ -2554,35 +2574,51 @@ export default class Pix3D extends Pix2D {
 
             if (this.opaque) {
                 while (strides-- > 0) {
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU = nextU;
                     curV = nextV;
 
@@ -2616,7 +2652,9 @@ export default class Pix3D extends Pix2D {
                 strides = (xB - xA) & 0x7;
 
                 while (strides-- > 0) {
-                    dst[off++] = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
                 }
@@ -2624,6 +2662,7 @@ export default class Pix3D extends Pix2D {
                 while (strides-- > 0) {
                     let rgb: number;
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2631,6 +2670,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2638,6 +2678,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2645,6 +2686,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2652,6 +2694,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2659,6 +2702,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2666,6 +2710,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2673,6 +2718,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2711,6 +2757,7 @@ export default class Pix3D extends Pix2D {
                 while (strides-- > 0) {
                     let rgb: number;
                     if ((rgb = texels[(curV & 0xfc0) + (curU >> 6)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2770,35 +2817,51 @@ export default class Pix3D extends Pix2D {
 
             if (this.opaque) {
                 while (strides-- > 0) {
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
 
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU = nextU;
                     curV = nextV;
 
@@ -2832,7 +2895,9 @@ export default class Pix3D extends Pix2D {
                 strides = (xB - xA) & 0x7;
 
                 while (strides-- > 0) {
-                    dst[off++] = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift;
+                    this.recordTexturePixel(off, rgb);
+                    dst[off++] = rgb;
                     curU += stepU;
                     curV += stepV;
                 }
@@ -2840,6 +2905,7 @@ export default class Pix3D extends Pix2D {
                 while (strides-- > 0 && texels) {
                     let rgb: number;
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2847,6 +2913,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2854,6 +2921,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2861,6 +2929,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2868,6 +2937,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2875,6 +2945,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2882,6 +2953,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2889,6 +2961,7 @@ export default class Pix3D extends Pix2D {
                     curV += stepV;
 
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
@@ -2927,6 +3000,7 @@ export default class Pix3D extends Pix2D {
                 while (strides-- > 0 && texels) {
                     let rgb: number;
                     if ((rgb = texels[(curV & 0x3f80) + (curU >> 7)] >>> shadeShift) !== 0) {
+                        this.recordTexturePixel(off, rgb);
                         dst[off] = rgb;
                     }
                     off++;
