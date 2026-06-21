@@ -43,6 +43,7 @@ type GpuRenderPipeline = {
 
 type GpuCommandEncoder = {
     beginRenderPass(descriptor: object): GpuRenderPass;
+    copyTextureToTexture(source: object, destination: object, size: object): void;
     copyTextureToBuffer(source: object, destination: object, size: object): void;
     finish(): object;
 };
@@ -428,6 +429,11 @@ struct ProjectedVertex {
     valid: i32,
 };
 
+struct FragmentOutput {
+    @location(0) colour: vec4f,
+    @builtin(frag_depth) depth: f32,
+};
+
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: ModelFlatParams;
 
@@ -564,13 +570,17 @@ fn nextPixel(pixel: vec2<i32>) -> vec2<i32> {
 }
 
 @fragment
-fn fs(input: VertexOutput) -> @location(0) vec4f {
+fn fs(input: VertexOutput) -> FragmentOutput {
     let pixel = vec2<i32>(floor(input.position.xy));
-    let base = textureLoad(sourceTexture, pixel, 0);
     if (!inProjectedTriangle(pixel)) {
-        return vec4f(base.rgb, 1.0);
+        discard;
     }
 
+    let a = projectLocal(params.xA, params.yA, params.zA);
+    let b = projectLocal(params.xB, params.yB, params.zB);
+    let c = projectLocal(params.xC, params.yC, params.zC);
+    let faceDepth = clamp(f32((a.z + b.z + c.z) / 3) / 3500.0, 0.0, 1.0);
+    let base = textureLoad(sourceTexture, pixel, 0);
     let rgb = u32(params.rgb);
     let alpha = u32(params.alpha);
     let srcR = (rgb >> 16u) & 255u;
@@ -583,7 +593,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     let outR = blendChannel(srcR, toByte(blendBase.r), alpha);
     let outG = blendChannel(srcG, toByte(blendBase.g), alpha);
     let outB = blendChannel(srcB, toByte(blendBase.b), alpha);
-    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+    return FragmentOutput(vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0), faceDepth);
 }
 `;
 
@@ -2135,6 +2145,7 @@ export type WebGpuPacketReplayStats = {
     gpuDynamicIndexedSpritesReplayed: number;
     gpuGlyphSpritesReplayed: number;
     gpuModelFlatTrianglesReplayed: number;
+    gpuRetainedDepthPassesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2278,6 +2289,7 @@ class WebGpuFrameValidator {
 export default class WebGpuFramePresenter {
     private frameTexture: GpuTexture | null = null;
     private scratchFrameTexture: GpuTexture | null = null;
+    private modelDepthTexture: GpuTexture | null = null;
     private bindGroup: object | null = null;
     private alphaUniformBuffer: GpuBuffer | null = null;
     private gouraudUniformBuffer: GpuBuffer | null = null;
@@ -2302,6 +2314,7 @@ export default class WebGpuFramePresenter {
     private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
     private packetCursor: number = 0;
     private packetDropped: number = 0;
+    private modelDepthClearPending: boolean = true;
     private readonly bufferUsage = getBufferUsage();
     private width: number = 0;
     private height: number = 0;
@@ -2349,6 +2362,7 @@ export default class WebGpuFramePresenter {
             gpuDynamicIndexedSpritesReplayed: 0,
             gpuGlyphSpritesReplayed: 0,
             gpuModelFlatTrianglesReplayed: 0,
+            gpuRetainedDepthPassesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2569,6 +2583,11 @@ export default class WebGpuFramePresenter {
             },
             primitive: {
                 topology: 'triangle-list'
+            },
+            depthStencil: {
+                format: 'depth24plus',
+                depthWriteEnabled: true,
+                depthCompare: 'less'
             }
         });
         const gouraudPipeline = device.createRenderPipeline({
@@ -2787,11 +2806,13 @@ export default class WebGpuFramePresenter {
     private recreateFrameTexture(): void {
         this.frameTexture?.destroy();
         this.scratchFrameTexture?.destroy();
+        this.modelDepthTexture?.destroy();
         this.width = Math.max(1, this.sourceCanvas.width);
         this.height = Math.max(1, this.sourceCanvas.height);
 
         this.frameTexture = this.createFrameTexture();
         this.scratchFrameTexture = this.createFrameTexture();
+        this.modelDepthTexture = this.createDepthTexture();
         this.recreateDisplayBindGroup();
 
         this.device.queue.writeTexture(
@@ -2819,6 +2840,18 @@ export default class WebGpuFramePresenter {
             },
             format: 'rgba8unorm',
             usage: getTextureUsage()!.COPY_SRC | getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING | getTextureUsage()!.RENDER_ATTACHMENT
+        });
+    }
+
+    private createDepthTexture(): GpuTexture {
+        return this.device.createTexture({
+            size: {
+                width: this.width,
+                height: this.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'depth24plus',
+            usage: getTextureUsage()!.RENDER_ATTACHMENT
         });
     }
 
@@ -2898,6 +2931,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('no drawable 2D packets');
         }
 
+        this.modelDepthClearPending = true;
         this.replayPrimitiveSteps(result.steps);
         this.packetDropped = snapshot.dropped;
         this.packetReplayStats.framesReplayed++;
@@ -3550,7 +3584,7 @@ export default class WebGpuFramePresenter {
     }
 
     private replayModelFlatOp(op: ModelFlatReplayOp): void {
-        if (!this.frameTexture || !this.scratchFrameTexture) {
+        if (!this.frameTexture || !this.scratchFrameTexture || !this.modelDepthTexture) {
             this.failPacketReplay('model flat replay requested before frame textures exist');
         }
 
@@ -3599,16 +3633,33 @@ export default class WebGpuFramePresenter {
                 }
             ]
         });
+        const clearDepth = this.modelDepthClearPending;
+        this.modelDepthClearPending = false;
         const encoder = this.device.createCommandEncoder();
+        encoder.copyTextureToTexture(
+            { texture: this.frameTexture },
+            { texture: this.scratchFrameTexture },
+            {
+                width: this.width,
+                height: this.height,
+                depthOrArrayLayers: 1
+            }
+        );
         const pass = encoder.beginRenderPass({
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
                     clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                    loadOp: 'clear',
+                    loadOp: 'load',
                     storeOp: 'store'
                 }
-            ]
+            ],
+            depthStencilAttachment: {
+                view: this.modelDepthTexture.createView(),
+                depthClearValue: 1,
+                depthLoadOp: clearDepth ? 'clear' : 'load',
+                depthStoreOp: 'store'
+            }
         });
 
         pass.setPipeline(this.modelFlatPipeline);
@@ -3622,6 +3673,7 @@ export default class WebGpuFramePresenter {
         this.scratchFrameTexture = oldFrameTexture;
         this.recreateDisplayBindGroup();
         this.packetReplayStats.gpuModelFlatTrianglesReplayed++;
+        this.packetReplayStats.gpuRetainedDepthPassesReplayed++;
     }
 
     private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource): void {
@@ -4654,6 +4706,7 @@ export default class WebGpuFramePresenter {
     private disable(): void {
         this.frameTexture?.destroy();
         this.scratchFrameTexture?.destroy();
+        this.modelDepthTexture?.destroy();
         this.primitiveVertexBuffer?.destroy();
         this.rectInstanceBuffer?.destroy();
         this.modelFlatUniformBuffer?.destroy();
@@ -4689,6 +4742,7 @@ export default class WebGpuFramePresenter {
         this.indexedSpriteTextures.clear();
         this.frameTexture = null;
         this.scratchFrameTexture = null;
+        this.modelDepthTexture = null;
         this.bindGroup = null;
         this.primitiveVertexBuffer = null;
         this.rectInstanceBuffer = null;
