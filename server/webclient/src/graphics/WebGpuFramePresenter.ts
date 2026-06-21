@@ -51,7 +51,7 @@ type GpuRenderPass = {
     setPipeline(pipeline: GpuRenderPipeline): void;
     setBindGroup(index: number, bindGroup: object): void;
     setVertexBuffer(slot: number, buffer: GpuBuffer): void;
-    draw(vertexCount: number): void;
+    draw(vertexCount: number, instanceCount?: number): void;
     end(): void;
 };
 
@@ -115,6 +115,50 @@ struct VertexOutput {
 fn vs(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     output.position = vec4f(input.position, 0.0, 1.0);
+    output.colour = input.colour;
+    return output;
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    return input.colour;
+}
+`;
+
+const RECT_INSTANCE_SHADER = `
+struct VertexInput {
+    @location(0) rect: vec4f,
+    @location(1) colour: vec4f,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+    @location(0) colour: vec4f,
+};
+
+struct RectInstanceParams {
+    targetWidth: f32,
+    targetHeight: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
+@group(0) @binding(0) var<uniform> params: RectInstanceParams;
+
+@vertex
+fn vs(input: VertexInput, @builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let local = array<vec2f, 6>(
+        vec2f(0.0, 0.0),
+        vec2f(1.0, 0.0),
+        vec2f(0.0, 1.0),
+        vec2f(0.0, 1.0),
+        vec2f(1.0, 0.0),
+        vec2f(1.0, 1.0)
+    );
+    let pixel = input.rect.xy + local[vertexIndex] * input.rect.zw;
+
+    var output: VertexOutput;
+    output.position = vec4f((pixel.x / params.targetWidth) * 2.0 - 1.0, 1.0 - (pixel.y / params.targetHeight) * 2.0, 0.0, 1.0);
     output.colour = input.colour;
     return output;
 }
@@ -1176,7 +1220,9 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 
 const FRAME_TEXTURE_FORMAT = 'rgba8unorm';
 const FLOATS_PER_PRIMITIVE_VERTEX = 6;
+const FLOATS_PER_RECT_INSTANCE = 8;
 const FLOATS_PER_SPRITE_VERTEX = 4;
+const RECT_INSTANCE_UNIFORM_FLOATS = 4;
 const ALPHA_UNIFORM_INTS = 16;
 const GOURAUD_UNIFORM_INTS = 16;
 const TEXTURE_TRIANGLE_UNIFORM_INTS = 28;
@@ -1207,6 +1253,9 @@ type PacketReplayStep = {
 } | {
     kind: 'alpha';
     op: AlphaReplayOp;
+} | {
+    kind: 'rectInstances';
+    instances: Float32Array;
 } | {
     kind: 'gouraud';
     op: GouraudReplayOp;
@@ -1439,6 +1488,19 @@ function pushRectVertices(vertices: number[], rect: Rect, rgb: number, targetWid
     pushVertex(vertices, x1, y1, r, g, b, a);
 }
 
+function pushRectInstance(instances: number[], rect: Rect, rgb: number, alpha: number = 1): void {
+    instances.push(
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
+        byteToStableUnorm((rgb >> 16) & 0xff),
+        byteToStableUnorm((rgb >> 8) & 0xff),
+        byteToStableUnorm(rgb & 0xff),
+        alpha
+    );
+}
+
 function pushSurfaceRect(
     vertices: number[],
     rect: Rect,
@@ -1456,6 +1518,24 @@ function pushSurfaceRect(
     }
 
     pushRectVertices(vertices, targetRect, rgb, targetWidth, targetHeight, alpha);
+}
+
+function pushSurfaceRectInstance(
+    instances: number[],
+    rect: Rect,
+    rgb: number,
+    surfaceClip: PacketClip,
+    offsetX: number,
+    offsetY: number,
+    targetWidth: number,
+    targetHeight: number
+): void {
+    const targetRect = clipSurfaceRectToTarget(rect, surfaceClip, offsetX, offsetY, targetWidth, targetHeight);
+    if (!targetRect) {
+        return;
+    }
+
+    pushRectInstance(instances, targetRect, rgb);
 }
 
 function copyExpectedRegion(imageData: ImageData, sourceX: number, sourceY: number, width: number, height: number): Uint8Array {
@@ -1535,6 +1615,7 @@ export type WebGpuPacketReplayStats = {
     nativeFlatTrianglesReplayed: number;
     nativeGouraudTrianglesReplayed: number;
     nativeTextureTrianglesReplayed: number;
+    gpuRectInstancesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -1682,11 +1763,14 @@ export default class WebGpuFramePresenter {
     private alphaUniformBuffer: GpuBuffer | null = null;
     private gouraudUniformBuffer: GpuBuffer | null = null;
     private textureTriangleUniformBuffer: GpuBuffer | null = null;
+    private rectInstanceUniformBuffer: GpuBuffer | null = null;
     private spriteAlphaUniformBuffer: GpuBuffer | null = null;
     private transformSpriteUniformBuffer: GpuBuffer | null = null;
     private maskedSpriteUniformBuffer: GpuBuffer | null = null;
     private primitiveVertexBuffer: GpuBuffer | null = null;
     private primitiveVertexBufferBytes: number = 0;
+    private rectInstanceBuffer: GpuBuffer | null = null;
+    private rectInstanceBufferBytes: number = 0;
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
@@ -1711,6 +1795,7 @@ export default class WebGpuFramePresenter {
         private readonly sampler: object,
         private readonly pipeline: GpuRenderPipeline,
         private readonly primitivePipeline: GpuRenderPipeline,
+        private readonly rectInstancePipeline: GpuRenderPipeline,
         private readonly spritePipeline: GpuRenderPipeline,
         private readonly spriteAlphaPipeline: GpuRenderPipeline,
         private readonly transformSpritePipeline: GpuRenderPipeline,
@@ -1733,6 +1818,7 @@ export default class WebGpuFramePresenter {
             nativeFlatTrianglesReplayed: 0,
             nativeGouraudTrianglesReplayed: 0,
             nativeTextureTrianglesReplayed: 0,
+            gpuRectInstancesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -1801,6 +1887,7 @@ export default class WebGpuFramePresenter {
             }
         });
         const primitiveShaderModule = device.createShaderModule({ code: PRIMITIVE_SHADER });
+        const rectInstanceShaderModule = device.createShaderModule({ code: RECT_INSTANCE_SHADER });
         const primitivePipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -1826,6 +1913,39 @@ export default class WebGpuFramePresenter {
             },
             fragment: {
                 module: primitiveShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
+        const rectInstancePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: rectInstanceShaderModule,
+                entryPoint: 'vs',
+                buffers: [
+                    {
+                        arrayStride: FLOATS_PER_RECT_INSTANCE * 4,
+                        stepMode: 'instance',
+                        attributes: [
+                            {
+                                shaderLocation: 0,
+                                offset: 0,
+                                format: 'float32x4'
+                            },
+                            {
+                                shaderLocation: 1,
+                                offset: 4 * 4,
+                                format: 'float32x4'
+                            }
+                        ]
+                    }
+                ]
+            },
+            fragment: {
+                module: rectInstanceShaderModule,
                 entryPoint: 'fs',
                 targets: [{ format: FRAME_TEXTURE_FORMAT }]
             },
@@ -1984,7 +2104,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, spritePipeline, spriteAlphaPipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -2183,7 +2303,15 @@ export default class WebGpuFramePresenter {
         const result = this.buildPacketReplayVertices(snapshot, x | 0, y | 0, surface.width, surface.height, surface.id);
         this.packetReplayStats.lastPacketCount = result.packetCount;
         this.packetReplayStats.cpuRasterWriteBypasses = snapshot.cpuRasterWriteBypasses;
-        const vertexCount = result.steps.reduce((total, step) => total + (step.kind === 'vertices' ? step.vertices.length / FLOATS_PER_PRIMITIVE_VERTEX : 6), 0);
+        const vertexCount = result.steps.reduce((total, step) => {
+            if (step.kind === 'vertices') {
+                return total + step.vertices.length / FLOATS_PER_PRIMITIVE_VERTEX;
+            }
+            if (step.kind === 'rectInstances') {
+                return total + (step.instances.length / FLOATS_PER_RECT_INSTANCE) * 6;
+            }
+            return total + 6;
+        }, 0);
         if (result.steps.length === 0) {
             if (this.packetReplayStats.framesReplayed > 0) {
                 return;
@@ -2215,6 +2343,7 @@ export default class WebGpuFramePresenter {
     ): PacketReplayBuildResult {
         const steps: PacketReplayStep[] = [];
         let vertices: number[] = [];
+        let rectInstances: number[] = [];
         let packetCount = 0;
         let nativeFlatTriangleCount = 0;
         let nativeGouraudTriangleCount = 0;
@@ -2230,13 +2359,25 @@ export default class WebGpuFramePresenter {
             steps.push({ kind: 'vertices', vertices: new Float32Array(vertices) });
             vertices = [];
         };
+        const flushRectInstances = (): void => {
+            if (rectInstances.length === 0) {
+                return;
+            }
+
+            steps.push({ kind: 'rectInstances', instances: new Float32Array(rectInstances) });
+            rectInstances = [];
+        };
+        const flushBatches = (): void => {
+            flushRectInstances();
+            flushVertices();
+        };
         const pushAlphaRect = (rect: Rect, rgb: number, packetClip: PacketClip, alpha: number): void => {
             const targetRect = clipSurfaceRectToTarget(rect, packetClip, offsetX, offsetY, this.width, this.height);
             if (!targetRect) {
                 return;
             }
 
-            flushVertices();
+            flushBatches();
             steps.push({ kind: 'alpha', op: { kind: 'rect', rect: targetRect, rgb, alpha } });
         };
         const pushPacketRect = (rect: Rect, rgb: number, packetClip: PacketClip, alpha: number | null = null): void => {
@@ -2245,7 +2386,7 @@ export default class WebGpuFramePresenter {
                 return;
             }
 
-            pushSurfaceRect(vertices, rect, rgb, packetClip, offsetX, offsetY, this.width, this.height);
+            pushSurfaceRectInstance(rectInstances, rect, rgb, packetClip, offsetX, offsetY, this.width, this.height);
         };
 
         for (const packet of packets) {
@@ -2298,7 +2439,7 @@ export default class WebGpuFramePresenter {
                         this.height
                     );
                     if (clipTarget) {
-                        flushVertices();
+                        flushBatches();
                         steps.push({
                             kind: 'alpha',
                             op: {
@@ -2332,7 +2473,7 @@ export default class WebGpuFramePresenter {
                         break;
                     }
 
-                    flushVertices();
+                    flushBatches();
                     steps.push({
                         kind: 'sprite',
                         op: {
@@ -2362,7 +2503,7 @@ export default class WebGpuFramePresenter {
 
                     const skippedX = targetRect.x - (packet.x + offsetX);
                     const skippedY = targetRect.y - (packet.y + offsetY);
-                    flushVertices();
+                    flushBatches();
                     steps.push({
                         kind: 'transformSprite',
                         op: {
@@ -2395,7 +2536,7 @@ export default class WebGpuFramePresenter {
 
                     const skippedX = targetRect.x - (packet.x + offsetX);
                     const skippedY = targetRect.y - (packet.y + offsetY);
-                    flushVertices();
+                    flushBatches();
                     steps.push({
                         kind: 'maskedSprite',
                         op: {
@@ -2414,7 +2555,7 @@ export default class WebGpuFramePresenter {
                 case 'triangleFlat':
                     if (packet.gpuRasterize) {
                         nativeFlatTriangleCount++;
-                        flushVertices();
+                        flushBatches();
                         steps.push({
                             kind: 'alpha',
                             op: {
@@ -2440,7 +2581,7 @@ export default class WebGpuFramePresenter {
                 case 'triangleGouraud':
                     if (packet.gpuRasterize) {
                         nativeGouraudTriangleCount++;
-                        flushVertices();
+                        flushBatches();
                         steps.push({
                             kind: 'gouraud',
                             op: {
@@ -2469,7 +2610,7 @@ export default class WebGpuFramePresenter {
                 case 'triangleTexture':
                     if (packet.gpuRasterize && packet.hasTexels) {
                         nativeTextureTriangleCount++;
-                        flushVertices();
+                        flushBatches();
                         steps.push({
                             kind: 'textureTriangle',
                             op: {
@@ -2512,7 +2653,7 @@ export default class WebGpuFramePresenter {
             }
         }
 
-        flushVertices();
+        flushBatches();
         return { steps, packetCount, nativeFlatTriangleCount, nativeGouraudTriangleCount, nativeTextureTriangleCount };
     }
 
@@ -2522,6 +2663,8 @@ export default class WebGpuFramePresenter {
                 this.replayPrimitiveVertices(step.vertices);
             } else if (step.kind === 'alpha') {
                 this.replayAlphaOp(step.op);
+            } else if (step.kind === 'rectInstances') {
+                this.replayRectInstances(step.instances);
             } else if (step.kind === 'gouraud') {
                 const resource = gpuRenderPackets.snapshot().colourTableResource;
                 if (!resource) {
@@ -2585,6 +2728,48 @@ export default class WebGpuFramePresenter {
         pass.draw(vertices.length / FLOATS_PER_PRIMITIVE_VERTEX);
         pass.end();
         this.device.queue.submit([encoder.finish()]);
+    }
+
+    private replayRectInstances(instances: Float32Array): void {
+        const instanceCount = instances.length / FLOATS_PER_RECT_INSTANCE;
+        if (instanceCount <= 0) {
+            return;
+        }
+
+        this.ensureRectInstanceBuffer(instances.byteLength);
+        this.ensureRectInstanceUniformBuffer();
+        this.device.queue.writeBuffer(this.rectInstanceBuffer!, 0, instances);
+        this.device.queue.writeBuffer(this.rectInstanceUniformBuffer!, 0, new Float32Array([this.width, this.height, 0, 0]));
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.rectInstancePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.rectInstanceUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.frameTexture!.createView(),
+                    loadOp: 'load',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.rectInstancePipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.setVertexBuffer(0, this.rectInstanceBuffer!);
+        pass.draw(6, instanceCount);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+        this.packetReplayStats.gpuRectInstancesReplayed += instanceCount;
     }
 
     private replayAlphaOp(op: AlphaReplayOp): void {
@@ -3229,6 +3414,19 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private ensureRectInstanceBuffer(byteLength: number): void {
+        if (this.rectInstanceBuffer && this.rectInstanceBufferBytes >= byteLength) {
+            return;
+        }
+
+        this.rectInstanceBuffer?.destroy();
+        this.rectInstanceBufferBytes = alignTo(Math.max(byteLength, 4), 4);
+        this.rectInstanceBuffer = this.device.createBuffer({
+            size: this.rectInstanceBufferBytes,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.VERTEX
+        });
+    }
+
     private ensureAlphaUniformBuffer(): void {
         if (this.alphaUniformBuffer) {
             return;
@@ -3236,6 +3434,17 @@ export default class WebGpuFramePresenter {
 
         this.alphaUniformBuffer = this.device.createBuffer({
             size: ALPHA_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
+    private ensureRectInstanceUniformBuffer(): void {
+        if (this.rectInstanceUniformBuffer) {
+            return;
+        }
+
+        this.rectInstanceUniformBuffer = this.device.createBuffer({
+            size: RECT_INSTANCE_UNIFORM_FLOATS * 4,
             usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
         });
     }
@@ -3325,10 +3534,12 @@ export default class WebGpuFramePresenter {
         this.frameTexture?.destroy();
         this.scratchFrameTexture?.destroy();
         this.primitiveVertexBuffer?.destroy();
+        this.rectInstanceBuffer?.destroy();
         this.spriteVertexBuffer?.destroy();
         this.alphaUniformBuffer?.destroy();
         this.gouraudUniformBuffer?.destroy();
         this.textureTriangleUniformBuffer?.destroy();
+        this.rectInstanceUniformBuffer?.destroy();
         this.spriteAlphaUniformBuffer?.destroy();
         this.transformSpriteUniformBuffer?.destroy();
         this.maskedSpriteUniformBuffer?.destroy();
@@ -3345,10 +3556,13 @@ export default class WebGpuFramePresenter {
         this.scratchFrameTexture = null;
         this.bindGroup = null;
         this.primitiveVertexBuffer = null;
+        this.rectInstanceBuffer = null;
+        this.rectInstanceBufferBytes = 0;
         this.spriteVertexBuffer = null;
         this.alphaUniformBuffer = null;
         this.gouraudUniformBuffer = null;
         this.textureTriangleUniformBuffer = null;
+        this.rectInstanceUniformBuffer = null;
         this.spriteAlphaUniformBuffer = null;
         this.transformSpriteUniformBuffer = null;
         this.maskedSpriteUniformBuffer = null;

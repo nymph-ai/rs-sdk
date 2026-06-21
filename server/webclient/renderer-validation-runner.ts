@@ -20,6 +20,7 @@ type ValidationResult = {
         nativeFlatTrianglesReplayed: number;
         nativeGouraudTrianglesReplayed: number;
         nativeTextureTrianglesReplayed: number;
+        gpuRectInstancesReplayed: number;
         packetsReplayed: number;
         lastPacketCount: number;
         lastVertexCount: number;
@@ -186,7 +187,7 @@ function validateResult(state: ValidationState): void {
     }
 
     const stats = packetResult.packetReplayStats;
-    if (!stats.enabled || stats.framesFailed !== 0 || stats.cpuImageDataUploads !== 0 || stats.cpuRasterWriteBypasses <= 0 || stats.framesReplayed < 1 || stats.lastError !== '') {
+    if (!stats.enabled || stats.framesFailed !== 0 || stats.cpuImageDataUploads !== 0 || stats.cpuRasterWriteBypasses <= 0 || stats.framesReplayed < 1 || stats.gpuRectInstancesReplayed <= 0 || stats.lastError !== '') {
         throw new Error(`Packet replay validation did not prove GPU-only presentation: ${JSON.stringify(stats, null, 2)}`);
     }
 }
@@ -244,7 +245,7 @@ async function main(): Promise<void> {
         const state = await pollValidation(target);
         validateResult(state);
         const packetStats = state.results.find(result => result.name === 'packet-replay-2d-primitives')!.packetReplayStats!;
-        console.log(`Renderer validation passed: packetsReplayed=${packetStats.packetsReplayed}, cpuImageDataUploads=${packetStats.cpuImageDataUploads}, cpuRasterWriteBypasses=${packetStats.cpuRasterWriteBypasses}, nativeFlat=${packetStats.nativeFlatTrianglesReplayed}, nativeGouraud=${packetStats.nativeGouraudTrianglesReplayed}, nativeTexture=${packetStats.nativeTextureTrianglesReplayed}, framesFailed=${packetStats.framesFailed}`);
+        console.log(`Renderer validation passed: packetsReplayed=${packetStats.packetsReplayed}, cpuImageDataUploads=${packetStats.cpuImageDataUploads}, cpuRasterWriteBypasses=${packetStats.cpuRasterWriteBypasses}, rectInstances=${packetStats.gpuRectInstancesReplayed}, nativeFlat=${packetStats.nativeFlatTrianglesReplayed}, nativeGouraud=${packetStats.nativeGouraudTrianglesReplayed}, nativeTexture=${packetStats.nativeTextureTrianglesReplayed}, framesFailed=${packetStats.framesFailed}`);
     } finally {
         chromeProc?.kill();
         server.kill();
