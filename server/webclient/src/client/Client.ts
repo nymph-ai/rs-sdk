@@ -3638,24 +3638,31 @@ export class Client extends GameShell {
         Pix2D.cls();
 
         this.imageTitle2 = new PixMap(509, 171);
+        this.imageTitle2.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle3 = new PixMap(360, 132);
+        this.imageTitle3.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle4 = new PixMap(360, 200);
+        this.imageTitle4.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle5 = new PixMap(202, 238);
+        this.imageTitle5.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle6 = new PixMap(203, 238);
+        this.imageTitle6.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle7 = new PixMap(74, 94);
+        this.imageTitle7.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle8 = new PixMap(75, 94);
+        this.imageTitle8.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         if (this.title) {
