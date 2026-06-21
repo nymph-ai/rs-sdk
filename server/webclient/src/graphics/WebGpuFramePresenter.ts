@@ -1224,10 +1224,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const SPRITE_ALPHA_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -1239,31 +1240,17 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
-struct SpriteAlphaParams {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    srcXFixed: i32,
-    srcYFixed: i32,
-    alpha: i32,
-    stepX: i32,
-    stepY: i32,
-    _pad2: i32,
-    _pad3: i32,
-    _pad4: i32,
-    _pad5: i32,
-    _pad6: i32,
-    _pad7: i32,
-    _pad8: i32,
-};
-
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var spriteTexture: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> params: SpriteAlphaParams;
+@group(0) @binding(2) var<storage, read> spriteAlphaParams: array<i32>;
+
+fn spriteAlphaParam(base: u32, index: u32) -> i32 {
+    return spriteAlphaParams[base + index];
+}
 
 fn toByte(channel: f32) -> u32 {
     return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
@@ -1277,21 +1264,22 @@ fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
+    let paramBase = input.paramBase;
 
-    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+    if (pixel.x < spriteAlphaParam(paramBase, 0u) || pixel.x >= spriteAlphaParam(paramBase, 0u) + spriteAlphaParam(paramBase, 2u) || pixel.y < spriteAlphaParam(paramBase, 1u) || pixel.y >= spriteAlphaParam(paramBase, 1u) + spriteAlphaParam(paramBase, 3u)) {
         return vec4f(base.rgb, 1.0);
     }
 
     let spritePixel = vec2<i32>(
-        (params.srcXFixed + (pixel.x - params.x) * params.stepX) / 65536,
-        (params.srcYFixed + (pixel.y - params.y) * params.stepY) / 65536
+        (spriteAlphaParam(paramBase, 4u) + (pixel.x - spriteAlphaParam(paramBase, 0u)) * spriteAlphaParam(paramBase, 7u)) / 65536,
+        (spriteAlphaParam(paramBase, 5u) + (pixel.y - spriteAlphaParam(paramBase, 1u)) * spriteAlphaParam(paramBase, 8u)) / 65536
     );
     let sprite = textureLoad(spriteTexture, spritePixel, 0);
     if (sprite.a < 0.5) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let alpha = u32(params.alpha);
+    let alpha = u32(spriteAlphaParam(paramBase, 6u));
     if (alpha >= 256u) {
         return vec4f(sprite.rgb, 1.0);
     }
@@ -1379,10 +1367,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const INDEXED_SPRITE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -1394,33 +1383,19 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
-
-struct IndexedSpriteParams {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    originX: i32,
-    originY: i32,
-    srcX: i32,
-    srcY: i32,
-    mode: i32,
-    _pad0: i32,
-    _pad1: i32,
-    _pad2: i32,
-    _pad3: i32,
-    _pad4: i32,
-    _pad5: i32,
-    _pad6: i32,
-};
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var intensityTexture: texture_2d<u32>;
 @group(0) @binding(2) var paletteTexture: texture_2d<u32>;
 @group(0) @binding(3) var lineOffsetTexture: texture_2d<u32>;
-@group(0) @binding(4) var<uniform> params: IndexedSpriteParams;
+@group(0) @binding(4) var<storage, read> indexedSpriteParams: array<i32>;
+
+fn indexedSpriteParam(base: u32, index: u32) -> i32 {
+    return indexedSpriteParams[base + index];
+}
 
 fn toByte(channel: f32) -> u32 {
     return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
@@ -1439,9 +1414,9 @@ fn intensityAt(src: vec2<i32>) -> u32 {
     return textureLoad(intensityTexture, src, 0).r;
 }
 
-fn titleFlameIntensity(pixel: vec2<i32>, mode: i32) -> u32 {
-    let localX = pixel.x - params.originX;
-    let localY = pixel.y - params.originY;
+fn titleFlameIntensity(pixel: vec2<i32>, mode: i32, paramBase: u32) -> u32 {
+    let localX = pixel.x - indexedSpriteParam(paramBase, 4u);
+    let localY = pixel.y - indexedSpriteParam(paramBase, 5u);
     let flameY = localY - 8;
     let size = textureDimensions(intensityTexture);
     if (localX < 0 || localX >= i32(size.x) || flameY < 1 || flameY >= i32(size.y) - 1) {
@@ -1469,18 +1444,19 @@ fn titleFlameIntensity(pixel: vec2<i32>, mode: i32) -> u32 {
     return intensityAt(vec2<i32>(srcX, flameY));
 }
 
-fn spriteIntensity(pixel: vec2<i32>) -> u32 {
-    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+fn spriteIntensity(pixel: vec2<i32>, paramBase: u32) -> u32 {
+    if (pixel.x < indexedSpriteParam(paramBase, 0u) || pixel.x >= indexedSpriteParam(paramBase, 0u) + indexedSpriteParam(paramBase, 2u) || pixel.y < indexedSpriteParam(paramBase, 1u) || pixel.y >= indexedSpriteParam(paramBase, 1u) + indexedSpriteParam(paramBase, 3u)) {
         return 0u;
     }
 
-    if (params.mode == 1 || params.mode == 2) {
-        return titleFlameIntensity(pixel, params.mode);
+    let mode = indexedSpriteParam(paramBase, 8u);
+    if (mode == 1 || mode == 2) {
+        return titleFlameIntensity(pixel, mode, paramBase);
     }
 
     return intensityAt(vec2<i32>(
-        params.srcX + pixel.x - params.x,
-        params.srcY + pixel.y - params.y
+        indexedSpriteParam(paramBase, 6u) + pixel.x - indexedSpriteParam(paramBase, 0u),
+        indexedSpriteParam(paramBase, 7u) + pixel.y - indexedSpriteParam(paramBase, 1u)
     ));
 }
 
@@ -1488,7 +1464,7 @@ fn spriteIntensity(pixel: vec2<i32>) -> u32 {
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
-    let alpha = spriteIntensity(pixel);
+    let alpha = spriteIntensity(pixel, input.paramBase);
     if (alpha == 0u) {
         return vec4f(base.rgb, 1.0);
     }
@@ -1504,10 +1480,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const TRANSFORM_SPRITE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -1519,31 +1496,17 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
-struct TransformSpriteParams {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    startX: i32,
-    startY: i32,
-    stepX: i32,
-    stepY: i32,
-    rowStepX: i32,
-    rowStepY: i32,
-    transparentZero: i32,
-    sourceStride: i32,
-    _pad1: i32,
-    _pad2: i32,
-    _pad3: i32,
-    _pad4: i32,
-};
-
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var spriteTexture: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> params: TransformSpriteParams;
+@group(0) @binding(2) var<storage, read> transformSpriteParams: array<i32>;
+
+fn transformSpriteParam(base: u32, index: u32) -> i32 {
+    return transformSpriteParams[base + index];
+}
 
 fn fixedToInt(value: i32) -> i32 {
     if (value >= 0) {
@@ -1557,26 +1520,27 @@ fn fixedToInt(value: i32) -> i32 {
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
+    let paramBase = input.paramBase;
 
-    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+    if (pixel.x < transformSpriteParam(paramBase, 0u) || pixel.x >= transformSpriteParam(paramBase, 0u) + transformSpriteParam(paramBase, 2u) || pixel.y < transformSpriteParam(paramBase, 1u) || pixel.y >= transformSpriteParam(paramBase, 1u) + transformSpriteParam(paramBase, 3u)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let localX = pixel.x - params.x;
-    let localY = pixel.y - params.y;
+    let localX = pixel.x - transformSpriteParam(paramBase, 0u);
+    let localY = pixel.y - transformSpriteParam(paramBase, 1u);
     let src = vec2<i32>(
-        fixedToInt(params.startX + localY * params.rowStepX + localX * params.stepX),
-        fixedToInt(params.startY + localY * params.rowStepY + localX * params.stepY)
+        fixedToInt(transformSpriteParam(paramBase, 4u) + localY * transformSpriteParam(paramBase, 8u) + localX * transformSpriteParam(paramBase, 6u)),
+        fixedToInt(transformSpriteParam(paramBase, 5u) + localY * transformSpriteParam(paramBase, 9u) + localX * transformSpriteParam(paramBase, 7u))
     );
     let spriteSize = textureDimensions(spriteTexture);
-    let spriteIndex = src.x + src.y * params.sourceStride;
+    let spriteIndex = src.x + src.y * transformSpriteParam(paramBase, 11u);
     if (spriteIndex < 0 || spriteIndex >= i32(spriteSize.x * spriteSize.y)) {
         return vec4f(0.0, 0.0, 0.0, 1.0);
     }
 
     let spriteCoord = vec2<i32>(spriteIndex % i32(spriteSize.x), spriteIndex / i32(spriteSize.x));
     let sprite = textureLoad(spriteTexture, spriteCoord, 0);
-    if (params.transparentZero != 0 && sprite.a < 0.5) {
+    if (transformSpriteParam(paramBase, 10u) != 0 && sprite.a < 0.5) {
         return vec4f(base.rgb, 1.0);
     }
 
@@ -1587,10 +1551,11 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 const MASKED_SPRITE_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -1602,46 +1567,33 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
-
-struct MaskedSpriteParams {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    srcX: i32,
-    srcY: i32,
-    surfaceX: i32,
-    surfaceY: i32,
-    maskStride: i32,
-    _pad0: i32,
-    _pad1: i32,
-    _pad2: i32,
-    _pad3: i32,
-    _pad4: i32,
-    _pad5: i32,
-    _pad6: i32,
-};
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var spriteTexture: texture_2d<f32>;
 @group(0) @binding(2) var maskTexture: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> params: MaskedSpriteParams;
+@group(0) @binding(3) var<storage, read> maskedSpriteParams: array<i32>;
+
+fn maskedSpriteParam(base: u32, index: u32) -> i32 {
+    return maskedSpriteParams[base + index];
+}
 
 @fragment
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
+    let paramBase = input.paramBase;
 
-    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+    if (pixel.x < maskedSpriteParam(paramBase, 0u) || pixel.x >= maskedSpriteParam(paramBase, 0u) + maskedSpriteParam(paramBase, 2u) || pixel.y < maskedSpriteParam(paramBase, 1u) || pixel.y >= maskedSpriteParam(paramBase, 1u) + maskedSpriteParam(paramBase, 3u)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let localX = pixel.x - params.x;
-    let localY = pixel.y - params.y;
+    let localX = pixel.x - maskedSpriteParam(paramBase, 0u);
+    let localY = pixel.y - maskedSpriteParam(paramBase, 1u);
     let maskSize = textureDimensions(maskTexture);
-    let maskIndex = params.surfaceX + localX + (params.surfaceY + localY) * params.maskStride;
+    let maskIndex = maskedSpriteParam(paramBase, 6u) + localX + (maskedSpriteParam(paramBase, 7u) + localY) * maskedSpriteParam(paramBase, 8u);
     if (maskIndex < 0 || maskIndex >= i32(maskSize.x * maskSize.y)) {
         return vec4f(base.rgb, 1.0);
     }
@@ -1652,7 +1604,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
         return vec4f(base.rgb, 1.0);
     }
 
-    let spriteCoord = vec2<i32>(params.srcX + localX, params.srcY + localY);
+    let spriteCoord = vec2<i32>(maskedSpriteParam(paramBase, 4u) + localX, maskedSpriteParam(paramBase, 5u) + localY);
     let spriteSize = textureDimensions(spriteTexture);
     if (spriteCoord.x < 0 || spriteCoord.y < 0 || spriteCoord.x >= i32(spriteSize.x) || spriteCoord.y >= i32(spriteSize.y)) {
         return vec4f(0.0, 0.0, 0.0, 1.0);
@@ -2163,6 +2115,8 @@ export type WebGpuPacketReplayStats = {
     gpuGouraudBindGroupsReused: number;
     gpuGlyphStorageDrawsReplayed: number;
     gpuGlyphBindGroupsReused: number;
+    gpuSpriteFamilyStorageDrawsReplayed: number;
+    gpuSpriteFamilyBindGroupsReused: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2333,6 +2287,10 @@ export default class WebGpuFramePresenter {
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private readonly glyphTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
     private readonly glyphReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
+    private readonly spriteAlphaReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
+    private readonly indexedSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
+    private readonly transformSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
+    private readonly maskedSpriteReplayBindGroups = new Map<GpuTexture, Map<GpuTexture, Map<GpuTexture, object>>>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
     private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
     private readonly indexedSpriteTextures = new Map<number, { intensityTexture: GpuTexture; paletteTexture: GpuTexture; lineOffsetTexture: GpuTexture; width: number; height: number; version: number }>();
@@ -2403,6 +2361,8 @@ export default class WebGpuFramePresenter {
             gpuGouraudBindGroupsReused: 0,
             gpuGlyphStorageDrawsReplayed: 0,
             gpuGlyphBindGroupsReused: 0,
+            gpuSpriteFamilyStorageDrawsReplayed: 0,
+            gpuSpriteFamilyBindGroupsReused: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2848,6 +2808,7 @@ export default class WebGpuFramePresenter {
         this.scratchFrameTexture?.destroy();
         this.modelDepthTexture?.destroy();
         this.glyphReplayBindGroups.clear();
+        this.clearSpriteFamilyReplayBindGroups();
         this.width = Math.max(1, this.sourceCanvas.width);
         this.height = Math.max(1, this.sourceCanvas.height);
 
@@ -3860,27 +3821,7 @@ export default class WebGpuFramePresenter {
         params[8] = Math.trunc((op.srcHeight * 65536) / op.rect.height);
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.spriteAlphaPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: cached.texture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getSpriteAlphaBindGroup(this.frameTexture, cached.texture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -3894,8 +3835,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.spriteAlphaPipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuSpriteFamilyStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -3963,35 +3905,7 @@ export default class WebGpuFramePresenter {
         params[8] = op.mode;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.indexedSpritePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: cached.intensityTexture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: cached.paletteTexture.createView()
-                },
-                {
-                    binding: 3,
-                    resource: cached.lineOffsetTexture.createView()
-                },
-                {
-                    binding: 4,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getIndexedSpriteBindGroup(this.frameTexture, cached.intensityTexture, cached.paletteTexture, cached.lineOffsetTexture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -4005,8 +3919,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.indexedSpritePipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuSpriteFamilyStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4036,27 +3951,7 @@ export default class WebGpuFramePresenter {
         params[11] = op.sourceStride;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.transformSpritePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: cached.texture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getTransformSpriteBindGroup(this.frameTexture, cached.texture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -4070,8 +3965,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.transformSpritePipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuSpriteFamilyStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4098,31 +3994,7 @@ export default class WebGpuFramePresenter {
         params[8] = op.maskStride;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.maskedSpritePipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: cached.texture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: cachedMask.texture.createView()
-                },
-                {
-                    binding: 3,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getMaskedSpriteBindGroup(this.frameTexture, cached.texture, cachedMask.texture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -4136,8 +4008,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.maskedSpritePipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuSpriteFamilyStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4175,6 +4048,7 @@ export default class WebGpuFramePresenter {
         }
         if (cached) {
             cached.texture.destroy();
+            this.clearSpriteFamilyReplayBindGroups();
             this.spriteTextures.delete(resource.id);
         }
 
@@ -4285,6 +4159,7 @@ export default class WebGpuFramePresenter {
             cached.intensityTexture.destroy();
             cached.paletteTexture.destroy();
             cached.lineOffsetTexture.destroy();
+            this.indexedSpriteReplayBindGroups.clear();
             this.indexedSpriteTextures.delete(resource.id);
         }
 
@@ -4665,6 +4540,7 @@ export default class WebGpuFramePresenter {
 
         this.frameUniformBuffer?.destroy();
         this.glyphReplayBindGroups.clear();
+        this.clearSpriteFamilyReplayBindGroups();
         this.frameUniformBufferBytes = alignTo(byteLength, UNIFORM_BUFFER_ALIGNMENT);
         this.frameUniformBuffer = this.device.createBuffer({
             size: this.frameUniformBufferBytes,
@@ -4896,6 +4772,191 @@ export default class WebGpuFramePresenter {
         return bindGroup;
     }
 
+    private clearSpriteFamilyReplayBindGroups(): void {
+        this.spriteAlphaReplayBindGroups.clear();
+        this.indexedSpriteReplayBindGroups.clear();
+        this.transformSpriteReplayBindGroups.clear();
+        this.maskedSpriteReplayBindGroups.clear();
+    }
+
+    private getSpriteAlphaBindGroup(sourceTexture: GpuTexture, spriteTexture: GpuTexture): object {
+        let sourceBindGroups = this.spriteAlphaReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, object>();
+            this.spriteAlphaReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        const cached = sourceBindGroups.get(spriteTexture);
+        if (cached) {
+            this.packetReplayStats.gpuSpriteFamilyBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('sprite alpha parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.spriteAlphaPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: spriteTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        sourceBindGroups.set(spriteTexture, bindGroup);
+        return bindGroup;
+    }
+
+    private getIndexedSpriteBindGroup(sourceTexture: GpuTexture, intensityTexture: GpuTexture, paletteTexture: GpuTexture, lineOffsetTexture: GpuTexture): object {
+        let sourceBindGroups = this.indexedSpriteReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, object>();
+            this.indexedSpriteReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        const cached = sourceBindGroups.get(intensityTexture);
+        if (cached) {
+            this.packetReplayStats.gpuSpriteFamilyBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('indexed sprite parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.indexedSpritePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: intensityTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: paletteTexture.createView()
+                },
+                {
+                    binding: 3,
+                    resource: lineOffsetTexture.createView()
+                },
+                {
+                    binding: 4,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        sourceBindGroups.set(intensityTexture, bindGroup);
+        return bindGroup;
+    }
+
+    private getTransformSpriteBindGroup(sourceTexture: GpuTexture, spriteTexture: GpuTexture): object {
+        let sourceBindGroups = this.transformSpriteReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, object>();
+            this.transformSpriteReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        const cached = sourceBindGroups.get(spriteTexture);
+        if (cached) {
+            this.packetReplayStats.gpuSpriteFamilyBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('transform sprite parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.transformSpritePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: spriteTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        sourceBindGroups.set(spriteTexture, bindGroup);
+        return bindGroup;
+    }
+
+    private getMaskedSpriteBindGroup(sourceTexture: GpuTexture, spriteTexture: GpuTexture, maskTexture: GpuTexture): object {
+        let sourceBindGroups = this.maskedSpriteReplayBindGroups.get(sourceTexture);
+        if (!sourceBindGroups) {
+            sourceBindGroups = new Map<GpuTexture, Map<GpuTexture, object>>();
+            this.maskedSpriteReplayBindGroups.set(sourceTexture, sourceBindGroups);
+        }
+
+        let spriteBindGroups = sourceBindGroups.get(spriteTexture);
+        if (!spriteBindGroups) {
+            spriteBindGroups = new Map<GpuTexture, object>();
+            sourceBindGroups.set(spriteTexture, spriteBindGroups);
+        }
+
+        const cached = spriteBindGroups.get(maskTexture);
+        if (cached) {
+            this.packetReplayStats.gpuSpriteFamilyBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('masked sprite parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.maskedSpritePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: spriteTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: maskTexture.createView()
+                },
+                {
+                    binding: 3,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        spriteBindGroups.set(maskTexture, bindGroup);
+        return bindGroup;
+    }
+
     private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
         this.packetReplayStats.gpuRenderPassesEncoded++;
         return context.encoder.beginRenderPass(descriptor);
@@ -5005,6 +5066,7 @@ export default class WebGpuFramePresenter {
         this.spriteTextures.clear();
         this.glyphTextures.clear();
         this.glyphReplayBindGroups.clear();
+        this.clearSpriteFamilyReplayBindGroups();
         this.texelTextures.clear();
         this.indexedSpriteTextures.clear();
         this.frameTexture = null;
