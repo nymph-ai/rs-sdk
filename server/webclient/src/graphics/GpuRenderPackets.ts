@@ -30,7 +30,8 @@ export type GpuTextureResource = {
     id: number;
     width: number;
     height: number;
-    rgba: Uint8Array;
+    indexRgba: Uint8Array;
+    paletteRgba: Uint8Array;
     version: number;
 };
 
@@ -366,11 +367,22 @@ function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
     return rgba;
 }
 
-function makeTexelRgba(texels: Int32Array): Uint8Array {
-    const rgba = new Uint8Array(256 * 256 * 4);
-    const length = Math.min(texels.length, 256 * 256);
+function makeTextureIndexRgba(indices: Int8Array, width: number, height: number): Uint8Array {
+    const rgba = new Uint8Array(width * height * 4);
+    const length = Math.min(indices.length, width * height);
     for (let i = 0; i < length; i++) {
-        const rgb = texels[i];
+        const offset = i * 4;
+        rgba[offset] = indices[i] & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
+function makePaletteRgba(palette: Int32Array): Uint8Array {
+    const rgba = new Uint8Array(256 * 4);
+    const length = Math.min(palette.length, 256);
+    for (let i = 0; i < length; i++) {
+        const rgb = palette[i];
         const offset = i * 4;
         rgba[offset] = (rgb >> 16) & 0xff;
         rgba[offset + 1] = (rgb >> 8) & 0xff;
@@ -737,11 +749,14 @@ export function recordColourTable(colourTable: Int32Array, version: number): voi
     };
 }
 
-export function recordTextureResource(id: number, texels: Int32Array, version: number): void {
+export function recordTextureResource(id: number, indices: Int8Array, width: number, height: number, palette: Int32Array, version: number): void {
     const existing = textureResources.find(item => item.id === id);
     if (existing) {
         if (existing.version !== version) {
-            existing.rgba = makeTexelRgba(texels);
+            existing.width = width;
+            existing.height = height;
+            existing.indexRgba = makeTextureIndexRgba(indices, width, height);
+            existing.paletteRgba = makePaletteRgba(palette);
             existing.version = version;
         }
         return;
@@ -749,9 +764,10 @@ export function recordTextureResource(id: number, texels: Int32Array, version: n
 
     textureResources.push({
         id,
-        width: 256,
-        height: 256,
-        rgba: makeTexelRgba(texels),
+        width,
+        height,
+        indexRgba: makeTextureIndexRgba(indices, width, height),
+        paletteRgba: makePaletteRgba(palette),
         version
     });
 }

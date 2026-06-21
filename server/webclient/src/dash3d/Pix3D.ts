@@ -1726,6 +1726,17 @@ export default class Pix3D extends Pix2D {
         recordFillRect(off % Pix2D.width, (off / Pix2D.width) | 0, 1, 1, rgb);
     }
 
+    private static textureHasTransparency(texture: Pix8): boolean {
+        const length = texture.data.length;
+        for (let i = 0; i < length; i++) {
+            if (texture.data[i] === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     static textureTriangle(
         xA: number, xB: number, xC: number,
         yA: number, yB: number, yC: number,
@@ -1736,11 +1747,17 @@ export default class Pix3D extends Pix2D {
         tzB: number, tzC: number,
         texture: number
     ): void {
-        const texels: Int32Array | null = this.getTexels(texture);
-        this.opaque = !this.texTrans[texture];
-        const gpuRasterize = Boolean(texels) && gpuRenderPackets.shouldSkipCpuRasterWrites();
-        if (gpuRasterize && texels) {
-            recordTextureResource(texture, texels, this.texelVersions[texture]);
+        const sourceTexture: Pix8 | null = this.textures[texture];
+        const palette: Int32Array | null = this.texPal[texture];
+        const gpuRasterize = Boolean(sourceTexture && palette) && gpuRenderPackets.shouldSkipCpuRasterWrites();
+        let texels: Int32Array | null = null;
+        if (gpuRasterize && sourceTexture && palette) {
+            this.opaque = !this.textureHasTransparency(sourceTexture);
+            this.texelVersions[texture]++;
+            recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture]);
+        } else {
+            texels = this.getTexels(texture);
+            this.opaque = !this.texTrans[texture];
         }
         recordTextureTriangle(
             xA, xB, xC,
@@ -1751,7 +1768,7 @@ export default class Pix3D extends Pix2D {
             tyB, tyC,
             tzB, tzC,
             texture,
-            Boolean(texels),
+            gpuRasterize || Boolean(texels),
             this.lowDetail,
             this.lowMem,
             this.opaque,

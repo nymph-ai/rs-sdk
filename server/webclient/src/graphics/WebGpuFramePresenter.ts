@@ -665,7 +665,10 @@ struct TextureTriangleParams {
     clipMinY: i32,
     clipMaxX: i32,
     clipMaxY: i32,
+    textureWidth: i32,
+    textureHeight: i32,
     _pad0: i32,
+    _pad1: i32,
 };
 
 struct TextureSpan {
@@ -677,8 +680,9 @@ struct TextureSpan {
 };
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
-@group(0) @binding(1) var texelTexture: texture_2d<u32>;
-@group(0) @binding(2) var<uniform> params: TextureTriangleParams;
+@group(0) @binding(1) var textureIndices: texture_2d<u32>;
+@group(0) @binding(2) var texturePalette: texture_2d<u32>;
+@group(0) @binding(3) var<uniform> params: TextureTriangleParams;
 
 fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
     if (y0 == y1) {
@@ -783,6 +787,26 @@ fn textureSpan(pixelY: i32) -> TextureSpan {
     return orderedTextureSpan(pixelY, params.xC, params.yC, params.shadeC, params.xB, params.yB, params.shadeB, params.xA, params.yA, params.shadeA);
 }
 
+fn shadePaletteRgb(index: u32, shadePlane: i32, shadeShift: i32) -> u32 {
+    let palette = textureLoad(texturePalette, vec2<i32>(i32(index), 0), 0);
+    var rgb = ((palette.r << 16u) | (palette.g << 8u) | palette.b) & 0xf8f8ffu;
+    if (shadePlane == 1) {
+        rgb = (rgb - (rgb >> 3u)) & 0xf8f8ffu;
+    } else if (shadePlane == 2) {
+        rgb = (rgb - (rgb >> 2u)) & 0xf8f8ffu;
+    } else if (shadePlane == 3) {
+        rgb = (rgb - (rgb >> 2u) - (rgb >> 3u)) & 0xf8f8ffu;
+    }
+
+    return rgb >> u32(shadeShift);
+}
+
+fn textureIndexAt(x: i32, y: i32) -> u32 {
+    let clampedX = clamp(x, 0, max(params.textureWidth - 1, 0));
+    let clampedY = clamp(y, 0, max(params.textureHeight - 1, 0));
+    return textureLoad(textureIndices, vec2<i32>(clampedX, clampedY), 0).r;
+}
+
 fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
     if (span.valid == 0 || span.startX >= span.endX || pixel.x < span.startX || pixel.x >= span.endX) {
         return 0xffffffffu;
@@ -877,14 +901,12 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
 
         let stepU = (nextU - curU) >> 3;
         let stepV = (nextV - curV) >> 3;
-        curU += (shadeBase >> 3) & 0xc0000;
+        let shadePlane = ((shadeBase >> 3) & 0xc0000) >> 18;
         let shadeShift = shadeBase >> 23;
         let sampleU = curU + stepU * groupPixel;
         let sampleV = curV + stepV * groupPixel;
-        let texelIndex = (sampleV & 0xfc0) + (sampleU >> 6);
-        let texel = textureLoad(texelTexture, vec2<i32>(texelIndex & 255, texelIndex >> 8), 0);
-        let rgb = ((texel.r << 16u) | (texel.g << 8u) | texel.b) >> u32(shadeShift);
-        return rgb;
+        let index = textureIndexAt(sampleU >> 6, (sampleV & 0xfc0) >> 6);
+        return shadePaletteRgb(index, shadePlane, shadeShift);
     }
 
     let curW = wGroup >> 14;
@@ -911,14 +933,18 @@ fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
 
     let stepU = (nextU - curU) >> 3;
     let stepV = (nextV - curV) >> 3;
-    curU += shadeBase & 0x600000;
+    let shadePlane = (shadeBase & 0x600000) >> 21;
     let shadeShift = shadeBase >> 23;
     let sampleU = curU + stepU * groupPixel;
     let sampleV = curV + stepV * groupPixel;
-    let texelIndex = (sampleV & 0x3f80) + (sampleU >> 7);
-    let texel = textureLoad(texelTexture, vec2<i32>(texelIndex & 255, texelIndex >> 8), 0);
-    let rgb = ((texel.r << 16u) | (texel.g << 8u) | texel.b) >> u32(shadeShift);
-    return rgb;
+    var texX = sampleU >> 7;
+    var texY = (sampleV & 0x3f80) >> 7;
+    if (params.textureWidth == 64) {
+        texX = texX >> 1;
+        texY = texY >> 1;
+    }
+    let index = textureIndexAt(texX, texY);
+    return shadePaletteRgb(index, shadePlane, shadeShift);
 }
 
 @fragment
@@ -1225,7 +1251,7 @@ const FLOATS_PER_SPRITE_VERTEX = 4;
 const RECT_INSTANCE_UNIFORM_FLOATS = 4;
 const ALPHA_UNIFORM_INTS = 16;
 const GOURAUD_UNIFORM_INTS = 16;
-const TEXTURE_TRIANGLE_UNIFORM_INTS = 28;
+const TEXTURE_TRIANGLE_UNIFORM_INTS = 32;
 const SPRITE_ALPHA_UNIFORM_INTS = 16;
 const TRANSFORM_SPRITE_UNIFORM_INTS = 16;
 const MASKED_SPRITE_UNIFORM_INTS = 16;
@@ -1775,7 +1801,7 @@ export default class WebGpuFramePresenter {
     private spriteVertexBufferBytes: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
-    private readonly texelTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
+    private readonly texelTextures = new Map<number, { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number }>();
     private packetCursor: number = 0;
     private packetDropped: number = 0;
     private readonly bufferUsage = getBufferUsage();
@@ -2958,6 +2984,8 @@ export default class WebGpuFramePresenter {
         params[24] = op.clip.y;
         params[25] = op.clip.x + op.clip.width;
         params[26] = op.clip.y + op.clip.height;
+        params[27] = resource.width;
+        params[28] = resource.height;
         this.device.queue.writeBuffer(this.textureTriangleUniformBuffer!, 0, params);
 
         const bindGroup = this.device.createBindGroup({
@@ -2969,10 +2997,14 @@ export default class WebGpuFramePresenter {
                 },
                 {
                     binding: 1,
-                    resource: texels.texture.createView()
+                    resource: texels.indexTexture.createView()
                 },
                 {
                     binding: 2,
+                    resource: texels.paletteTexture.createView()
+                },
+                {
+                    binding: 3,
                     resource: {
                         buffer: this.textureTriangleUniformBuffer
                     }
@@ -3342,21 +3374,23 @@ export default class WebGpuFramePresenter {
         );
     }
 
-    private getTexelTexture(resource: GpuTextureResource): { texture: GpuTexture; width: number; height: number; version: number } {
+    private getTexelTexture(resource: GpuTextureResource): { indexTexture: GpuTexture; paletteTexture: GpuTexture; width: number; height: number; version: number } {
         const cached = this.texelTextures.get(resource.id);
         if (cached && cached.width === resource.width && cached.height === resource.height) {
             if (cached.version !== resource.version) {
-                this.writeTexelTexture(cached.texture, resource);
+                this.writeTextureIndexTexture(cached.indexTexture, resource);
+                this.writeTexturePaletteTexture(cached.paletteTexture, resource);
                 cached.version = resource.version;
             }
             return cached;
         }
         if (cached) {
-            cached.texture.destroy();
+            cached.indexTexture.destroy();
+            cached.paletteTexture.destroy();
             this.texelTextures.delete(resource.id);
         }
 
-        const texture = this.device.createTexture({
+        const indexTexture = this.device.createTexture({
             size: {
                 width: resource.width,
                 height: resource.height,
@@ -3365,16 +3399,26 @@ export default class WebGpuFramePresenter {
             format: 'rgba8uint',
             usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
         });
-        this.writeTexelTexture(texture, resource);
-        const value = { texture, width: resource.width, height: resource.height, version: resource.version };
+        const paletteTexture = this.device.createTexture({
+            size: {
+                width: 256,
+                height: 1,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        this.writeTextureIndexTexture(indexTexture, resource);
+        this.writeTexturePaletteTexture(paletteTexture, resource);
+        const value = { indexTexture, paletteTexture, width: resource.width, height: resource.height, version: resource.version };
         this.texelTextures.set(resource.id, value);
         return value;
     }
 
-    private writeTexelTexture(texture: GpuTexture, resource: GpuTextureResource): void {
+    private writeTextureIndexTexture(texture: GpuTexture, resource: GpuTextureResource): void {
         this.device.queue.writeTexture(
             { texture },
-            resource.rgba,
+            resource.indexRgba,
             {
                 offset: 0,
                 bytesPerRow: resource.width * 4,
@@ -3383,6 +3427,23 @@ export default class WebGpuFramePresenter {
             {
                 width: resource.width,
                 height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private writeTexturePaletteTexture(texture: GpuTexture, resource: GpuTextureResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.paletteRgba,
+            {
+                offset: 0,
+                bytesPerRow: 256 * 4,
+                rowsPerImage: 1
+            },
+            {
+                width: 256,
+                height: 1,
                 depthOrArrayLayers: 1
             }
         );
@@ -3548,7 +3609,8 @@ export default class WebGpuFramePresenter {
             cached.texture.destroy();
         }
         for (const cached of this.texelTextures.values()) {
-            cached.texture.destroy();
+            cached.indexTexture.destroy();
+            cached.paletteTexture.destroy();
         }
         this.spriteTextures.clear();
         this.texelTextures.clear();
