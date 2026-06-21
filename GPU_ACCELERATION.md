@@ -10,7 +10,7 @@ The first implementation slice adds a feature-detected WebGPU presentation backe
 - `server/webclient/src/graphics/Canvas.ts`
 - `server/webclient/src/graphics/PixMap.ts`
 
-When WebGPU is available, `PixMap.draw()` uploads each prepared `ImageData` region into a GPU texture and presents it through a full-screen WGSL shader. The existing 2D canvas path remains the fallback and can be forced with:
+When the WebGPU renderer is selected, `PixMap.draw()` uploads each prepared `ImageData` region into a GPU texture and presents it through a full-screen WGSL shader. WebGPU startup and presentation failures are treated as renderer bugs, not automatic CPU renderer recoveries. The 2D canvas renderer remains available only as an explicit mode:
 
 ```text
 ?renderer=canvas
@@ -95,7 +95,7 @@ or:
 localStorage.setItem('rs-sdk.rendererPacketReplay', '1')
 ```
 
-Packet replay currently consumes opaque 2D clear, filled-rectangle, horizontal-line, and vertical-line packets and rasterizes them into the WebGPU frame texture. The existing CPU renderer remains the oracle: unsupported packets, alpha-blended 2D packets, dropped packets, or packet/image surface mismatches fall back to the CPU `ImageData` upload path and advance the packet cursor from that CPU-synced frame. Replay counters are exposed at:
+Packet replay currently consumes opaque 2D clear, filled-rectangle, horizontal-line, and vertical-line packets and rasterizes them into the WebGPU frame texture. The existing CPU renderer remains the oracle for validation only. Unsupported packets, alpha-blended 2D packets, dropped packets, packet stream resets, or packet/image surface mismatches are hard replay failures to fix, not CPU renderer recovery paths. Replay counters and failures are exposed at:
 
 ```js
 window.__rsSdkRendererStats.packetReplay

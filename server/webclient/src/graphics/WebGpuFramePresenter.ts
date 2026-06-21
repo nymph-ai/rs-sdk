@@ -140,7 +140,6 @@ type Rect = {
 type PacketReplayBuildResult = {
     vertices: Float32Array;
     packetCount: number;
-    fallbackReason: string;
 };
 
 function getGpu(): BrowserGpu | null {
@@ -318,11 +317,10 @@ export type WebGpuPacketReplayStats = {
     enabled: boolean;
     framesAttempted: number;
     framesReplayed: number;
-    framesFallback: number;
+    framesFailed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
-    lastFallbackReason: string;
     lastError: string;
 };
 
@@ -480,11 +478,10 @@ export default class WebGpuFramePresenter {
             enabled: this.packetReplayEnabled && Boolean(this.bufferUsage?.COPY_DST && this.bufferUsage?.VERTEX),
             framesAttempted: 0,
             framesReplayed: 0,
-            framesFallback: 0,
+            framesFailed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
-            lastFallbackReason: '',
             lastError: ''
         };
         if (this.packetReplayEnabled) {
@@ -610,11 +607,11 @@ export default class WebGpuFramePresenter {
         const copyWidth = Math.min(imageData.width - sourceX, this.width - dstX);
         const copyHeight = Math.min(imageData.height - sourceY, this.height - dstY);
         if (copyWidth <= 0 || copyHeight <= 0) {
-            this.syncPacketReplayCursor();
             return true;
         }
 
-        if (this.tryReplayPackets(imageData, x, y)) {
+        if (this.packetReplayEnabled) {
+            this.replayPacketsOrThrow(imageData, x, y);
             this.validator?.maybeValidate(this.frameTexture, imageData, sourceX, sourceY, dstX, dstY, copyWidth, copyHeight);
             this.draw();
             return true;
@@ -637,7 +634,6 @@ export default class WebGpuFramePresenter {
                 depthOrArrayLayers: 1
             }
         );
-        this.syncPacketReplayCursor();
         this.validator?.maybeValidate(this.frameTexture, imageData, sourceX, sourceY, dstX, dstY, copyWidth, copyHeight);
 
         this.draw();
@@ -703,44 +699,40 @@ export default class WebGpuFramePresenter {
         );
     }
 
-    private tryReplayPackets(imageData: ImageData, x: number, y: number): boolean {
+    private replayPacketsOrThrow(imageData: ImageData, x: number, y: number): void {
         if (!this.packetReplayStats.enabled || !this.frameTexture) {
-            return false;
+            this.failPacketReplay(this.packetReplayStats.lastError || 'packet replay requested but WebGPU vertex replay is unavailable');
         }
 
         const snapshot = gpuRenderPackets.snapshot();
         if (!snapshot.enabled) {
-            return false;
+            this.failPacketReplay('packet replay requested but packet recording is disabled');
         }
 
         if (snapshot.packets.length === this.packetCursor && snapshot.dropped === this.packetDropped) {
-            return false;
+            this.failPacketReplay('packet replay requested but no new packets were recorded');
         }
 
         this.packetReplayStats.framesAttempted++;
 
         if (snapshot.packets.length < this.packetCursor) {
             this.packetCursor = 0;
-            return this.packetReplayFallback('packet stream reset');
+            this.failPacketReplay('packet stream reset');
         }
 
         if (snapshot.dropped !== this.packetDropped) {
-            return this.packetReplayFallback('packet stream dropped packets');
+            this.failPacketReplay('packet stream dropped packets');
         }
 
         const surface = snapshot.surfaces.find(item => item.id === snapshot.currentSurface);
         if (!surface || surface.width !== imageData.width || surface.height !== imageData.height) {
-            return this.packetReplayFallback('current packet surface does not match ImageData');
+            this.failPacketReplay('current packet surface does not match ImageData');
         }
 
         const result = this.buildPacketReplayVertices(snapshot, x | 0, y | 0, surface.width, surface.height);
         this.packetReplayStats.lastPacketCount = result.packetCount;
-        if (result.fallbackReason) {
-            return this.packetReplayFallback(result.fallbackReason);
-        }
-
         if (result.vertices.length === 0) {
-            return this.packetReplayFallback('no drawable 2D packets');
+            this.failPacketReplay('no drawable 2D packets');
         }
 
         this.replayPrimitiveVertices(result.vertices);
@@ -749,9 +741,7 @@ export default class WebGpuFramePresenter {
         this.packetReplayStats.framesReplayed++;
         this.packetReplayStats.packetsReplayed += result.packetCount;
         this.packetReplayStats.lastVertexCount = result.vertices.length / FLOATS_PER_PRIMITIVE_VERTEX;
-        this.packetReplayStats.lastFallbackReason = '';
         this.packetReplayStats.lastError = '';
-        return true;
     }
 
     private buildPacketReplayVertices(
@@ -795,13 +785,13 @@ export default class WebGpuFramePresenter {
                     break;
                 case 'fillRect':
                     if (packet.alpha !== null) {
-                        return { vertices: new Float32Array(), packetCount, fallbackReason: 'alpha fillRect packets are not replayed yet' };
+                        this.failPacketReplay('alpha fillRect packets are not replayed yet');
                     }
                     pushSurfaceRect(vertices, packet, packet.rgb, clip, offsetX, offsetY, this.width, this.height);
                     break;
                 case 'line':
                     if (packet.alpha !== null) {
-                        return { vertices: new Float32Array(), packetCount, fallbackReason: 'alpha line packets are not replayed yet' };
+                        this.failPacketReplay('alpha line packets are not replayed yet');
                     }
                     pushSurfaceRect(
                         vertices,
@@ -820,11 +810,11 @@ export default class WebGpuFramePresenter {
                     );
                     break;
                 default:
-                    return { vertices: new Float32Array(), packetCount, fallbackReason: `${packet.kind} packets are not replayed yet` };
+                    this.failPacketReplay(`${packet.kind} packets are not replayed yet`);
             }
         }
 
-        return { vertices: new Float32Array(vertices), packetCount, fallbackReason: '' };
+        return { vertices: new Float32Array(vertices), packetCount };
     }
 
     private replayPrimitiveVertices(vertices: Float32Array): void {
@@ -862,20 +852,10 @@ export default class WebGpuFramePresenter {
         });
     }
 
-    private packetReplayFallback(reason: string): boolean {
-        this.packetReplayStats.framesFallback++;
-        this.packetReplayStats.lastFallbackReason = reason;
-        return false;
-    }
-
-    private syncPacketReplayCursor(): void {
-        if (!this.packetReplayEnabled) {
-            return;
-        }
-
-        const snapshot = gpuRenderPackets.snapshot();
-        this.packetCursor = snapshot.packets.length;
-        this.packetDropped = snapshot.dropped;
+    private failPacketReplay(reason: string): never {
+        this.packetReplayStats.framesFailed++;
+        this.packetReplayStats.lastError = reason;
+        throw new Error(`[WebGPU packet replay] ${reason}`);
     }
 
     private draw(): void {

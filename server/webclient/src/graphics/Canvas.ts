@@ -7,17 +7,19 @@ export const canvas2d: CanvasRenderingContext2D = canvas?.getContext('2d', {
 })!;
 
 let webGpuPresenter: WebGpuFramePresenter | null = null;
-let webGpuUnavailable = false;
 
 declare global {
     interface Window {
         __rsSdkRendererStats?: {
-            backend: 'canvas' | 'webgpu';
+            backend: 'canvas' | 'webgpu' | 'failed';
             validation: WebGpuFramePresenter['validationStats'];
             packetReplay: WebGpuFramePresenter['packetReplayStats'] | null;
+            error?: string;
         };
     }
 }
+
+let webGpuStartupError: Error | null = null;
 
 function getRendererParam(name: string): string | null {
     const params = new URLSearchParams(window.location.search);
@@ -33,7 +35,7 @@ function getRendererPreference(): string | null {
 }
 
 function shouldUseWebGpu(): boolean {
-    return getRendererParam('renderer') !== 'canvas' && getRendererPreference() !== 'canvas';
+    return packetReplayRequested || (getRendererParam('renderer') !== 'canvas' && getRendererPreference() !== 'canvas');
 }
 
 function shouldValidateWebGpu(): boolean {
@@ -69,40 +71,63 @@ function shouldReplayPackets(): boolean {
     }
 }
 
-if (canvas && shouldUseWebGpu()) {
-    void WebGpuFramePresenter.create(canvas, { validate: shouldValidateWebGpu(), packetReplay: shouldReplayPackets() })
+const packetReplayRequested = shouldReplayPackets();
+const webGpuRequested = Boolean(canvas && shouldUseWebGpu());
+
+if (webGpuRequested) {
+    void WebGpuFramePresenter.create(canvas, { validate: shouldValidateWebGpu(), packetReplay: packetReplayRequested })
         .then(presenter => {
             webGpuPresenter = presenter;
-            webGpuUnavailable = !presenter;
+            if (!presenter) {
+                webGpuStartupError = new Error('WebGPU presenter creation returned null');
+            }
             window.__rsSdkRendererStats = {
-                backend: presenter ? 'webgpu' : 'canvas',
+                backend: presenter ? 'webgpu' : 'failed',
                 validation: presenter?.validationStats ?? null,
-                packetReplay: presenter?.packetReplayStats ?? null
+                packetReplay: presenter?.packetReplayStats ?? null,
+                error: webGpuStartupError?.message
             };
         })
         .catch(err => {
-            webGpuUnavailable = true;
+            webGpuStartupError = err instanceof Error ? err : new Error(String(err));
             window.__rsSdkRendererStats = {
-                backend: 'canvas',
+                backend: 'failed',
                 validation: null,
-                packetReplay: null
+                packetReplay: null,
+                error: webGpuStartupError.message
             };
-            console.warn('[WebGPU] falling back to 2D canvas renderer', err);
+            console.error('[WebGPU] renderer startup failed', err);
         });
 } else {
+    if (packetReplayRequested) {
+        webGpuStartupError = new Error('packet replay requested but WebGPU renderer startup was disabled');
+    }
     window.__rsSdkRendererStats = {
-        backend: 'canvas',
+        backend: packetReplayRequested ? 'failed' : 'canvas',
         validation: null,
-        packetReplay: null
+        packetReplay: null,
+        error: webGpuStartupError?.message
     };
 }
 
 export function presentImageData(imageData: ImageData, x: number, y: number, ctx: CanvasRenderingContext2D): boolean {
-    if (webGpuUnavailable || ctx !== canvas2d || !webGpuPresenter) {
+    if (!webGpuRequested || ctx !== canvas2d) {
         return false;
     }
 
-    return webGpuPresenter.present(imageData, x, y);
+    if (webGpuStartupError) {
+        throw webGpuStartupError;
+    }
+
+    if (!webGpuPresenter) {
+        throw new Error('WebGPU presenter initialization has not completed');
+    }
+
+    if (!webGpuPresenter.present(imageData, x, y)) {
+        throw new Error('WebGPU presenter failed to present frame');
+    }
+
+    return true;
 }
 
 export function saveDataURL(dataURL: string, filename: string) {

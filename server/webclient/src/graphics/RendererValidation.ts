@@ -108,11 +108,13 @@ async function runValidation(): Promise<void> {
     const height = 112;
     const cpuCanvas = makeCanvas('cpu', width, height);
     const gpuCanvas = makeCanvas('gpu-source', width, height);
+    const packetGpuCanvas = makeCanvas('gpu-packet-source', width, height);
     const container = document.createElement('div');
     container.style.display = 'flex';
     container.style.gap = '16px';
     container.appendChild(cpuCanvas);
     container.appendChild(gpuCanvas);
+    container.appendChild(packetGpuCanvas);
     document.body.appendChild(container);
 
     const cpu = cpuCanvas.getContext('2d', { alpha: false });
@@ -122,8 +124,7 @@ async function runValidation(): Promise<void> {
 
     const presenter = await WebGpuFramePresenter.create(gpuCanvas, {
         validate: true,
-        validationSampleInterval: 1,
-        packetReplay: true
+        validationSampleInterval: 1
     });
     if (!presenter || !presenter.validationStats?.enabled) {
         throw new Error(`WebGPU unavailable: ${presenter?.validationStats?.lastError || 'no presenter'}`);
@@ -145,26 +146,36 @@ async function runValidation(): Promise<void> {
 
         const stats = { ...presenter.validationStats };
         const passed = stats.lastError === '' && stats.lastDiffPixels === 0 && stats.mismatches === 0;
-        const result = { name: testCase.name, passed, stats, packetReplayStats: presenter.packetReplayStats ? { ...presenter.packetReplayStats } : null };
+        const result = { name: testCase.name, passed, stats, packetReplayStats: null };
         results.push(result);
         printResult(result);
     }
 
-    const previousSamples = presenter.validationStats.samplesCompared;
-    const previousReplayed = presenter.packetReplayStats.framesReplayed;
+    const packetPresenter = await WebGpuFramePresenter.create(packetGpuCanvas, {
+        validate: true,
+        validationSampleInterval: 1,
+        packetReplay: true
+    });
+    if (!packetPresenter || !packetPresenter.validationStats?.enabled || !packetPresenter.packetReplayStats.enabled) {
+        throw new Error(`WebGPU packet replay unavailable: ${packetPresenter?.validationStats?.lastError || packetPresenter?.packetReplayStats.lastError || 'no presenter'}`);
+    }
+
+    const previousSamples = packetPresenter.validationStats.samplesCompared;
+    const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
     const packetFrame = makePacketReplayFrame(width, height);
     cpu.putImageData(packetFrame, 0, 0);
-    presenter.present(packetFrame, 0, 0);
-    await waitForSample(presenter.validationStats, previousSamples);
+    packetPresenter.present(packetFrame, 0, 0);
+    await waitForSample(packetPresenter.validationStats, previousSamples);
 
-    const packetStats = { ...presenter.validationStats };
-    const packetReplayStats = { ...presenter.packetReplayStats };
+    const packetStats = { ...packetPresenter.validationStats };
+    const packetReplayStats = { ...packetPresenter.packetReplayStats };
     const packetPassed =
         packetStats.lastError === '' &&
         packetStats.lastDiffPixels === 0 &&
         packetStats.mismatches === 0 &&
         packetReplayStats.framesReplayed > previousReplayed &&
-        packetReplayStats.lastFallbackReason === '';
+        packetReplayStats.framesFailed === 0 &&
+        packetReplayStats.lastError === '';
     const packetResult = {
         name: 'packet-replay-2d-primitives',
         passed: packetPassed,
