@@ -51,7 +51,7 @@ type GpuCommandEncoder = {
 type GpuRenderPass = {
     setPipeline(pipeline: GpuRenderPipeline): void;
     setBindGroup(index: number, bindGroup: object): void;
-    setVertexBuffer(slot: number, buffer: GpuBuffer): void;
+    setVertexBuffer(slot: number, buffer: GpuBuffer, offset?: number, size?: number): void;
     draw(vertexCount: number, instanceCount?: number): void;
     end(): void;
 };
@@ -1691,6 +1691,7 @@ const FRAME_TEXTURE_FORMAT = 'rgba8unorm';
 const FLOATS_PER_PRIMITIVE_VERTEX = 6;
 const FLOATS_PER_RECT_INSTANCE = 8;
 const FLOATS_PER_SPRITE_VERTEX = 4;
+const UNIFORM_BUFFER_ALIGNMENT = 256;
 const RECT_INSTANCE_UNIFORM_FLOATS = 4;
 const ALPHA_UNIFORM_INTS = 16;
 const MODEL_FLAT_UNIFORM_INTS = 32;
@@ -1717,6 +1718,22 @@ type PacketReplayBuildResult = {
     nativeFlatTriangleCount: number;
     nativeGouraudTriangleCount: number;
     nativeTextureTriangleCount: number;
+};
+
+type FrameUniformBinding = {
+    buffer: GpuBuffer;
+    offset: number;
+    size: number;
+};
+
+type FrameVertexBinding = {
+    buffer: GpuBuffer;
+    offset: number;
+    size: number;
+};
+
+type PacketReplayContext = {
+    encoder: GpuCommandEncoder;
 };
 
 type PacketReplayStep = {
@@ -2146,6 +2163,14 @@ export type WebGpuPacketReplayStats = {
     gpuGlyphSpritesReplayed: number;
     gpuModelFlatTrianglesReplayed: number;
     gpuRetainedDepthPassesReplayed: number;
+    gpuFrameCommandSubmits: number;
+    gpuRenderPassesEncoded: number;
+    gpuBindGroupsCreated: number;
+    gpuBufferWrites: number;
+    gpuUniformBufferWrites: number;
+    gpuTextureCopies: number;
+    gpuFrameUniformBytesAllocated: number;
+    gpuFrameVertexBytesAllocated: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2300,13 +2325,19 @@ export default class WebGpuFramePresenter {
     private indexedSpriteUniformBuffer: GpuBuffer | null = null;
     private transformSpriteUniformBuffer: GpuBuffer | null = null;
     private maskedSpriteUniformBuffer: GpuBuffer | null = null;
+    private frameUniformBuffer: GpuBuffer | null = null;
+    private frameUniformBufferBytes: number = 0;
+    private frameUniformOffset: number = 0;
     private primitiveVertexBuffer: GpuBuffer | null = null;
     private primitiveVertexBufferBytes: number = 0;
+    private primitiveVertexFrameOffset: number = 0;
     private rectInstanceBuffer: GpuBuffer | null = null;
     private rectInstanceBufferBytes: number = 0;
+    private rectInstanceFrameOffset: number = 0;
     private modelFlatUniformBuffer: GpuBuffer | null = null;
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
+    private spriteVertexFrameOffset: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
     private readonly glyphTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
     private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
@@ -2363,6 +2394,14 @@ export default class WebGpuFramePresenter {
             gpuGlyphSpritesReplayed: 0,
             gpuModelFlatTrianglesReplayed: 0,
             gpuRetainedDepthPassesReplayed: 0,
+            gpuFrameCommandSubmits: 0,
+            gpuRenderPassesEncoded: 0,
+            gpuBindGroupsCreated: 0,
+            gpuBufferWrites: 0,
+            gpuUniformBufferWrites: 0,
+            gpuTextureCopies: 0,
+            gpuFrameUniformBytesAllocated: 0,
+            gpuFrameVertexBytesAllocated: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -3371,43 +3410,49 @@ export default class WebGpuFramePresenter {
     }
 
     private replayPrimitiveSteps(steps: PacketReplayStep[]): void {
+        this.prepareFrameUniformArena(steps);
+        this.prepareFrameVertexArenas(steps);
+        const context: PacketReplayContext = {
+            encoder: this.device.createCommandEncoder()
+        };
+
         for (const step of steps) {
             if (step.kind === 'vertices') {
-                this.replayPrimitiveVertices(step.vertices);
+                this.replayPrimitiveVertices(step.vertices, context);
             } else if (step.kind === 'alpha') {
-                this.replayAlphaOp(step.op);
+                this.replayAlphaOp(step.op, context);
             } else if (step.kind === 'rectInstances') {
-                this.replayRectInstances(step.instances);
+                this.replayRectInstances(step.instances, context);
             } else if (step.kind === 'gouraud') {
                 const resource = gpuRenderPackets.snapshot().colourTableResource;
                 if (!resource) {
                     this.failPacketReplay('colour table resource is missing');
                 }
 
-                this.replayGouraudOp(step.op, resource);
+                this.replayGouraudOp(step.op, resource, context);
             } else if (step.kind === 'modelFlatTriangle') {
-                this.replayModelFlatOp(step.op);
+                this.replayModelFlatOp(step.op, context);
             } else if (step.kind === 'textureTriangle') {
                 const resource = gpuRenderPackets.snapshot().textureResources.find(item => item.id === step.op.texture);
                 if (!resource) {
                     this.failPacketReplay(`texture resource ${step.op.texture} is missing`);
                 }
 
-                this.replayTextureTriangleOp(step.op, resource);
+                this.replayTextureTriangleOp(step.op, resource, context);
             } else if (step.kind === 'indexedSprite') {
                 const resource = gpuRenderPackets.snapshot().indexedSpriteResources.find(item => item.id === step.op.resource);
                 if (!resource) {
                     this.failPacketReplay(`indexed sprite resource ${step.op.resource} is missing`);
                 }
 
-                this.replayIndexedSpriteOp(step.op, resource);
+                this.replayIndexedSpriteOp(step.op, resource, context);
             } else if (step.kind === 'glyphSprite') {
                 const resource = gpuRenderPackets.snapshot().glyphResources.find(item => item.id === step.op.resource);
                 if (!resource) {
                     this.failPacketReplay(`glyph resource ${step.op.resource} is missing`);
                 }
 
-                this.replayGlyphOp(step.op, resource);
+                this.replayGlyphOp(step.op, resource, context);
             } else if (step.kind === 'maskedSprite') {
                 const resources = gpuRenderPackets.snapshot().spriteResources;
                 const resource = resources.find(item => item.id === step.op.resource);
@@ -3420,29 +3465,30 @@ export default class WebGpuFramePresenter {
                     this.failPacketReplay(`mask resource ${step.op.maskResource} is missing`);
                 }
 
-                this.replayMaskedSpriteOp(step.op, resource, maskResource);
+                this.replayMaskedSpriteOp(step.op, resource, maskResource, context);
             } else {
                 const resource = gpuRenderPackets.snapshot().spriteResources.find(item => item.id === step.op.resource);
                 if (!resource) {
                     this.failPacketReplay(`sprite resource ${step.op.resource} is missing`);
                 }
                 if (step.kind === 'transformSprite') {
-                    this.replayTransformSpriteOp(step.op, resource);
-                } else if (step.op.alpha === null && step.op.srcX === Math.trunc(step.op.srcX) && step.op.srcY === Math.trunc(step.op.srcY) && step.op.srcWidth === step.op.rect.width && step.op.srcHeight === step.op.rect.height) {
-                    this.replaySpriteOp(step.op, resource);
+                    this.replayTransformSpriteOp(step.op, resource, context);
+                } else if (this.canReplaySpriteDirectly(step.op)) {
+                    this.replaySpriteOp(step.op, resource, context);
                 } else {
-                    this.replayAlphaSpriteOp(step.op, resource);
+                    this.replayAlphaSpriteOp(step.op, resource, context);
                 }
             }
         }
+
+        this.submitReplayCommands(context);
+        this.recreateDisplayBindGroup();
     }
 
-    private replayPrimitiveVertices(vertices: Float32Array): void {
-        this.ensurePrimitiveVertexBuffer(vertices.byteLength);
-        this.device.queue.writeBuffer(this.primitiveVertexBuffer!, 0, vertices);
+    private replayPrimitiveVertices(vertices: Float32Array, context: PacketReplayContext): void {
+        const vertexBinding = this.allocatePrimitiveVertices(vertices);
 
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.frameTexture!.createView(),
@@ -3453,36 +3499,34 @@ export default class WebGpuFramePresenter {
         });
 
         pass.setPipeline(this.primitivePipeline);
-        pass.setVertexBuffer(0, this.primitiveVertexBuffer!);
+        pass.setVertexBuffer(0, vertexBinding.buffer, vertexBinding.offset, vertexBinding.size);
         pass.draw(vertices.length / FLOATS_PER_PRIMITIVE_VERTEX);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
     }
 
-    private replayRectInstances(instances: Float32Array): void {
+    private replayRectInstances(instances: Float32Array, context: PacketReplayContext): void {
         const instanceCount = instances.length / FLOATS_PER_RECT_INSTANCE;
         if (instanceCount <= 0) {
             return;
         }
 
-        this.ensureRectInstanceBuffer(instances.byteLength);
-        this.ensureRectInstanceUniformBuffer();
-        this.device.queue.writeBuffer(this.rectInstanceBuffer!, 0, instances);
-        this.device.queue.writeBuffer(this.rectInstanceUniformBuffer!, 0, new Float32Array([this.width, this.height, 0, 0]));
+        const instanceBinding = this.allocateRectInstances(instances);
+        const uniform = this.allocateFrameUniform(new Float32Array([this.width, this.height, 0, 0]));
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.rectInstancePipeline.getBindGroupLayout(0),
             entries: [
                 {
                     binding: 0,
                     resource: {
-                        buffer: this.rectInstanceUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.frameTexture!.createView(),
@@ -3494,19 +3538,17 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.rectInstancePipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.setVertexBuffer(0, this.rectInstanceBuffer!);
+        pass.setVertexBuffer(0, instanceBinding.buffer, instanceBinding.offset, instanceBinding.size);
         pass.draw(6, instanceCount);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
         this.packetReplayStats.gpuRectInstancesReplayed += instanceCount;
     }
 
-    private replayAlphaOp(op: AlphaReplayOp): void {
+    private replayAlphaOp(op: AlphaReplayOp, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('alpha replay requested before frame textures exist');
         }
 
-        this.ensureAlphaUniformBuffer();
         const params = new Int32Array(ALPHA_UNIFORM_INTS);
         if (op.kind === 'rect') {
             params[0] = 0;
@@ -3542,9 +3584,9 @@ export default class WebGpuFramePresenter {
         }
         params[8] = op.rgb;
         params[9] = op.alpha;
-        this.device.queue.writeBuffer(this.alphaUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.alphaPipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3554,13 +3596,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 1,
                     resource: {
-                        buffer: this.alphaUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3575,20 +3618,17 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
-    private replayModelFlatOp(op: ModelFlatReplayOp): void {
+    private replayModelFlatOp(op: ModelFlatReplayOp, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture || !this.modelDepthTexture) {
             this.failPacketReplay('model flat replay requested before frame textures exist');
         }
 
-        this.ensureModelFlatUniformBuffer();
         const params = new Int32Array(MODEL_FLAT_UNIFORM_INTS);
         params[0] = op.xA;
         params[1] = op.yA;
@@ -3616,9 +3656,9 @@ export default class WebGpuFramePresenter {
         params[23] = op.clip.y;
         params[24] = op.clip.x + op.clip.width;
         params[25] = op.clip.y + op.clip.height;
-        this.device.queue.writeBuffer(this.modelFlatUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.modelFlatPipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3628,15 +3668,17 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 1,
                     resource: {
-                        buffer: this.modelFlatUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
         const clearDepth = this.modelDepthClearPending;
         this.modelDepthClearPending = false;
-        const encoder = this.device.createCommandEncoder();
-        encoder.copyTextureToTexture(
+        this.copyReplayTextureToTexture(
+            context,
             { texture: this.frameTexture },
             { texture: this.scratchFrameTexture },
             {
@@ -3645,7 +3687,7 @@ export default class WebGpuFramePresenter {
                 depthOrArrayLayers: 1
             }
         );
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3666,23 +3708,20 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
         this.packetReplayStats.gpuModelFlatTrianglesReplayed++;
         this.packetReplayStats.gpuRetainedDepthPassesReplayed++;
     }
 
-    private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource): void {
+    private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('gouraud replay requested before frame textures exist');
         }
 
         const colourTable = this.getColourTableTexture(resource);
-        this.ensureGouraudUniformBuffer();
         const params = new Int32Array(GOURAUD_UNIFORM_INTS);
         params[0] = op.xA;
         params[1] = op.yA;
@@ -3700,9 +3739,9 @@ export default class WebGpuFramePresenter {
         params[13] = op.clip.y;
         params[14] = op.clip.x + op.clip.width;
         params[15] = op.clip.y + op.clip.height;
-        this.device.queue.writeBuffer(this.gouraudUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.gouraudPipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3716,13 +3755,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 2,
                     resource: {
-                        buffer: this.gouraudUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3737,21 +3777,18 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
-    private replayTextureTriangleOp(op: TextureTriangleReplayOp, resource: GpuTextureResource): void {
+    private replayTextureTriangleOp(op: TextureTriangleReplayOp, resource: GpuTextureResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('texture triangle replay requested before frame textures exist');
         }
 
         const texels = this.getTexelTexture(resource);
-        this.ensureTextureTriangleUniformBuffer();
         const params = new Int32Array(TEXTURE_TRIANGLE_UNIFORM_INTS);
         params[0] = op.xA;
         params[1] = op.yA;
@@ -3782,9 +3819,9 @@ export default class WebGpuFramePresenter {
         params[26] = op.clip.y + op.clip.height;
         params[27] = resource.width;
         params[28] = resource.height;
-        this.device.queue.writeBuffer(this.textureTriangleUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.textureTrianglePipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3802,13 +3839,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 3,
                     resource: {
-                        buffer: this.textureTriangleUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3823,22 +3861,18 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
-    private replaySpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource): void {
+    private replaySpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource, context: PacketReplayContext): void {
         const cached = this.getSpriteTexture(resource);
         const vertices = this.buildSpriteVertices(op, resource);
-        this.ensureSpriteVertexBuffer(vertices.byteLength);
-        this.device.queue.writeBuffer(this.spriteVertexBuffer!, 0, vertices);
+        const vertexBinding = this.allocateSpriteVertices(vertices);
 
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.frameTexture!.createView(),
@@ -3850,19 +3884,17 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.spritePipeline);
         pass.setBindGroup(0, cached.bindGroup);
-        pass.setVertexBuffer(0, this.spriteVertexBuffer!);
+        pass.setVertexBuffer(0, vertexBinding.buffer, vertexBinding.offset, vertexBinding.size);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
     }
 
-    private replayAlphaSpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource): void {
+    private replayAlphaSpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('alpha sprite replay requested before frame textures exist');
         }
 
         const cached = this.getSpriteTexture(resource);
-        this.ensureSpriteAlphaUniformBuffer();
         const params = new Int32Array(SPRITE_ALPHA_UNIFORM_INTS);
         params[0] = op.rect.x;
         params[1] = op.rect.y;
@@ -3873,9 +3905,9 @@ export default class WebGpuFramePresenter {
         params[6] = op.alpha ?? 256;
         params[7] = Math.trunc((op.srcWidth * 65536) / op.rect.width);
         params[8] = Math.trunc((op.srcHeight * 65536) / op.rect.height);
-        this.device.queue.writeBuffer(this.spriteAlphaUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.spriteAlphaPipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3889,13 +3921,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 2,
                     resource: {
-                        buffer: this.spriteAlphaUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3910,21 +3943,18 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
-    private replayGlyphOp(op: GlyphReplayOp, resource: GpuGlyphResource): void {
+    private replayGlyphOp(op: GlyphReplayOp, resource: GpuGlyphResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('glyph replay requested before frame textures exist');
         }
 
         const cached = this.getGlyphTexture(resource);
-        this.ensureGlyphUniformBuffer();
         const params = new Int32Array(GLYPH_UNIFORM_INTS);
         params[0] = op.rect.x;
         params[1] = op.rect.y;
@@ -3934,9 +3964,9 @@ export default class WebGpuFramePresenter {
         params[5] = op.srcY;
         params[6] = op.rgb;
         params[7] = op.alpha ?? 256;
-        this.device.queue.writeBuffer(this.glyphUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.glyphPipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -3950,13 +3980,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 2,
                     resource: {
-                        buffer: this.glyphUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -3971,22 +4002,19 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
         this.packetReplayStats.gpuGlyphSpritesReplayed++;
     }
 
-    private replayIndexedSpriteOp(op: IndexedSpriteReplayOp, resource: GpuIndexedSpriteResource): void {
+    private replayIndexedSpriteOp(op: IndexedSpriteReplayOp, resource: GpuIndexedSpriteResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('indexed sprite replay requested before frame textures exist');
         }
 
         const cached = this.getIndexedSpriteTexture(resource);
-        this.ensureIndexedSpriteUniformBuffer();
         const params = new Int32Array(INDEXED_SPRITE_UNIFORM_INTS);
         params[0] = op.rect.x;
         params[1] = op.rect.y;
@@ -3997,9 +4025,9 @@ export default class WebGpuFramePresenter {
         params[6] = op.srcX;
         params[7] = op.srcY;
         params[8] = op.mode;
-        this.device.queue.writeBuffer(this.indexedSpriteUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.indexedSpritePipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -4021,13 +4049,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 4,
                     resource: {
-                        buffer: this.indexedSpriteUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -4042,22 +4071,19 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
         this.packetReplayStats.gpuDynamicIndexedSpritesReplayed++;
     }
 
-    private replayTransformSpriteOp(op: TransformSpriteReplayOp, resource: GpuSpriteResource): void {
+    private replayTransformSpriteOp(op: TransformSpriteReplayOp, resource: GpuSpriteResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('transform sprite replay requested before frame textures exist');
         }
 
         const cached = this.getSpriteTexture(resource);
-        this.ensureTransformSpriteUniformBuffer();
         const params = new Int32Array(TRANSFORM_SPRITE_UNIFORM_INTS);
         params[0] = op.rect.x;
         params[1] = op.rect.y;
@@ -4071,9 +4097,9 @@ export default class WebGpuFramePresenter {
         params[9] = op.rowStepY;
         params[10] = op.transparentZero ? 1 : 0;
         params[11] = op.sourceStride;
-        this.device.queue.writeBuffer(this.transformSpriteUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.transformSpritePipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -4087,13 +4113,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 2,
                     resource: {
-                        buffer: this.transformSpriteUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -4108,22 +4135,19 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
-    private replayMaskedSpriteOp(op: MaskedSpriteReplayOp, resource: GpuSpriteResource, maskResource: GpuSpriteResource): void {
+    private replayMaskedSpriteOp(op: MaskedSpriteReplayOp, resource: GpuSpriteResource, maskResource: GpuSpriteResource, context: PacketReplayContext): void {
         if (!this.frameTexture || !this.scratchFrameTexture) {
             this.failPacketReplay('masked sprite replay requested before frame textures exist');
         }
 
         const cached = this.getSpriteTexture(resource);
         const cachedMask = this.getSpriteTexture(maskResource);
-        this.ensureMaskedSpriteUniformBuffer();
         const params = new Int32Array(MASKED_SPRITE_UNIFORM_INTS);
         params[0] = op.rect.x;
         params[1] = op.rect.y;
@@ -4134,9 +4158,9 @@ export default class WebGpuFramePresenter {
         params[6] = op.surfaceX;
         params[7] = op.surfaceY;
         params[8] = op.maskStride;
-        this.device.queue.writeBuffer(this.maskedSpriteUniformBuffer!, 0, params);
+        const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.device.createBindGroup({
+        const bindGroup = this.createReplayBindGroup({
             layout: this.maskedSpritePipeline.getBindGroupLayout(0),
             entries: [
                 {
@@ -4154,13 +4178,14 @@ export default class WebGpuFramePresenter {
                 {
                     binding: 3,
                     resource: {
-                        buffer: this.maskedSpriteUniformBuffer
+                        buffer: uniform.buffer,
+                        offset: uniform.offset,
+                        size: uniform.size
                     }
                 }
             ]
         });
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginRenderPass({
+        const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
                     view: this.scratchFrameTexture.createView(),
@@ -4175,12 +4200,10 @@ export default class WebGpuFramePresenter {
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
-        this.device.queue.submit([encoder.finish()]);
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
-        this.recreateDisplayBindGroup();
     }
 
     private buildSpriteVertices(op: SpriteReplayOp, resource: GpuSpriteResource): Float32Array {
@@ -4677,6 +4700,177 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private estimateFrameUniformBytes(steps: PacketReplayStep[]): number {
+        let slots = 0;
+        for (const step of steps) {
+            if (step.kind === 'vertices') {
+                continue;
+            }
+
+            if (step.kind === 'sprite' && this.canReplaySpriteDirectly(step.op)) {
+                continue;
+            }
+
+            slots++;
+        }
+
+        return Math.max(UNIFORM_BUFFER_ALIGNMENT, slots * UNIFORM_BUFFER_ALIGNMENT);
+    }
+
+    private prepareFrameUniformArena(steps: PacketReplayStep[]): void {
+        const byteLength = this.estimateFrameUniformBytes(steps);
+        this.frameUniformOffset = 0;
+        if (this.frameUniformBuffer && this.frameUniformBufferBytes >= byteLength) {
+            return;
+        }
+
+        this.frameUniformBuffer?.destroy();
+        this.frameUniformBufferBytes = alignTo(byteLength, UNIFORM_BUFFER_ALIGNMENT);
+        this.frameUniformBuffer = this.device.createBuffer({
+            size: this.frameUniformBufferBytes,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
+    private prepareFrameVertexArenas(steps: PacketReplayStep[]): void {
+        let primitiveBytes = 0;
+        let rectInstanceBytes = 0;
+        let spriteBytes = 0;
+        for (const step of steps) {
+            if (step.kind === 'vertices') {
+                primitiveBytes += alignTo(step.vertices.byteLength, 4);
+            } else if (step.kind === 'rectInstances') {
+                rectInstanceBytes += alignTo(step.instances.byteLength, 4);
+            } else if (step.kind === 'sprite' && this.canReplaySpriteDirectly(step.op)) {
+                spriteBytes += alignTo(6 * FLOATS_PER_SPRITE_VERTEX * 4, 4);
+            }
+        }
+
+        this.primitiveVertexFrameOffset = 0;
+        this.rectInstanceFrameOffset = 0;
+        this.spriteVertexFrameOffset = 0;
+        if (primitiveBytes > 0) {
+            this.ensurePrimitiveVertexBuffer(primitiveBytes);
+        }
+        if (rectInstanceBytes > 0) {
+            this.ensureRectInstanceBuffer(rectInstanceBytes);
+        }
+        if (spriteBytes > 0) {
+            this.ensureSpriteVertexBuffer(spriteBytes);
+        }
+    }
+
+    private allocateFrameUniform(data: Float32Array | Int32Array): FrameUniformBinding {
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('frame uniform arena is unavailable');
+        }
+
+        const offset = alignTo(this.frameUniformOffset, UNIFORM_BUFFER_ALIGNMENT);
+        const size = data.byteLength;
+        if (offset + size > this.frameUniformBufferBytes) {
+            this.failPacketReplay('frame uniform arena capacity was underestimated');
+        }
+
+        this.device.queue.writeBuffer(this.frameUniformBuffer, offset, data);
+        this.packetReplayStats.gpuUniformBufferWrites++;
+        this.frameUniformOffset = offset + size;
+        this.packetReplayStats.gpuFrameUniformBytesAllocated += alignTo(size, UNIFORM_BUFFER_ALIGNMENT);
+        return {
+            buffer: this.frameUniformBuffer,
+            offset,
+            size
+        };
+    }
+
+    private allocatePrimitiveVertices(data: Float32Array): FrameVertexBinding {
+        if (!this.primitiveVertexBuffer) {
+            this.failPacketReplay('primitive vertex arena is unavailable');
+        }
+
+        const offset = alignTo(this.primitiveVertexFrameOffset, 4);
+        if (offset + data.byteLength > this.primitiveVertexBufferBytes) {
+            this.failPacketReplay('primitive vertex arena capacity was underestimated');
+        }
+
+        this.writeReplayBuffer(this.primitiveVertexBuffer, offset, data);
+        this.primitiveVertexFrameOffset = offset + data.byteLength;
+        this.packetReplayStats.gpuFrameVertexBytesAllocated += alignTo(data.byteLength, 4);
+        return {
+            buffer: this.primitiveVertexBuffer,
+            offset,
+            size: data.byteLength
+        };
+    }
+
+    private allocateRectInstances(data: Float32Array): FrameVertexBinding {
+        if (!this.rectInstanceBuffer) {
+            this.failPacketReplay('rect instance arena is unavailable');
+        }
+
+        const offset = alignTo(this.rectInstanceFrameOffset, 4);
+        if (offset + data.byteLength > this.rectInstanceBufferBytes) {
+            this.failPacketReplay('rect instance arena capacity was underestimated');
+        }
+
+        this.writeReplayBuffer(this.rectInstanceBuffer, offset, data);
+        this.rectInstanceFrameOffset = offset + data.byteLength;
+        this.packetReplayStats.gpuFrameVertexBytesAllocated += alignTo(data.byteLength, 4);
+        return {
+            buffer: this.rectInstanceBuffer,
+            offset,
+            size: data.byteLength
+        };
+    }
+
+    private allocateSpriteVertices(data: Float32Array): FrameVertexBinding {
+        if (!this.spriteVertexBuffer) {
+            this.failPacketReplay('sprite vertex arena is unavailable');
+        }
+
+        const offset = alignTo(this.spriteVertexFrameOffset, 4);
+        if (offset + data.byteLength > this.spriteVertexBufferBytes) {
+            this.failPacketReplay('sprite vertex arena capacity was underestimated');
+        }
+
+        this.writeReplayBuffer(this.spriteVertexBuffer, offset, data);
+        this.spriteVertexFrameOffset = offset + data.byteLength;
+        this.packetReplayStats.gpuFrameVertexBytesAllocated += alignTo(data.byteLength, 4);
+        return {
+            buffer: this.spriteVertexBuffer,
+            offset,
+            size: data.byteLength
+        };
+    }
+
+    private writeReplayBuffer(buffer: GpuBuffer, bufferOffset: number, data: Float32Array | Int32Array): void {
+        this.device.queue.writeBuffer(buffer, bufferOffset, data);
+        this.packetReplayStats.gpuBufferWrites++;
+    }
+
+    private createReplayBindGroup(descriptor: object): object {
+        this.packetReplayStats.gpuBindGroupsCreated++;
+        return this.device.createBindGroup(descriptor);
+    }
+
+    private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
+        this.packetReplayStats.gpuRenderPassesEncoded++;
+        return context.encoder.beginRenderPass(descriptor);
+    }
+
+    private copyReplayTextureToTexture(context: PacketReplayContext, source: object, destination: object, size: object): void {
+        context.encoder.copyTextureToTexture(source, destination, size);
+        this.packetReplayStats.gpuTextureCopies++;
+    }
+
+    private submitReplayCommands(context: PacketReplayContext): void {
+        this.device.queue.submit([context.encoder.finish()]);
+        this.packetReplayStats.gpuFrameCommandSubmits++;
+    }
+
+    private canReplaySpriteDirectly(op: SpriteReplayOp): boolean {
+        return op.alpha === null && op.srcX === Math.trunc(op.srcX) && op.srcY === Math.trunc(op.srcY) && op.srcWidth === op.rect.width && op.srcHeight === op.rect.height;
+    }
+
     private failPacketReplay(reason: string): never {
         this.packetReplayStats.framesFailed++;
         this.packetReplayStats.lastError = reason;
@@ -4709,6 +4903,7 @@ export default class WebGpuFramePresenter {
         this.modelDepthTexture?.destroy();
         this.primitiveVertexBuffer?.destroy();
         this.rectInstanceBuffer?.destroy();
+        this.frameUniformBuffer?.destroy();
         this.modelFlatUniformBuffer?.destroy();
         this.spriteVertexBuffer?.destroy();
         this.alphaUniformBuffer?.destroy();
@@ -4745,10 +4940,18 @@ export default class WebGpuFramePresenter {
         this.modelDepthTexture = null;
         this.bindGroup = null;
         this.primitiveVertexBuffer = null;
+        this.primitiveVertexBufferBytes = 0;
+        this.primitiveVertexFrameOffset = 0;
         this.rectInstanceBuffer = null;
-        this.modelFlatUniformBuffer = null;
         this.rectInstanceBufferBytes = 0;
+        this.rectInstanceFrameOffset = 0;
+        this.frameUniformBuffer = null;
+        this.frameUniformBufferBytes = 0;
+        this.frameUniformOffset = 0;
+        this.modelFlatUniformBuffer = null;
         this.spriteVertexBuffer = null;
+        this.spriteVertexBufferBytes = 0;
+        this.spriteVertexFrameOffset = 0;
         this.alphaUniformBuffer = null;
         this.gouraudUniformBuffer = null;
         this.textureTriangleUniformBuffer = null;

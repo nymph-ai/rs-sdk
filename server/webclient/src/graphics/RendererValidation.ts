@@ -540,6 +540,14 @@ async function runValidation(): Promise<void> {
         packetReplayStats.gpuGlyphSpritesReplayed > 0 &&
         packetReplayStats.gpuModelFlatTrianglesReplayed > 0 &&
         packetReplayStats.gpuRetainedDepthPassesReplayed > 0 &&
+        packetReplayStats.gpuFrameCommandSubmits === packetReplayStats.framesReplayed &&
+        packetReplayStats.gpuRenderPassesEncoded > packetReplayStats.gpuFrameCommandSubmits &&
+        packetReplayStats.gpuBindGroupsCreated > 0 &&
+        packetReplayStats.gpuBufferWrites > 0 &&
+        packetReplayStats.gpuUniformBufferWrites > 0 &&
+        packetReplayStats.gpuTextureCopies > 0 &&
+        packetReplayStats.gpuFrameUniformBytesAllocated > 0 &&
+        packetReplayStats.gpuFrameVertexBytesAllocated > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&

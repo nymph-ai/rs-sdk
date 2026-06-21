@@ -25,6 +25,14 @@ type ValidationResult = {
         gpuGlyphSpritesReplayed: number;
         gpuModelFlatTrianglesReplayed: number;
         gpuRetainedDepthPassesReplayed: number;
+        gpuFrameCommandSubmits: number;
+        gpuRenderPassesEncoded: number;
+        gpuBindGroupsCreated: number;
+        gpuBufferWrites: number;
+        gpuUniformBufferWrites: number;
+        gpuTextureCopies: number;
+        gpuFrameUniformBytesAllocated: number;
+        gpuFrameVertexBytesAllocated: number;
         packetsReplayed: number;
         lastPacketCount: number;
         lastVertexCount: number;
@@ -191,7 +199,7 @@ function validateResult(state: ValidationState): void {
     }
 
     const stats = packetResult.packetReplayStats;
-    if (!stats.enabled || stats.framesFailed !== 0 || stats.cpuImageDataUploads !== 0 || stats.cpuRasterWriteBypasses <= 0 || stats.framesReplayed < 1 || stats.gpuRectInstancesReplayed <= 0 || stats.gpuDynamicIndexedSpritesReplayed <= 0 || stats.gpuGlyphSpritesReplayed <= 0 || stats.gpuModelFlatTrianglesReplayed <= 0 || stats.gpuRetainedDepthPassesReplayed <= 0 || stats.lastError !== '') {
+    if (!stats.enabled || stats.framesFailed !== 0 || stats.cpuImageDataUploads !== 0 || stats.cpuRasterWriteBypasses <= 0 || stats.framesReplayed < 1 || stats.gpuRectInstancesReplayed <= 0 || stats.gpuDynamicIndexedSpritesReplayed <= 0 || stats.gpuGlyphSpritesReplayed <= 0 || stats.gpuModelFlatTrianglesReplayed <= 0 || stats.gpuRetainedDepthPassesReplayed <= 0 || stats.gpuFrameCommandSubmits !== stats.framesReplayed || stats.gpuRenderPassesEncoded <= stats.gpuFrameCommandSubmits || stats.gpuBindGroupsCreated <= 0 || stats.gpuBufferWrites <= 0 || stats.gpuUniformBufferWrites <= 0 || stats.gpuTextureCopies <= 0 || stats.gpuFrameUniformBytesAllocated <= 0 || stats.gpuFrameVertexBytesAllocated <= 0 || stats.lastError !== '') {
         throw new Error(`Packet replay validation did not prove GPU-only presentation: ${JSON.stringify(stats, null, 2)}`);
     }
 }
@@ -249,7 +257,7 @@ async function main(): Promise<void> {
         const state = await pollValidation(target);
         validateResult(state);
         const packetStats = state.results.find(result => result.name === 'packet-replay-2d-primitives')!.packetReplayStats!;
-        console.log(`Renderer validation passed: packetsReplayed=${packetStats.packetsReplayed}, cpuImageDataUploads=${packetStats.cpuImageDataUploads}, cpuRasterWriteBypasses=${packetStats.cpuRasterWriteBypasses}, rectInstances=${packetStats.gpuRectInstancesReplayed}, dynamicIndexed=${packetStats.gpuDynamicIndexedSpritesReplayed}, glyphs=${packetStats.gpuGlyphSpritesReplayed}, modelFlat=${packetStats.gpuModelFlatTrianglesReplayed}, retainedDepth=${packetStats.gpuRetainedDepthPassesReplayed}, nativeFlat=${packetStats.nativeFlatTrianglesReplayed}, nativeGouraud=${packetStats.nativeGouraudTrianglesReplayed}, nativeTexture=${packetStats.nativeTextureTrianglesReplayed}, framesFailed=${packetStats.framesFailed}`);
+        console.log(`Renderer validation passed: packetsReplayed=${packetStats.packetsReplayed}, cpuImageDataUploads=${packetStats.cpuImageDataUploads}, cpuRasterWriteBypasses=${packetStats.cpuRasterWriteBypasses}, rectInstances=${packetStats.gpuRectInstancesReplayed}, dynamicIndexed=${packetStats.gpuDynamicIndexedSpritesReplayed}, glyphs=${packetStats.gpuGlyphSpritesReplayed}, modelFlat=${packetStats.gpuModelFlatTrianglesReplayed}, retainedDepth=${packetStats.gpuRetainedDepthPassesReplayed}, frameSubmits=${packetStats.gpuFrameCommandSubmits}, renderPasses=${packetStats.gpuRenderPassesEncoded}, bindGroups=${packetStats.gpuBindGroupsCreated}, bufferWrites=${packetStats.gpuBufferWrites}, uniformWrites=${packetStats.gpuUniformBufferWrites}, textureCopies=${packetStats.gpuTextureCopies}, frameUniformBytes=${packetStats.gpuFrameUniformBytesAllocated}, frameVertexBytes=${packetStats.gpuFrameVertexBytesAllocated}, nativeFlat=${packetStats.nativeFlatTrianglesReplayed}, nativeGouraud=${packetStats.nativeGouraudTrianglesReplayed}, nativeTexture=${packetStats.nativeTextureTrianglesReplayed}, framesFailed=${packetStats.framesFailed}`);
     } finally {
         chromeProc?.kill();
         server.kill();
