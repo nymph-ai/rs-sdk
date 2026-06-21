@@ -3115,38 +3115,47 @@ export class Client extends GameShell {
 
             const backleft1: Pix32 = Pix32.depack(media, 'backleft1', 0);
             this.areaBackleft1 = new PixMap(backleft1.wi, backleft1.hi);
+            this.areaBackleft1.markCpuRasterWritesSkippable();
             backleft1.quickPlotSprite(0, 0);
 
             const backleft2: Pix32 = Pix32.depack(media, 'backleft2', 0);
             this.areaBackleft2 = new PixMap(backleft2.wi, backleft2.hi);
+            this.areaBackleft2.markCpuRasterWritesSkippable();
             backleft2.quickPlotSprite(0, 0);
 
             const backright1: Pix32 = Pix32.depack(media, 'backright1', 0);
             this.areaBackright1 = new PixMap(backright1.wi, backright1.hi);
+            this.areaBackright1.markCpuRasterWritesSkippable();
             backright1.quickPlotSprite(0, 0);
 
             const backright2: Pix32 = Pix32.depack(media, 'backright2', 0);
             this.areaBackright2 = new PixMap(backright2.wi, backright2.hi);
+            this.areaBackright2.markCpuRasterWritesSkippable();
             backright2.quickPlotSprite(0, 0);
 
             const backtop1: Pix32 = Pix32.depack(media, 'backtop1', 0);
             this.areaBacktop1 = new PixMap(backtop1.wi, backtop1.hi);
+            this.areaBacktop1.markCpuRasterWritesSkippable();
             backtop1.quickPlotSprite(0, 0);
 
             const backvmid1: Pix32 = Pix32.depack(media, 'backvmid1', 0);
             this.areaBackvmid1 = new PixMap(backvmid1.wi, backvmid1.hi);
+            this.areaBackvmid1.markCpuRasterWritesSkippable();
             backvmid1.quickPlotSprite(0, 0);
 
             const backvmid2: Pix32 = Pix32.depack(media, 'backvmid2', 0);
             this.areaBackvmid2 = new PixMap(backvmid2.wi, backvmid2.hi);
+            this.areaBackvmid2.markCpuRasterWritesSkippable();
             backvmid2.quickPlotSprite(0, 0);
 
             const backvmid3: Pix32 = Pix32.depack(media, 'backvmid3', 0);
             this.areaBackvmid3 = new PixMap(backvmid3.wi, backvmid3.hi);
+            this.areaBackvmid3.markCpuRasterWritesSkippable();
             backvmid3.quickPlotSprite(0, 0);
 
             const backhmid2: Pix32 = Pix32.depack(media, 'backhmid2', 0);
             this.areaBackhmid2 = new PixMap(backhmid2.wi, backhmid2.hi);
+            this.areaBackhmid2.markCpuRasterWritesSkippable();
             backhmid2.quickPlotSprite(0, 0);
 
             const randR: number = ((Math.random() * 21.0) | 0) - 10;
