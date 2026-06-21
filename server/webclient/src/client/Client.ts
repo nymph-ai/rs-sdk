@@ -4076,6 +4076,7 @@ export class Client extends GameShell {
         this.areaChat.markCpuRasterWritesSkippable();
 
         this.areaMap = new PixMap(172, 156);
+        this.areaMap.markCpuRasterWritesSkippable();
         Pix2D.cls();
         this.mapback?.plotSprite(0, 0);
 
@@ -13420,14 +13421,7 @@ export class Client extends GameShell {
 
         if (this.minimapState == 2) {
             if (this.mapback !== null) {
-                const mask = this.mapback.data;
-                const pixels = Pix2D.pixels;
-                const len = mask.length;
-                for (let i = 0; i < len; i++) {
-                    if (mask[i] === 0) {
-                        pixels[i] = 0;
-                    }
-                }
+                this.clearMapbackTransparentPixels(this.mapback);
             }
 
             this.compass?.scanlineRotatePlotSprite(0, 0, 33, 33, 25, 25, this.orbitCameraYaw, 256, this.compassMaskLineOffsets, this.compassMaskLineLengths);
@@ -13526,6 +13520,29 @@ export class Client extends GameShell {
         Pix2D.fillRect(97, 78, 3, 3, Colour.WHITE);
 
         this.areaGame?.setPixels();
+    }
+
+    private clearMapbackTransparentPixels(mask: Pix8): void {
+        const maskWidth = mask.wi;
+        const maskHeight = mask.hi;
+        for (let y = 0; y < maskHeight; y++) {
+            const row = y * maskWidth;
+            let x = 0;
+            while (x < maskWidth) {
+                while (x < maskWidth && mask.data[row + x] !== 0) {
+                    x++;
+                }
+
+                const startX = x;
+                while (x < maskWidth && mask.data[row + x] === 0) {
+                    x++;
+                }
+
+                if (x > startX) {
+                    Pix2D.fillRect(startX, y, x - startX, 1, Colour.BLACK);
+                }
+            }
+        }
     }
 
     minimapDrawArrow(dx: number, dy: number, image: Pix32 | null) {
