@@ -552,6 +552,8 @@ async function runValidation(): Promise<void> {
         packetReplayStats.gpuDirectDrawsReplayed > packetReplayStats.gpuDirectRenderPassesReplayed &&
         packetReplayStats.gpuAlphaStorageDrawsReplayed > 0 &&
         packetReplayStats.gpuAlphaBindGroupsReused > 0 &&
+        packetReplayStats.gpuGouraudStorageDrawsReplayed > 0 &&
+        packetReplayStats.gpuGouraudBindGroupsReused > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&

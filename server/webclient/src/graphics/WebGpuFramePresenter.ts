@@ -587,10 +587,11 @@ fn fs(input: VertexOutput) -> FragmentOutput {
 const GOURAUD_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) paramBase: u32,
 };
 
 @vertex
-fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+fn vs(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VertexOutput {
     let positions = array<vec2f, 6>(
         vec2f(-1.0, -1.0),
         vec2f( 1.0, -1.0),
@@ -602,6 +603,7 @@ fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 
     var output: VertexOutput;
     output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    output.paramBase = instanceIndex;
     return output;
 }
 
@@ -634,7 +636,11 @@ struct GouraudSpan {
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var colourTableTexture: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> params: GouraudParams;
+@group(0) @binding(2) var<storage, read> gouraudParams: array<i32>;
+
+fn gouraudParam(base: u32, index: u32) -> i32 {
+    return gouraudParams[base + index];
+}
 
 fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
     if (y0 == y1) {
@@ -680,7 +686,7 @@ fn shortEdgeShade(colourTop: i32, yTop: i32, colourMid: i32, yMid: i32, colourBo
     return edgeShade(colourMid, yMid, lowerStep, y);
 }
 
-fn orderedGouraudSpan(pixelY: i32, xTop: i32, yTop: i32, colourTop: i32, xMid: i32, yMid: i32, colourMid: i32, xBot: i32, yBot: i32, colourBot: i32) -> GouraudSpan {
+fn orderedGouraudSpan(pixelY: i32, base: u32, xTop: i32, yTop: i32, colourTop: i32, xMid: i32, yMid: i32, colourMid: i32, xBot: i32, yBot: i32, colourBot: i32) -> GouraudSpan {
     if (yTop >= yBot || pixelY < yTop || pixelY >= yBot) {
         return emptySpan();
     }
@@ -697,7 +703,7 @@ fn orderedGouraudSpan(pixelY: i32, xTop: i32, yTop: i32, colourTop: i32, xMid: i
     let longShade = edgeShade(colourTop, yTop, longColourStep, pixelY);
     let shortShade = shortEdgeShade(colourTop, yTop, colourMid, yMid, colourBot, yBot, upperColourStep, lowerColourStep, pixelY);
 
-    var sampleY = max(yTop, params.clipMinY);
+    var sampleY = max(yTop, gouraudParam(base, 13u));
     if (sampleY >= yBot) {
         sampleY = yTop;
     }
@@ -718,50 +724,50 @@ fn orderedGouraudSpan(pixelY: i32, xTop: i32, yTop: i32, colourTop: i32, xMid: i
     return GouraudSpan(shortX, longX, shortShade, longShade, 1);
 }
 
-fn gouraudSpan(pixelY: i32) -> GouraudSpan {
-    if (params.yA <= params.yB && params.yA <= params.yC) {
-        if (params.yB < params.yC) {
-            return orderedGouraudSpan(pixelY, params.xA, params.yA, params.colourA, params.xB, params.yB, params.colourB, params.xC, params.yC, params.colourC);
+fn gouraudSpan(pixelY: i32, base: u32) -> GouraudSpan {
+    if (gouraudParam(base, 1u) <= gouraudParam(base, 3u) && gouraudParam(base, 1u) <= gouraudParam(base, 5u)) {
+        if (gouraudParam(base, 3u) < gouraudParam(base, 5u)) {
+            return orderedGouraudSpan(pixelY, base, gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u), gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u), gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u));
         }
-        return orderedGouraudSpan(pixelY, params.xA, params.yA, params.colourA, params.xC, params.yC, params.colourC, params.xB, params.yB, params.colourB);
+        return orderedGouraudSpan(pixelY, base, gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u), gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u), gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u));
     }
 
-    if (params.yB <= params.yC) {
-        if (params.yC < params.yA) {
-            return orderedGouraudSpan(pixelY, params.xB, params.yB, params.colourB, params.xC, params.yC, params.colourC, params.xA, params.yA, params.colourA);
+    if (gouraudParam(base, 3u) <= gouraudParam(base, 5u)) {
+        if (gouraudParam(base, 5u) < gouraudParam(base, 1u)) {
+            return orderedGouraudSpan(pixelY, base, gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u), gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u), gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u));
         }
-        return orderedGouraudSpan(pixelY, params.xB, params.yB, params.colourB, params.xA, params.yA, params.colourA, params.xC, params.yC, params.colourC);
+        return orderedGouraudSpan(pixelY, base, gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u), gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u), gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u));
     }
 
-    if (params.yA < params.yB) {
-        return orderedGouraudSpan(pixelY, params.xC, params.yC, params.colourC, params.xA, params.yA, params.colourA, params.xB, params.yB, params.colourB);
+    if (gouraudParam(base, 1u) < gouraudParam(base, 3u)) {
+        return orderedGouraudSpan(pixelY, base, gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u), gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u), gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u));
     }
-    return orderedGouraudSpan(pixelY, params.xC, params.yC, params.colourC, params.xB, params.yB, params.colourB, params.xA, params.yA, params.colourA);
+    return orderedGouraudSpan(pixelY, base, gouraudParam(base, 4u), gouraudParam(base, 5u), gouraudParam(base, 8u), gouraudParam(base, 2u), gouraudParam(base, 3u), gouraudParam(base, 7u), gouraudParam(base, 0u), gouraudParam(base, 1u), gouraudParam(base, 6u));
 }
 
-fn colourTableIndex(span: GouraudSpan, pixelX: i32) -> i32 {
+fn colourTableIndex(span: GouraudSpan, pixelX: i32, base: u32) -> i32 {
     if (span.valid == 0 || span.startX >= span.endX || pixelX < span.startX || pixelX >= span.endX) {
         return -1;
     }
 
-    if (params.lowDetail != 0) {
+    if (gouraudParam(base, 10u) != 0) {
         var startX = span.startX;
         var endX = span.endX;
         var startShade = span.startShade;
         var step: i32;
-        if (params.hclip != 0) {
+        if (gouraudParam(base, 11u) != 0) {
             if (span.endX - span.startX > 3) {
                 step = (span.endShade - span.startShade) / (span.endX - span.startX);
             } else {
                 step = 0;
             }
 
-            if (endX > params.clipMaxX - 1) {
-                endX = params.clipMaxX - 1;
+            if (endX > gouraudParam(base, 14u) - 1) {
+                endX = gouraudParam(base, 14u) - 1;
             }
-            if (startX < params.clipMinX) {
-                startShade -= (startX - params.clipMinX) * step;
-                startX = params.clipMinX;
+            if (startX < gouraudParam(base, 12u)) {
+                startShade -= (startX - gouraudParam(base, 12u)) * step;
+                startX = gouraudParam(base, 12u);
             }
             if (startX >= endX || pixelX < startX || pixelX >= endX) {
                 return -1;
@@ -782,8 +788,8 @@ fn colourTableIndex(span: GouraudSpan, pixelX: i32) -> i32 {
     }
 
     let step = (span.endShade - span.startShade) / (span.endX - span.startX);
-    if (params.hclip != 0) {
-        let endX = min(span.endX, params.clipMaxX - 1);
+    if (gouraudParam(base, 11u) != 0) {
+        let endX = min(span.endX, gouraudParam(base, 14u) - 1);
         if (pixelX >= endX) {
             return -1;
         }
@@ -810,19 +816,19 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
     let base = textureLoad(sourceTexture, pixel, 0);
 
-    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+    if (pixel.x < gouraudParam(input.paramBase, 12u) || pixel.x >= gouraudParam(input.paramBase, 14u) || pixel.y < gouraudParam(input.paramBase, 13u) || pixel.y >= gouraudParam(input.paramBase, 15u)) {
         return vec4f(base.rgb, 1.0);
     }
 
-    let span = gouraudSpan(pixel.y);
-    let tableIndex = colourTableIndex(span, pixel.x);
+    let span = gouraudSpan(pixel.y, input.paramBase);
+    let tableIndex = colourTableIndex(span, pixel.x, input.paramBase);
     if (tableIndex < 0) {
         return vec4f(base.rgb, 1.0);
     }
 
     let clampedIndex = clamp(tableIndex, 0, 65535);
     let colour = textureLoad(colourTableTexture, vec2<i32>(clampedIndex & 255, clampedIndex >> 8), 0);
-    let alpha = u32(params.alpha);
+    let alpha = u32(gouraudParam(input.paramBase, 9u));
     if (alpha >= 256u) {
         return vec4f(colour.rgb, 1.0);
     }
@@ -1723,6 +1729,7 @@ type PacketReplayContext = {
     encoder: GpuCommandEncoder;
     directPass: GpuRenderPass | null;
     alphaBindGroups: Map<GpuTexture, object>;
+    gouraudBindGroups: Map<GpuTexture, object>;
 };
 
 type PacketReplayStep = {
@@ -2165,6 +2172,8 @@ export type WebGpuPacketReplayStats = {
     gpuDirectRenderPassesReplayed: number;
     gpuAlphaStorageDrawsReplayed: number;
     gpuAlphaBindGroupsReused: number;
+    gpuGouraudStorageDrawsReplayed: number;
+    gpuGouraudBindGroupsReused: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2400,6 +2409,8 @@ export default class WebGpuFramePresenter {
             gpuDirectRenderPassesReplayed: 0,
             gpuAlphaStorageDrawsReplayed: 0,
             gpuAlphaBindGroupsReused: 0,
+            gpuGouraudStorageDrawsReplayed: 0,
+            gpuGouraudBindGroupsReused: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -3413,7 +3424,8 @@ export default class WebGpuFramePresenter {
         const context: PacketReplayContext = {
             encoder: this.device.createCommandEncoder(),
             directPass: null,
-            alphaBindGroups: new Map<GpuTexture, object>()
+            alphaBindGroups: new Map<GpuTexture, object>(),
+            gouraudBindGroups: new Map<GpuTexture, object>()
         };
 
         for (const step of steps) {
@@ -3714,27 +3726,7 @@ export default class WebGpuFramePresenter {
         params[15] = op.clip.y + op.clip.height;
         const uniform = this.allocateFrameUniform(params);
 
-        const bindGroup = this.createReplayBindGroup({
-            layout: this.gouraudPipeline.getBindGroupLayout(0),
-            entries: [
-                {
-                    binding: 0,
-                    resource: this.frameTexture.createView()
-                },
-                {
-                    binding: 1,
-                    resource: colourTable.texture.createView()
-                },
-                {
-                    binding: 2,
-                    resource: {
-                        buffer: uniform.buffer,
-                        offset: uniform.offset,
-                        size: uniform.size
-                    }
-                }
-            ]
-        });
+        const bindGroup = this.getGouraudBindGroup(context, this.frameTexture, colourTable.texture);
         const pass = this.beginReplayRenderPass(context, {
             colorAttachments: [
                 {
@@ -3748,8 +3740,9 @@ export default class WebGpuFramePresenter {
 
         pass.setPipeline(this.gouraudPipeline);
         pass.setBindGroup(0, bindGroup);
-        pass.draw(6);
+        pass.draw(6, 1, 0, uniform.offset / 4);
         pass.end();
+        this.packetReplayStats.gpuGouraudStorageDrawsReplayed++;
 
         const oldFrameTexture = this.frameTexture;
         this.frameTexture = this.scratchFrameTexture;
@@ -4850,6 +4843,40 @@ export default class WebGpuFramePresenter {
             ]
         });
         context.alphaBindGroups.set(sourceTexture, bindGroup);
+        return bindGroup;
+    }
+
+    private getGouraudBindGroup(context: PacketReplayContext, sourceTexture: GpuTexture, colourTableTexture: GpuTexture): object {
+        const cached = context.gouraudBindGroups.get(sourceTexture);
+        if (cached) {
+            this.packetReplayStats.gpuGouraudBindGroupsReused++;
+            return cached;
+        }
+
+        if (!this.frameUniformBuffer) {
+            this.failPacketReplay('gouraud parameter storage buffer is unavailable');
+        }
+
+        const bindGroup = this.createReplayBindGroup({
+            layout: this.gouraudPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: sourceTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: colourTableTexture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.frameUniformBuffer
+                    }
+                }
+            ]
+        });
+        context.gouraudBindGroups.set(sourceTexture, bindGroup);
         return bindGroup;
     }
 
