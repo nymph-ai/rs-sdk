@@ -19,6 +19,21 @@ export type GpuSpriteResource = {
     version: number;
 };
 
+export type GpuColourTableResource = {
+    width: number;
+    height: number;
+    rgba: Uint8Array;
+    version: number;
+};
+
+export type GpuTextureResource = {
+    id: number;
+    width: number;
+    height: number;
+    rgba: Uint8Array;
+    version: number;
+};
+
 type PacketBase = {
     surface: number;
 };
@@ -86,6 +101,10 @@ export type GpuRenderPacket =
           colourA: number;
           colourB: number;
           colourC: number;
+          gpuRasterize: boolean;
+          lowDetail: boolean;
+          hclip: boolean;
+          alpha: number;
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -98,6 +117,7 @@ export type GpuRenderPacket =
           yC: number;
           colour: number;
           gpuRasterize: boolean;
+          alpha: number;
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -123,7 +143,12 @@ export type GpuRenderPacket =
           texture: number;
           hasTexels: boolean;
           lowDetail: boolean;
+          lowMem: boolean;
           opaque: boolean;
+          gpuRasterize: boolean;
+          hclip: boolean;
+          screenOriginX: number;
+          screenOriginY: number;
           clip: ClipBounds;
       });
 
@@ -139,6 +164,8 @@ export type GpuRenderPacketSnapshot = {
     recordableSurfaces: number[];
     cpuRasterWriteSkipSurfaces: number[];
     spriteResources: GpuSpriteResource[];
+    colourTableResource: GpuColourTableResource | null;
+    textureResources: GpuTextureResource[];
 };
 
 export type GpuRenderPacketState = {
@@ -177,6 +204,8 @@ const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
 const spriteResources: GpuSpriteResource[] = [];
+let colourTableResource: GpuColourTableResource | null = null;
+const textureResources: GpuTextureResource[] = [];
 const recordableSurfaces = new Set<number>();
 const cpuRasterWriteSkipSurfaces = new Set<number>();
 let nextSurface = 1;
@@ -323,6 +352,34 @@ function setSpriteResource(key: object, variant: string, width: number, height: 
     return resource;
 }
 
+function makeColourTableRgba(colourTable: Int32Array): Uint8Array {
+    const rgba = new Uint8Array(256 * 256 * 4);
+    const length = Math.min(colourTable.length, 256 * 256);
+    for (let i = 0; i < length; i++) {
+        const rgb = colourTable[i];
+        const offset = i * 4;
+        rgba[offset] = (rgb >> 16) & 0xff;
+        rgba[offset + 1] = (rgb >> 8) & 0xff;
+        rgba[offset + 2] = rgb & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
+function makeTexelRgba(texels: Int32Array): Uint8Array {
+    const rgba = new Uint8Array(256 * 256 * 4);
+    const length = Math.min(texels.length, 256 * 256);
+    for (let i = 0; i < length; i++) {
+        const rgb = texels[i];
+        const offset = i * 4;
+        rgba[offset] = (rgb >> 16) & 0xff;
+        rgba[offset + 1] = (rgb >> 8) & 0xff;
+        rgba[offset + 2] = rgb & 0xff;
+        rgba[offset + 3] = 0xff;
+    }
+    return rgba;
+}
+
 export const gpuRenderPackets: GpuRenderPacketState = {
     enabled: readInitialEnabled(),
     skipCpuRasterWrites: false,
@@ -409,7 +466,9 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             surfaces: surfaces.slice(),
             recordableSurfaces: Array.from(recordableSurfaces),
             cpuRasterWriteSkipSurfaces: Array.from(cpuRasterWriteSkipSurfaces),
-            spriteResources: spriteResources.slice()
+            spriteResources: spriteResources.slice(),
+            colourTableResource,
+            textureResources: textureResources.slice()
         };
     }
 };
@@ -665,10 +724,46 @@ export function recordMaskedSprite(
     });
 }
 
+export function recordColourTable(colourTable: Int32Array, version: number): void {
+    if (colourTableResource?.version === version) {
+        return;
+    }
+
+    colourTableResource = {
+        width: 256,
+        height: 256,
+        rgba: makeColourTableRgba(colourTable),
+        version
+    };
+}
+
+export function recordTextureResource(id: number, texels: Int32Array, version: number): void {
+    const existing = textureResources.find(item => item.id === id);
+    if (existing) {
+        if (existing.version !== version) {
+            existing.rgba = makeTexelRgba(texels);
+            existing.version = version;
+        }
+        return;
+    }
+
+    textureResources.push({
+        id,
+        width: 256,
+        height: 256,
+        rgba: makeTexelRgba(texels),
+        version
+    });
+}
+
 export function recordGouraudTriangle(
     xA: number, xB: number, xC: number,
     yA: number, yB: number, yC: number,
     colourA: number, colourB: number, colourC: number,
+    gpuRasterize: boolean,
+    lowDetail: boolean,
+    hclip: boolean,
+    alpha: number,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
     if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
@@ -687,6 +782,10 @@ export function recordGouraudTriangle(
         colourA,
         colourB,
         colourC,
+        gpuRasterize,
+        lowDetail,
+        hclip,
+        alpha,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
@@ -696,6 +795,7 @@ export function recordFlatTriangle(
     yA: number, yB: number, yC: number,
     colour: number,
     gpuRasterize: boolean,
+    alpha: number,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
     if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
@@ -713,6 +813,7 @@ export function recordFlatTriangle(
         yC,
         colour,
         gpuRasterize,
+        alpha,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }
@@ -728,7 +829,12 @@ export function recordTextureTriangle(
     texture: number,
     hasTexels: boolean,
     lowDetail: boolean,
+    lowMem: boolean,
     opaque: boolean,
+    gpuRasterize: boolean,
+    hclip: boolean,
+    screenOriginX: number,
+    screenOriginY: number,
     minX: number, minY: number, maxX: number, maxY: number
 ): void {
     if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
@@ -759,7 +865,12 @@ export function recordTextureTriangle(
         texture,
         hasTexels,
         lowDetail,
+        lowMem,
         opaque,
+        gpuRasterize,
+        hclip,
+        screenOriginX,
+        screenOriginY,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }

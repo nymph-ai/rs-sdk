@@ -1,4 +1,4 @@
-import { gpuRenderPackets, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, type GpuColourTableResource, type GpuRenderPacket, type GpuRenderPacketSnapshot, type GpuSpriteResource, type GpuTextureResource } from '#/graphics/GpuRenderPackets.js';
 
 type BrowserGpu = {
     requestAdapter(options?: { powerPreference?: 'high-performance' | 'low-power' }): Promise<GpuAdapter | null>;
@@ -168,6 +168,93 @@ struct AlphaParams {
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> params: AlphaParams;
 
+fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((x1 - x0) * 65536) / (y1 - y0);
+}
+
+fn edgeX(x0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return (x0 * 65536 + step * (y - y0)) >> 16;
+}
+
+fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeX(xTop, yTop, upperStep, y);
+    }
+
+    return edgeX(xMid, yMid, lowerStep, y);
+}
+
+fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
+    if (yTop >= yBot || pixel.y < yTop || pixel.y >= yBot) {
+        return false;
+    }
+
+    let longStep = edgeStep(xTop, yTop, xBot, yBot);
+    let upperStep = edgeStep(xTop, yTop, xMid, yMid);
+    let lowerStep = edgeStep(xMid, yMid, xBot, yBot);
+    let longX = edgeX(xTop, yTop, longStep, pixel.y);
+    let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, pixel.y);
+
+    var sampleY = max(yTop, params.clipMinY);
+    if (sampleY >= yBot) {
+        sampleY = yTop;
+    }
+    let sampleLong = edgeX(xTop, yTop, longStep, sampleY);
+    let sampleShort = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, sampleY);
+    var longLeft = sampleLong < sampleShort;
+    if (sampleLong == sampleShort) {
+        if (yTop == yMid) {
+            longLeft = xTop < xMid;
+        } else {
+            longLeft = longStep < upperStep;
+        }
+    }
+
+    var startX: i32;
+    var endX: i32;
+    if (longLeft) {
+        startX = longX;
+        endX = shortX;
+    } else {
+        startX = shortX;
+        endX = longX;
+    }
+
+    return pixel.x >= startX && pixel.x < endX;
+}
+
+fn inFlatTriangle(pixel: vec2<i32>) -> bool {
+    let xA = params.x;
+    let yA = params.y;
+    let xB = params.width;
+    let yB = params.height;
+    let xC = params.centerX;
+    let yC = params.centerY;
+
+    if (yA <= yB && yA <= yC) {
+        if (yB < yC) {
+            return inOrderedTriangle(pixel, xA, yA, xB, yB, xC, yC);
+        }
+        return inOrderedTriangle(pixel, xA, yA, xC, yC, xB, yB);
+    }
+
+    if (yB <= yC) {
+        if (yC < yA) {
+            return inOrderedTriangle(pixel, xB, yB, xC, yC, xA, yA);
+        }
+        return inOrderedTriangle(pixel, xB, yB, xA, yA, xC, yC);
+    }
+
+    if (yA < yB) {
+        return inOrderedTriangle(pixel, xC, yC, xA, yA, xB, yB);
+    }
+    return inOrderedTriangle(pixel, xC, yC, xB, yB, xA, yA);
+}
+
 fn inAlphaShape(pixel: vec2<i32>) -> bool {
     if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
         return false;
@@ -178,41 +265,7 @@ fn inAlphaShape(pixel: vec2<i32>) -> bool {
     }
 
     if (params.op == 2) {
-        let xA = params.x;
-        let yA = params.y;
-        let xB = params.width;
-        let yB = params.height;
-        let xC = params.centerX;
-        let yC = params.centerY;
-        if (!(yA < yB && yB < yC)) {
-            return false;
-        }
-
-        let xStepAB = ((xB - xA) * 65536) / (yB - yA);
-        let xStepBC = ((xC - xB) * 65536) / (yC - yB);
-        let xStepAC = ((xA - xC) * 65536) / (yA - yC);
-        if (!(xStepAC < xStepAB)) {
-            return false;
-        }
-
-        if (pixel.y < yA || pixel.y >= yC) {
-            return false;
-        }
-
-        var startX: i32;
-        var endX: i32;
-        if (pixel.y < yB) {
-            let dy = pixel.y - yA;
-            startX = (xA * 65536 + xStepAC * dy) / 65536;
-            endX = (xA * 65536 + xStepAB * dy) / 65536;
-        } else {
-            let dyTop = yB - yA;
-            let dy = pixel.y - yB;
-            startX = (xA * 65536 + xStepAC * dyTop + xStepAC * dy) / 65536;
-            endX = (xB * 65536 + xStepBC * dy) / 65536;
-        }
-
-        return pixel.x >= startX && pixel.x < endX;
+        return inFlatTriangle(pixel);
     }
 
     let dy = pixel.y - params.centerY;
@@ -233,6 +286,12 @@ fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
     return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
 }
 
+fn nextPixel(pixel: vec2<i32>) -> vec2<i32> {
+    let size = textureDimensions(sourceTexture);
+    let index = min(pixel.x + pixel.y * i32(size.x) + 1, i32(size.x * size.y) - 1);
+    return vec2<i32>(index % i32(size.x), index / i32(size.x));
+}
+
 @fragment
 fn fs(input: VertexOutput) -> @location(0) vec4f {
     let pixel = vec2<i32>(floor(input.position.xy));
@@ -247,14 +306,595 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     let srcR = (rgb >> 16u) & 255u;
     let srcG = (rgb >> 8u) & 255u;
     let srcB = rgb & 255u;
-    let dstR = toByte(base.r);
-    let dstG = toByte(base.g);
-    let dstB = toByte(base.b);
+    var blendBase = base;
+    if (params.op == 2 && alpha < 256u) {
+        blendBase = textureLoad(sourceTexture, nextPixel(pixel), 0);
+    }
+    let dstR = toByte(blendBase.r);
+    let dstG = toByte(blendBase.g);
+    let dstB = toByte(blendBase.b);
 
     let outR = blendChannel(srcR, dstR, alpha);
     let outG = blendChannel(srcG, dstG, alpha);
     let outB = blendChannel(srcB, dstB, alpha);
     return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
+const GOURAUD_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct GouraudParams {
+    xA: i32,
+    yA: i32,
+    xB: i32,
+    yB: i32,
+    xC: i32,
+    yC: i32,
+    colourA: i32,
+    colourB: i32,
+    colourC: i32,
+    alpha: i32,
+    lowDetail: i32,
+    hclip: i32,
+    clipMinX: i32,
+    clipMinY: i32,
+    clipMaxX: i32,
+    clipMaxY: i32,
+};
+
+struct GouraudSpan {
+    startX: i32,
+    endX: i32,
+    startShade: i32,
+    endShade: i32,
+    valid: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var colourTableTexture: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: GouraudParams;
+
+fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((x1 - x0) * 65536) / (y1 - y0);
+}
+
+fn colourStep(colour0: i32, y0: i32, colour1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((colour1 - colour0) * 32768) / (y1 - y0);
+}
+
+fn edgeX(x0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return (x0 * 65536 + step * (y - y0)) >> 16;
+}
+
+fn edgeShade(colour0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return ((colour0 << 15) + step * (y - y0)) >> 7;
+}
+
+fn emptySpan() -> GouraudSpan {
+    return GouraudSpan(0, 0, 0, 0, 0);
+}
+
+fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeX(xTop, yTop, upperStep, y);
+    }
+
+    return edgeX(xMid, yMid, lowerStep, y);
+}
+
+fn shortEdgeShade(colourTop: i32, yTop: i32, colourMid: i32, yMid: i32, colourBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeShade(colourTop, yTop, upperStep, y);
+    }
+
+    return edgeShade(colourMid, yMid, lowerStep, y);
+}
+
+fn orderedGouraudSpan(pixelY: i32, xTop: i32, yTop: i32, colourTop: i32, xMid: i32, yMid: i32, colourMid: i32, xBot: i32, yBot: i32, colourBot: i32) -> GouraudSpan {
+    if (yTop >= yBot || pixelY < yTop || pixelY >= yBot) {
+        return emptySpan();
+    }
+
+    let longXStep = edgeStep(xTop, yTop, xBot, yBot);
+    let upperXStep = edgeStep(xTop, yTop, xMid, yMid);
+    let lowerXStep = edgeStep(xMid, yMid, xBot, yBot);
+    let longColourStep = colourStep(colourTop, yTop, colourBot, yBot);
+    let upperColourStep = colourStep(colourTop, yTop, colourMid, yMid);
+    let lowerColourStep = colourStep(colourMid, yMid, colourBot, yBot);
+
+    let longX = edgeX(xTop, yTop, longXStep, pixelY);
+    let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperXStep, lowerXStep, pixelY);
+    let longShade = edgeShade(colourTop, yTop, longColourStep, pixelY);
+    let shortShade = shortEdgeShade(colourTop, yTop, colourMid, yMid, colourBot, yBot, upperColourStep, lowerColourStep, pixelY);
+
+    var sampleY = max(yTop, params.clipMinY);
+    if (sampleY >= yBot) {
+        sampleY = yTop;
+    }
+    let sampleLong = edgeX(xTop, yTop, longXStep, sampleY);
+    let sampleShort = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperXStep, lowerXStep, sampleY);
+    var longLeft = sampleLong < sampleShort;
+    if (sampleLong == sampleShort) {
+        if (yTop == yMid) {
+            longLeft = xTop < xMid;
+        } else {
+            longLeft = longXStep < upperXStep;
+        }
+    }
+
+    if (longLeft) {
+        return GouraudSpan(longX, shortX, longShade, shortShade, 1);
+    }
+    return GouraudSpan(shortX, longX, shortShade, longShade, 1);
+}
+
+fn gouraudSpan(pixelY: i32) -> GouraudSpan {
+    if (params.yA <= params.yB && params.yA <= params.yC) {
+        if (params.yB < params.yC) {
+            return orderedGouraudSpan(pixelY, params.xA, params.yA, params.colourA, params.xB, params.yB, params.colourB, params.xC, params.yC, params.colourC);
+        }
+        return orderedGouraudSpan(pixelY, params.xA, params.yA, params.colourA, params.xC, params.yC, params.colourC, params.xB, params.yB, params.colourB);
+    }
+
+    if (params.yB <= params.yC) {
+        if (params.yC < params.yA) {
+            return orderedGouraudSpan(pixelY, params.xB, params.yB, params.colourB, params.xC, params.yC, params.colourC, params.xA, params.yA, params.colourA);
+        }
+        return orderedGouraudSpan(pixelY, params.xB, params.yB, params.colourB, params.xA, params.yA, params.colourA, params.xC, params.yC, params.colourC);
+    }
+
+    if (params.yA < params.yB) {
+        return orderedGouraudSpan(pixelY, params.xC, params.yC, params.colourC, params.xA, params.yA, params.colourA, params.xB, params.yB, params.colourB);
+    }
+    return orderedGouraudSpan(pixelY, params.xC, params.yC, params.colourC, params.xB, params.yB, params.colourB, params.xA, params.yA, params.colourA);
+}
+
+fn colourTableIndex(span: GouraudSpan, pixelX: i32) -> i32 {
+    if (span.valid == 0 || span.startX >= span.endX || pixelX < span.startX || pixelX >= span.endX) {
+        return -1;
+    }
+
+    if (params.lowDetail != 0) {
+        var startX = span.startX;
+        var endX = span.endX;
+        var startShade = span.startShade;
+        var step: i32;
+        if (params.hclip != 0) {
+            if (span.endX - span.startX > 3) {
+                step = (span.endShade - span.startShade) / (span.endX - span.startX);
+            } else {
+                step = 0;
+            }
+
+            if (endX > params.clipMaxX - 1) {
+                endX = params.clipMaxX - 1;
+            }
+            if (startX < params.clipMinX) {
+                startShade -= (startX - params.clipMinX) * step;
+                startX = params.clipMinX;
+            }
+            if (startX >= endX || pixelX < startX || pixelX >= endX) {
+                return -1;
+            }
+
+            step = step << 2;
+        } else {
+            let groups = (span.endX - span.startX) >> 2;
+            if (groups > 0) {
+                step = ((span.endShade - span.startShade) * (32768 / groups)) >> 15;
+            } else {
+                step = 0;
+            }
+        }
+
+        let group = (pixelX - startX) >> 2;
+        return (startShade + group * step) >> 8;
+    }
+
+    let step = (span.endShade - span.startShade) / (span.endX - span.startX);
+    if (params.hclip != 0) {
+        let endX = min(span.endX, params.clipMaxX - 1);
+        if (pixelX >= endX) {
+            return -1;
+        }
+    }
+    return (span.startShade + (pixelX - span.startX) * step) >> 8;
+}
+
+fn toByte(channel: f32) -> u32 {
+    return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
+}
+
+fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
+    return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
+}
+
+fn nextPixel(pixel: vec2<i32>) -> vec2<i32> {
+    let size = textureDimensions(sourceTexture);
+    let index = min(pixel.x + pixel.y * i32(size.x) + 1, i32(size.x * size.y) - 1);
+    return vec2<i32>(index % i32(size.x), index / i32(size.x));
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+
+    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let span = gouraudSpan(pixel.y);
+    let tableIndex = colourTableIndex(span, pixel.x);
+    if (tableIndex < 0) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let clampedIndex = clamp(tableIndex, 0, 65535);
+    let colour = textureLoad(colourTableTexture, vec2<i32>(clampedIndex & 255, clampedIndex >> 8), 0);
+    let alpha = u32(params.alpha);
+    if (alpha >= 256u) {
+        return vec4f(colour.rgb, 1.0);
+    }
+
+    let blendBase = textureLoad(sourceTexture, nextPixel(pixel), 0);
+    let outR = blendChannel(toByte(colour.r), toByte(blendBase.r), alpha);
+    let outG = blendChannel(toByte(colour.g), toByte(blendBase.g), alpha);
+    let outB = blendChannel(toByte(colour.b), toByte(blendBase.b), alpha);
+    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
+const TEXTURE_TRIANGLE_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct TextureTriangleParams {
+    xA: i32,
+    yA: i32,
+    xB: i32,
+    yB: i32,
+    xC: i32,
+    yC: i32,
+    shadeA: i32,
+    shadeB: i32,
+    shadeC: i32,
+    texOriginX: i32,
+    texOriginY: i32,
+    texOriginZ: i32,
+    txB: i32,
+    txC: i32,
+    tyB: i32,
+    tyC: i32,
+    tzB: i32,
+    tzC: i32,
+    lowMem: i32,
+    opaque: i32,
+    hclip: i32,
+    screenOriginX: i32,
+    screenOriginY: i32,
+    clipMinX: i32,
+    clipMinY: i32,
+    clipMaxX: i32,
+    clipMaxY: i32,
+    _pad0: i32,
+};
+
+struct TextureSpan {
+    startX: i32,
+    endX: i32,
+    startShade: i32,
+    endShade: i32,
+    valid: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var texelTexture: texture_2d<u32>;
+@group(0) @binding(2) var<uniform> params: TextureTriangleParams;
+
+fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((x1 - x0) * 65536) / (y1 - y0);
+}
+
+fn shadeStep(shade0: i32, y0: i32, shade1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((shade1 - shade0) * 65536) / (y1 - y0);
+}
+
+fn edgeX(x0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return (x0 * 65536 + step * (y - y0)) >> 16;
+}
+
+fn edgeShade(shade0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return ((shade0 << 16) + step * (y - y0)) >> 8;
+}
+
+fn emptyTextureSpan() -> TextureSpan {
+    return TextureSpan(0, 0, 0, 0, 0);
+}
+
+fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeX(xTop, yTop, upperStep, y);
+    }
+
+    return edgeX(xMid, yMid, lowerStep, y);
+}
+
+fn shortEdgeShade(shadeTop: i32, yTop: i32, shadeMid: i32, yMid: i32, shadeBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeShade(shadeTop, yTop, upperStep, y);
+    }
+
+    return edgeShade(shadeMid, yMid, lowerStep, y);
+}
+
+fn orderedTextureSpan(pixelY: i32, xTop: i32, yTop: i32, shadeTop: i32, xMid: i32, yMid: i32, shadeMid: i32, xBot: i32, yBot: i32, shadeBot: i32) -> TextureSpan {
+    if (yTop >= yBot || pixelY < yTop || pixelY >= yBot) {
+        return emptyTextureSpan();
+    }
+
+    let longXStep = edgeStep(xTop, yTop, xBot, yBot);
+    let upperXStep = edgeStep(xTop, yTop, xMid, yMid);
+    let lowerXStep = edgeStep(xMid, yMid, xBot, yBot);
+    let longShadeStep = shadeStep(shadeTop, yTop, shadeBot, yBot);
+    let upperShadeStep = shadeStep(shadeTop, yTop, shadeMid, yMid);
+    let lowerShadeStep = shadeStep(shadeMid, yMid, shadeBot, yBot);
+
+    let longX = edgeX(xTop, yTop, longXStep, pixelY);
+    let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperXStep, lowerXStep, pixelY);
+    let longShade = edgeShade(shadeTop, yTop, longShadeStep, pixelY);
+    let shortShade = shortEdgeShade(shadeTop, yTop, shadeMid, yMid, shadeBot, yBot, upperShadeStep, lowerShadeStep, pixelY);
+
+    var sampleY = max(yTop, params.clipMinY);
+    if (sampleY >= yBot) {
+        sampleY = yTop;
+    }
+    let sampleLong = edgeX(xTop, yTop, longXStep, sampleY);
+    let sampleShort = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperXStep, lowerXStep, sampleY);
+    var longLeft = sampleLong < sampleShort;
+    if (sampleLong == sampleShort) {
+        if (yTop == yMid) {
+            longLeft = xTop < xMid;
+        } else {
+            longLeft = longXStep < upperXStep;
+        }
+    }
+
+    if (longLeft) {
+        return TextureSpan(longX, shortX, longShade, shortShade, 1);
+    }
+    return TextureSpan(shortX, longX, shortShade, longShade, 1);
+}
+
+fn textureSpan(pixelY: i32) -> TextureSpan {
+    if (params.yA <= params.yB && params.yA <= params.yC) {
+        if (params.yB < params.yC) {
+            return orderedTextureSpan(pixelY, params.xA, params.yA, params.shadeA, params.xB, params.yB, params.shadeB, params.xC, params.yC, params.shadeC);
+        }
+        return orderedTextureSpan(pixelY, params.xA, params.yA, params.shadeA, params.xC, params.yC, params.shadeC, params.xB, params.yB, params.shadeB);
+    }
+
+    if (params.yB <= params.yC) {
+        if (params.yC < params.yA) {
+            return orderedTextureSpan(pixelY, params.xB, params.yB, params.shadeB, params.xC, params.yC, params.shadeC, params.xA, params.yA, params.shadeA);
+        }
+        return orderedTextureSpan(pixelY, params.xB, params.yB, params.shadeB, params.xA, params.yA, params.shadeA, params.xC, params.yC, params.shadeC);
+    }
+
+    if (params.yA < params.yB) {
+        return orderedTextureSpan(pixelY, params.xC, params.yC, params.shadeC, params.xA, params.yA, params.shadeA, params.xB, params.yB, params.shadeB);
+    }
+    return orderedTextureSpan(pixelY, params.xC, params.yC, params.shadeC, params.xB, params.yB, params.shadeB, params.xA, params.yA, params.shadeA);
+}
+
+fn textureRawRgb(span: TextureSpan, pixel: vec2<i32>) -> u32 {
+    if (span.valid == 0 || span.startX >= span.endX || pixel.x < span.startX || pixel.x >= span.endX) {
+        return 0xffffffffu;
+    }
+
+    var startX = span.startX;
+    var endX = span.endX;
+    var startShade = span.startShade;
+    var shadeStride: i32;
+    if (params.hclip != 0) {
+        shadeStride = (span.endShade - span.startShade) / (span.endX - span.startX);
+        if (endX > params.clipMaxX - 1) {
+            endX = params.clipMaxX - 1;
+        }
+        if (startX < params.clipMinX) {
+            startShade -= (startX - params.clipMinX) * shadeStride;
+            startX = params.clipMinX;
+        }
+        if (startX >= endX || pixel.x < startX || pixel.x >= endX) {
+            return 0xffffffffu;
+        }
+        shadeStride = shadeStride << 12;
+    } else {
+        if (span.endX - span.startX > 7) {
+            let groups = (span.endX - span.startX) >> 3;
+            shadeStride = ((span.endShade - span.startShade) * (32768 / groups)) >> 6;
+        } else {
+            shadeStride = 0;
+        }
+    }
+
+    let localX = pixel.x - startX;
+    let group = localX >> 3;
+    let groupPixel = localX & 7;
+    let shadeBase = (startShade << 9) + shadeStride * group;
+
+    let verticalX = params.texOriginX - params.txB;
+    let verticalY = params.texOriginY - params.tyB;
+    let verticalZ = params.texOriginZ - params.tzB;
+    let horizontalX = params.txC - params.texOriginX;
+    let horizontalY = params.tyC - params.texOriginY;
+    let horizontalZ = params.tzC - params.texOriginZ;
+
+    let baseU = (horizontalX * params.texOriginY - horizontalY * params.texOriginX) << 14;
+    let uStride = (horizontalY * params.texOriginZ - horizontalZ * params.texOriginY) << 8;
+    let uStepVertical = (horizontalZ * params.texOriginX - horizontalX * params.texOriginZ) << 5;
+    let baseV = (verticalX * params.texOriginY - verticalY * params.texOriginX) << 14;
+    let vStride = (verticalY * params.texOriginZ - verticalZ * params.texOriginY) << 8;
+    let vStepVertical = (verticalZ * params.texOriginX - verticalX * params.texOriginZ) << 5;
+    let baseW = (verticalY * horizontalX - verticalX * horizontalY) << 14;
+    let wStride = (verticalZ * horizontalY - verticalY * horizontalZ) << 8;
+    let wStepVertical = (verticalX * horizontalZ - verticalZ * horizontalX) << 5;
+
+    let rowDelta = pixel.y - params.screenOriginY;
+    let dx = startX - params.screenOriginX;
+    let uStart = baseU + uStepVertical * rowDelta + (uStride >> 3) * dx;
+    let vStart = baseV + vStepVertical * rowDelta + (vStride >> 3) * dx;
+    let wStart = baseW + wStepVertical * rowDelta + (wStride >> 3) * dx;
+    let uGroup = uStart + uStride * group;
+    let vGroup = vStart + vStride * group;
+    let wGroup = wStart + wStride * group;
+    let uNextGroup = uGroup + uStride;
+    let vNextGroup = vGroup + vStride;
+    let wNextGroup = wGroup + wStride;
+
+    var curU = 0;
+    var curV = 0;
+    var nextU = 0;
+    var nextV = 0;
+    if (params.lowMem != 0) {
+        let curW = wGroup >> 12;
+        if (curW != 0) {
+            curU = uGroup / curW;
+            curV = vGroup / curW;
+            if (curU < 0) {
+                curU = 0;
+            } else if (curU > 4032) {
+                curU = 4032;
+            }
+        }
+
+        let nextW = wNextGroup >> 12;
+        if (nextW != 0) {
+            nextU = uNextGroup / nextW;
+            nextV = vNextGroup / nextW;
+            if (nextU < 7) {
+                nextU = 7;
+            } else if (nextU > 4032) {
+                nextU = 4032;
+            }
+        }
+
+        let stepU = (nextU - curU) >> 3;
+        let stepV = (nextV - curV) >> 3;
+        curU += (shadeBase >> 3) & 0xc0000;
+        let shadeShift = shadeBase >> 23;
+        let sampleU = curU + stepU * groupPixel;
+        let sampleV = curV + stepV * groupPixel;
+        let texelIndex = (sampleV & 0xfc0) + (sampleU >> 6);
+        let texel = textureLoad(texelTexture, vec2<i32>(texelIndex & 255, texelIndex >> 8), 0);
+        let rgb = ((texel.r << 16u) | (texel.g << 8u) | texel.b) >> u32(shadeShift);
+        return rgb;
+    }
+
+    let curW = wGroup >> 14;
+    if (curW != 0) {
+        curU = uGroup / curW;
+        curV = vGroup / curW;
+        if (curU < 0) {
+            curU = 0;
+        } else if (curU > 16256) {
+            curU = 16256;
+        }
+    }
+
+    let nextW = wNextGroup >> 14;
+    if (nextW != 0) {
+        nextU = uNextGroup / nextW;
+        nextV = vNextGroup / nextW;
+        if (nextU < 7) {
+            nextU = 7;
+        } else if (nextU > 16256) {
+            nextU = 16256;
+        }
+    }
+
+    let stepU = (nextU - curU) >> 3;
+    let stepV = (nextV - curV) >> 3;
+    curU += shadeBase & 0x600000;
+    let shadeShift = shadeBase >> 23;
+    let sampleU = curU + stepU * groupPixel;
+    let sampleV = curV + stepV * groupPixel;
+    let texelIndex = (sampleV & 0x3f80) + (sampleU >> 7);
+    let texel = textureLoad(texelTexture, vec2<i32>(texelIndex & 255, texelIndex >> 8), 0);
+    let rgb = ((texel.r << 16u) | (texel.g << 8u) | texel.b) >> u32(shadeShift);
+    return rgb;
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let span = textureSpan(pixel.y);
+    let rgb = textureRawRgb(span, pixel);
+    if (rgb == 0xffffffffu || (params.opaque == 0 && rgb == 0u)) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let r = (rgb >> 16u) & 255u;
+    let g = (rgb >> 8u) & 255u;
+    let b = rgb & 255u;
+    return vec4f(f32(r) / 255.0, f32(g) / 255.0, f32(b) / 255.0, 1.0);
 }
 `;
 
@@ -538,6 +1178,8 @@ const FRAME_TEXTURE_FORMAT = 'rgba8unorm';
 const FLOATS_PER_PRIMITIVE_VERTEX = 6;
 const FLOATS_PER_SPRITE_VERTEX = 4;
 const ALPHA_UNIFORM_INTS = 16;
+const GOURAUD_UNIFORM_INTS = 16;
+const TEXTURE_TRIANGLE_UNIFORM_INTS = 28;
 const SPRITE_ALPHA_UNIFORM_INTS = 16;
 const TRANSFORM_SPRITE_UNIFORM_INTS = 16;
 const MASKED_SPRITE_UNIFORM_INTS = 16;
@@ -555,6 +1197,8 @@ type PacketReplayBuildResult = {
     steps: PacketReplayStep[];
     packetCount: number;
     nativeFlatTriangleCount: number;
+    nativeGouraudTriangleCount: number;
+    nativeTextureTriangleCount: number;
 };
 
 type PacketReplayStep = {
@@ -563,6 +1207,12 @@ type PacketReplayStep = {
 } | {
     kind: 'alpha';
     op: AlphaReplayOp;
+} | {
+    kind: 'gouraud';
+    op: GouraudReplayOp;
+} | {
+    kind: 'textureTriangle';
+    op: TextureTriangleReplayOp;
 } | {
     kind: 'sprite';
     op: SpriteReplayOp;
@@ -598,6 +1248,50 @@ type AlphaReplayOp = {
     clip: Rect;
     rgb: number;
     alpha: number;
+};
+
+type GouraudReplayOp = {
+    xA: number;
+    yA: number;
+    xB: number;
+    yB: number;
+    xC: number;
+    yC: number;
+    colourA: number;
+    colourB: number;
+    colourC: number;
+    alpha: number;
+    lowDetail: boolean;
+    hclip: boolean;
+    clip: Rect;
+};
+
+type TextureTriangleReplayOp = {
+    texture: number;
+    xA: number;
+    yA: number;
+    xB: number;
+    yB: number;
+    xC: number;
+    yC: number;
+    shadeA: number;
+    shadeB: number;
+    shadeC: number;
+    originX: number;
+    originY: number;
+    originZ: number;
+    txB: number;
+    txC: number;
+    tyB: number;
+    tyC: number;
+    tzB: number;
+    tzC: number;
+    lowMem: boolean;
+    opaque: boolean;
+    hclip: boolean;
+    screenOriginX: number;
+    screenOriginY: number;
+    clip: Rect;
 };
 
 type SpriteReplayOp = {
@@ -839,6 +1533,8 @@ export type WebGpuPacketReplayStats = {
     cpuImageDataUploads: number;
     cpuRasterWriteBypasses: number;
     nativeFlatTrianglesReplayed: number;
+    nativeGouraudTrianglesReplayed: number;
+    nativeTextureTrianglesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -984,6 +1680,8 @@ export default class WebGpuFramePresenter {
     private scratchFrameTexture: GpuTexture | null = null;
     private bindGroup: object | null = null;
     private alphaUniformBuffer: GpuBuffer | null = null;
+    private gouraudUniformBuffer: GpuBuffer | null = null;
+    private textureTriangleUniformBuffer: GpuBuffer | null = null;
     private spriteAlphaUniformBuffer: GpuBuffer | null = null;
     private transformSpriteUniformBuffer: GpuBuffer | null = null;
     private maskedSpriteUniformBuffer: GpuBuffer | null = null;
@@ -992,6 +1690,8 @@ export default class WebGpuFramePresenter {
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
+    private colourTableTexture: { texture: GpuTexture; width: number; height: number; version: number } | null = null;
+    private readonly texelTextures = new Map<number, { texture: GpuTexture; width: number; height: number; version: number }>();
     private packetCursor: number = 0;
     private packetDropped: number = 0;
     private readonly bufferUsage = getBufferUsage();
@@ -1016,6 +1716,8 @@ export default class WebGpuFramePresenter {
         private readonly transformSpritePipeline: GpuRenderPipeline,
         private readonly maskedSpritePipeline: GpuRenderPipeline,
         private readonly alphaPipeline: GpuRenderPipeline,
+        private readonly gouraudPipeline: GpuRenderPipeline,
+        private readonly textureTrianglePipeline: GpuRenderPipeline,
         options: WebGpuFramePresenterOptions
     ) {
         this.validator = options.validate ? new WebGpuFrameValidator(device, options.validationSampleInterval || 120) : null;
@@ -1029,6 +1731,8 @@ export default class WebGpuFramePresenter {
             cpuImageDataUploads: 0,
             cpuRasterWriteBypasses: 0,
             nativeFlatTrianglesReplayed: 0,
+            nativeGouraudTrianglesReplayed: 0,
+            nativeTextureTrianglesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -1179,6 +1883,8 @@ export default class WebGpuFramePresenter {
             }
         });
         const alphaShaderModule = device.createShaderModule({ code: ALPHA_SHADER });
+        const gouraudShaderModule = device.createShaderModule({ code: GOURAUD_SHADER });
+        const textureTriangleShaderModule = device.createShaderModule({ code: TEXTURE_TRIANGLE_SHADER });
         const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
         const transformSpriteShaderModule = device.createShaderModule({ code: TRANSFORM_SPRITE_SHADER });
         const maskedSpriteShaderModule = device.createShaderModule({ code: MASKED_SPRITE_SHADER });
@@ -1190,6 +1896,36 @@ export default class WebGpuFramePresenter {
             },
             fragment: {
                 module: alphaShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
+        const gouraudPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: gouraudShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: gouraudShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
+        const textureTrianglePipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: textureTriangleShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: textureTriangleShaderModule,
                 entryPoint: 'fs',
                 targets: [{ format: FRAME_TEXTURE_FORMAT }]
             },
@@ -1248,7 +1984,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, spritePipeline, spriteAlphaPipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, spritePipeline, spriteAlphaPipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -1461,6 +2197,8 @@ export default class WebGpuFramePresenter {
         this.packetReplayStats.framesReplayed++;
         this.packetReplayStats.packetsReplayed += result.packetCount;
         this.packetReplayStats.nativeFlatTrianglesReplayed += result.nativeFlatTriangleCount;
+        this.packetReplayStats.nativeGouraudTrianglesReplayed += result.nativeGouraudTriangleCount;
+        this.packetReplayStats.nativeTextureTrianglesReplayed += result.nativeTextureTriangleCount;
         this.packetReplayStats.lastVertexCount = vertexCount;
         this.packetReplayStats.lastError = '';
         gpuRenderPackets.discardSurface(surface.id);
@@ -1479,6 +2217,8 @@ export default class WebGpuFramePresenter {
         let vertices: number[] = [];
         let packetCount = 0;
         let nativeFlatTriangleCount = 0;
+        let nativeGouraudTriangleCount = 0;
+        let nativeTextureTriangleCount = 0;
         let clip: PacketClip = { minX: 0, minY: 0, maxX: surfaceWidth, maxY: surfaceHeight };
         const packets = snapshot.packets.slice(this.packetCursor);
 
@@ -1692,13 +2432,80 @@ export default class WebGpuFramePresenter {
                                     height: packet.clip.maxY - packet.clip.minY
                                 },
                                 rgb: packet.colour,
-                                alpha: 256
+                                alpha: packet.alpha
                             }
                         });
                     }
                     break;
                 case 'triangleGouraud':
+                    if (packet.gpuRasterize) {
+                        nativeGouraudTriangleCount++;
+                        flushVertices();
+                        steps.push({
+                            kind: 'gouraud',
+                            op: {
+                                xA: packet.xA + offsetX,
+                                yA: packet.yA + offsetY,
+                                xB: packet.xB + offsetX,
+                                yB: packet.yB + offsetY,
+                                xC: packet.xC + offsetX,
+                                yC: packet.yC + offsetY,
+                                colourA: packet.colourA,
+                                colourB: packet.colourB,
+                                colourC: packet.colourC,
+                                alpha: packet.alpha,
+                                lowDetail: packet.lowDetail,
+                                hclip: packet.hclip,
+                                clip: {
+                                    x: packet.clip.minX + offsetX,
+                                    y: packet.clip.minY + offsetY,
+                                    width: packet.clip.maxX - packet.clip.minX,
+                                    height: packet.clip.maxY - packet.clip.minY
+                                }
+                            }
+                        });
+                    }
+                    break;
                 case 'triangleTexture':
+                    if (packet.gpuRasterize && packet.hasTexels) {
+                        nativeTextureTriangleCount++;
+                        flushVertices();
+                        steps.push({
+                            kind: 'textureTriangle',
+                            op: {
+                                texture: packet.texture,
+                                xA: packet.xA + offsetX,
+                                yA: packet.yA + offsetY,
+                                xB: packet.xB + offsetX,
+                                yB: packet.yB + offsetY,
+                                xC: packet.xC + offsetX,
+                                yC: packet.yC + offsetY,
+                                shadeA: packet.shadeA,
+                                shadeB: packet.shadeB,
+                                shadeC: packet.shadeC,
+                                originX: packet.originX,
+                                originY: packet.originY,
+                                originZ: packet.originZ,
+                                txB: packet.txB,
+                                txC: packet.txC,
+                                tyB: packet.tyB,
+                                tyC: packet.tyC,
+                                tzB: packet.tzB,
+                                tzC: packet.tzC,
+                                lowMem: packet.lowMem,
+                                opaque: packet.opaque,
+                                hclip: packet.hclip,
+                                screenOriginX: packet.screenOriginX + offsetX,
+                                screenOriginY: packet.screenOriginY + offsetY,
+                                clip: {
+                                    x: packet.clip.minX + offsetX,
+                                    y: packet.clip.minY + offsetY,
+                                    width: packet.clip.maxX - packet.clip.minX,
+                                    height: packet.clip.maxY - packet.clip.minY
+                                }
+                            }
+                        });
+                    }
                     break;
                 default:
                     this.failPacketReplay('unknown packet kind');
@@ -1706,7 +2513,7 @@ export default class WebGpuFramePresenter {
         }
 
         flushVertices();
-        return { steps, packetCount, nativeFlatTriangleCount };
+        return { steps, packetCount, nativeFlatTriangleCount, nativeGouraudTriangleCount, nativeTextureTriangleCount };
     }
 
     private replayPrimitiveSteps(steps: PacketReplayStep[]): void {
@@ -1715,6 +2522,20 @@ export default class WebGpuFramePresenter {
                 this.replayPrimitiveVertices(step.vertices);
             } else if (step.kind === 'alpha') {
                 this.replayAlphaOp(step.op);
+            } else if (step.kind === 'gouraud') {
+                const resource = gpuRenderPackets.snapshot().colourTableResource;
+                if (!resource) {
+                    this.failPacketReplay('colour table resource is missing');
+                }
+
+                this.replayGouraudOp(step.op, resource);
+            } else if (step.kind === 'textureTriangle') {
+                const resource = gpuRenderPackets.snapshot().textureResources.find(item => item.id === step.op.texture);
+                if (!resource) {
+                    this.failPacketReplay(`texture resource ${step.op.texture} is missing`);
+                }
+
+                this.replayTextureTriangleOp(step.op, resource);
             } else if (step.kind === 'maskedSprite') {
                 const resources = gpuRenderPackets.snapshot().spriteResources;
                 const resource = resources.find(item => item.id === step.op.resource);
@@ -1837,6 +2658,155 @@ export default class WebGpuFramePresenter {
         });
 
         pass.setPipeline(this.alphaPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+    }
+
+    private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('gouraud replay requested before frame textures exist');
+        }
+
+        const colourTable = this.getColourTableTexture(resource);
+        this.ensureGouraudUniformBuffer();
+        const params = new Int32Array(GOURAUD_UNIFORM_INTS);
+        params[0] = op.xA;
+        params[1] = op.yA;
+        params[2] = op.xB;
+        params[3] = op.yB;
+        params[4] = op.xC;
+        params[5] = op.yC;
+        params[6] = op.colourA;
+        params[7] = op.colourB;
+        params[8] = op.colourC;
+        params[9] = op.alpha;
+        params[10] = op.lowDetail ? 1 : 0;
+        params[11] = op.hclip ? 1 : 0;
+        params[12] = op.clip.x;
+        params[13] = op.clip.y;
+        params[14] = op.clip.x + op.clip.width;
+        params[15] = op.clip.y + op.clip.height;
+        this.device.queue.writeBuffer(this.gouraudUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.gouraudPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: colourTable.texture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.gouraudUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.gouraudPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+    }
+
+    private replayTextureTriangleOp(op: TextureTriangleReplayOp, resource: GpuTextureResource): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('texture triangle replay requested before frame textures exist');
+        }
+
+        const texels = this.getTexelTexture(resource);
+        this.ensureTextureTriangleUniformBuffer();
+        const params = new Int32Array(TEXTURE_TRIANGLE_UNIFORM_INTS);
+        params[0] = op.xA;
+        params[1] = op.yA;
+        params[2] = op.xB;
+        params[3] = op.yB;
+        params[4] = op.xC;
+        params[5] = op.yC;
+        params[6] = op.shadeA;
+        params[7] = op.shadeB;
+        params[8] = op.shadeC;
+        params[9] = op.originX;
+        params[10] = op.originY;
+        params[11] = op.originZ;
+        params[12] = op.txB;
+        params[13] = op.txC;
+        params[14] = op.tyB;
+        params[15] = op.tyC;
+        params[16] = op.tzB;
+        params[17] = op.tzC;
+        params[18] = op.lowMem ? 1 : 0;
+        params[19] = op.opaque ? 1 : 0;
+        params[20] = op.hclip ? 1 : 0;
+        params[21] = op.screenOriginX;
+        params[22] = op.screenOriginY;
+        params[23] = op.clip.x;
+        params[24] = op.clip.y;
+        params[25] = op.clip.x + op.clip.width;
+        params[26] = op.clip.y + op.clip.height;
+        this.device.queue.writeBuffer(this.textureTriangleUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.textureTrianglePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: texels.texture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.textureTriangleUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.textureTrianglePipeline);
         pass.setBindGroup(0, bindGroup);
         pass.draw(6);
         pass.end();
@@ -2146,6 +3116,93 @@ export default class WebGpuFramePresenter {
         );
     }
 
+    private getColourTableTexture(resource: GpuColourTableResource): { texture: GpuTexture; width: number; height: number; version: number } {
+        if (this.colourTableTexture && this.colourTableTexture.width === resource.width && this.colourTableTexture.height === resource.height) {
+            if (this.colourTableTexture.version !== resource.version) {
+                this.writeColourTableTexture(this.colourTableTexture.texture, resource);
+                this.colourTableTexture.version = resource.version;
+            }
+            return this.colourTableTexture;
+        }
+
+        this.colourTableTexture?.texture.destroy();
+        const texture = this.device.createTexture({
+            size: {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8unorm',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        this.writeColourTableTexture(texture, resource);
+        this.colourTableTexture = { texture, width: resource.width, height: resource.height, version: resource.version };
+        return this.colourTableTexture;
+    }
+
+    private writeColourTableTexture(texture: GpuTexture, resource: GpuColourTableResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.rgba,
+            {
+                offset: 0,
+                bytesPerRow: resource.width * 4,
+                rowsPerImage: resource.height
+            },
+            {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
+    private getTexelTexture(resource: GpuTextureResource): { texture: GpuTexture; width: number; height: number; version: number } {
+        const cached = this.texelTextures.get(resource.id);
+        if (cached && cached.width === resource.width && cached.height === resource.height) {
+            if (cached.version !== resource.version) {
+                this.writeTexelTexture(cached.texture, resource);
+                cached.version = resource.version;
+            }
+            return cached;
+        }
+        if (cached) {
+            cached.texture.destroy();
+            this.texelTextures.delete(resource.id);
+        }
+
+        const texture = this.device.createTexture({
+            size: {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba8uint',
+            usage: getTextureUsage()!.COPY_DST | getTextureUsage()!.TEXTURE_BINDING
+        });
+        this.writeTexelTexture(texture, resource);
+        const value = { texture, width: resource.width, height: resource.height, version: resource.version };
+        this.texelTextures.set(resource.id, value);
+        return value;
+    }
+
+    private writeTexelTexture(texture: GpuTexture, resource: GpuTextureResource): void {
+        this.device.queue.writeTexture(
+            { texture },
+            resource.rgba,
+            {
+                offset: 0,
+                bytesPerRow: resource.width * 4,
+                rowsPerImage: resource.height
+            },
+            {
+                width: resource.width,
+                height: resource.height,
+                depthOrArrayLayers: 1
+            }
+        );
+    }
+
     private ensurePrimitiveVertexBuffer(byteLength: number): void {
         if (this.primitiveVertexBuffer && this.primitiveVertexBufferBytes >= byteLength) {
             return;
@@ -2179,6 +3236,28 @@ export default class WebGpuFramePresenter {
 
         this.alphaUniformBuffer = this.device.createBuffer({
             size: ALPHA_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
+    private ensureGouraudUniformBuffer(): void {
+        if (this.gouraudUniformBuffer) {
+            return;
+        }
+
+        this.gouraudUniformBuffer = this.device.createBuffer({
+            size: GOURAUD_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
+    private ensureTextureTriangleUniformBuffer(): void {
+        if (this.textureTriangleUniformBuffer) {
+            return;
+        }
+
+        this.textureTriangleUniformBuffer = this.device.createBuffer({
+            size: TEXTURE_TRIANGLE_UNIFORM_INTS * 4,
             usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
         });
     }
@@ -2248,22 +3327,32 @@ export default class WebGpuFramePresenter {
         this.primitiveVertexBuffer?.destroy();
         this.spriteVertexBuffer?.destroy();
         this.alphaUniformBuffer?.destroy();
+        this.gouraudUniformBuffer?.destroy();
+        this.textureTriangleUniformBuffer?.destroy();
         this.spriteAlphaUniformBuffer?.destroy();
         this.transformSpriteUniformBuffer?.destroy();
         this.maskedSpriteUniformBuffer?.destroy();
+        this.colourTableTexture?.texture.destroy();
         for (const cached of this.spriteTextures.values()) {
             cached.texture.destroy();
         }
+        for (const cached of this.texelTextures.values()) {
+            cached.texture.destroy();
+        }
         this.spriteTextures.clear();
+        this.texelTextures.clear();
         this.frameTexture = null;
         this.scratchFrameTexture = null;
         this.bindGroup = null;
         this.primitiveVertexBuffer = null;
         this.spriteVertexBuffer = null;
         this.alphaUniformBuffer = null;
+        this.gouraudUniformBuffer = null;
+        this.textureTriangleUniformBuffer = null;
         this.spriteAlphaUniformBuffer = null;
         this.transformSpriteUniformBuffer = null;
         this.maskedSpriteUniformBuffer = null;
+        this.colourTableTexture = null;
         this.overlayCanvas.remove();
     }
 }

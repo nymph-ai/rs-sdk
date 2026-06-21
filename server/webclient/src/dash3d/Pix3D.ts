@@ -1,8 +1,10 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import {
+    recordColourTable,
     recordFlatTriangle,
     recordFillRect,
     recordGouraudTriangle,
+    recordTextureResource,
     recordTextureTriangle,
     gpuRenderPackets
 } from '#/graphics/GpuRenderPackets.js';
@@ -27,6 +29,7 @@ export default class Pix3D extends Pix2D {
     static activeTexels: (Int32Array | null)[] = new TypedArray1d(50, null);
     static texCycle: Int32Array = new Int32Array(50);
     static texPal: (Int32Array | null)[] = new TypedArray1d(50, null);
+    private static texelVersions: Int32Array = new Int32Array(50);
     static numTextures: number = 0;
     static originX: number = 0;
     static originY: number = 0;
@@ -38,6 +41,7 @@ export default class Pix3D extends Pix2D {
     static scanline: Int32Array = new Int32Array();
     static hclip: boolean = false;
     static trans: number = 0;
+    private static colourTableVersion: number = 0;
 
     static {
         for (let i: number = 1; i < 512; i++) {
@@ -219,6 +223,7 @@ export default class Pix3D extends Pix2D {
             }
         }
 
+        this.texelVersions[id]++;
         return texels;
     }
 
@@ -315,6 +320,8 @@ export default class Pix3D extends Pix2D {
         for (let id: number = 0; id < 50; id++) {
             this.pushTexture(id);
         }
+
+        this.colourTableVersion++;
     }
 
     private static gammaCorrect(rgb: number, gamma: number): number {
@@ -337,12 +344,24 @@ export default class Pix3D extends Pix2D {
         yA: number, yB: number, yC: number,
         colourA: number, colourB: number, colourC: number
     ): void {
+        const gpuRasterize = gpuRenderPackets.shouldSkipCpuRasterWrites();
+        if (gpuRasterize) {
+            recordColourTable(this.colourTable, this.colourTableVersion);
+        }
         recordGouraudTriangle(
             xA, xB, xC,
             yA, yB, yC,
             colourA, colourB, colourC,
+            gpuRasterize,
+            this.lowDetail,
+            this.hclip,
+            this.trans === 0 ? 256 : 256 - this.trans,
             Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
         );
+        if (gpuRasterize) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
 
         let xStepAB: number = 0;
         let colourStepAB: number = 0;
@@ -1122,12 +1141,13 @@ export default class Pix3D extends Pix2D {
         yA: number, yB: number, yC: number,
         colour: number
     ): void {
-        const gpuRasterize = this.trans === 0 && gpuRenderPackets.shouldSkipCpuRasterWrites() && this.canGpuRasterizeUnclippedTriangle(xA, xB, xC, yA, yB, yC);
+        const gpuRasterize = gpuRenderPackets.shouldSkipCpuRasterWrites();
         recordFlatTriangle(
             xA, xB, xC,
             yA, yB, yC,
             colour,
             gpuRasterize,
+            this.trans === 0 ? 256 : 256 - this.trans,
             Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
         );
         if (gpuRasterize) {
@@ -1621,23 +1641,6 @@ export default class Pix3D extends Pix2D {
         }
     }
 
-    private static canGpuRasterizeUnclippedTriangle(
-        xA: number, xB: number, xC: number,
-        yA: number, yB: number, yC: number
-    ): boolean {
-        const minX = Math.min(xA, xB, xC);
-        const maxX = Math.max(xA, xB, xC);
-        const minY = Math.min(yA, yB, yC);
-        const maxY = Math.max(yA, yB, yC);
-        if (!(yA < yB && yB < yC) || minX < Pix2D.clipMinX || maxX >= Pix2D.clipMaxX || minY < Pix2D.clipMinY || maxY >= Pix2D.clipMaxY) {
-            return false;
-        }
-
-        const xStepAB = (((xB - xA) << 16) / (yB - yA)) | 0;
-        const xStepAC = (((xA - xC) << 16) / (yA - yC)) | 0;
-        return xStepAC < xStepAB;
-    }
-
     private static flatRaster(
         xA: number, xB: number,
         dst: Int32Array, off: number,
@@ -1735,6 +1738,10 @@ export default class Pix3D extends Pix2D {
     ): void {
         const texels: Int32Array | null = this.getTexels(texture);
         this.opaque = !this.texTrans[texture];
+        const gpuRasterize = Boolean(texels) && gpuRenderPackets.shouldSkipCpuRasterWrites();
+        if (gpuRasterize && texels) {
+            recordTextureResource(texture, texels, this.texelVersions[texture]);
+        }
         recordTextureTriangle(
             xA, xB, xC,
             yA, yB, yC,
@@ -1746,9 +1753,18 @@ export default class Pix3D extends Pix2D {
             texture,
             Boolean(texels),
             this.lowDetail,
+            this.lowMem,
             this.opaque,
+            gpuRasterize,
+            this.hclip,
+            this.originX,
+            this.originY,
             Pix2D.clipMinX, Pix2D.clipMinY, Pix2D.clipMaxX, Pix2D.clipMaxY
         );
+        if (gpuRasterize) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
 
         const verticalX: number = originX - txB;
         const verticalY: number = originY - tyB;

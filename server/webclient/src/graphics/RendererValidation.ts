@@ -195,6 +195,30 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
         0
     );
 
+    const transparentPalette = new Int32Array(16);
+    for (let i = 1; i < transparentPalette.length; i++) {
+        transparentPalette[i] = ((0x20 + i * 17) & 0xff) << 16 | ((0x60 + i * 31) & 0xff) << 8 | ((0xa0 + i * 13) & 0xff);
+    }
+    const transparentTexture = new Pix8(128, 128, transparentPalette);
+    for (let yy = 0; yy < transparentTexture.hi; yy++) {
+        for (let xx = 0; xx < transparentTexture.wi; xx++) {
+            transparentTexture.data[xx + yy * transparentTexture.wi] = ((xx + yy) & 7) === 0 ? 0 : (((xx >> 3) + (yy >> 3)) % 15) + 1;
+        }
+    }
+    Pix3D.textures[1] = transparentTexture;
+    Pix3D.texPal[1] = transparentPalette;
+    Pix3D.numTextures = Math.max(Pix3D.numTextures, 2);
+    Pix3D.textureTriangle(
+        8, 42, 24,
+        14, 20, 48,
+        80, 144, 208,
+        64, 64, 96,
+        128, 64,
+        64, 128,
+        96, 96,
+        1
+    );
+
     const indexedSprite = new Pix8(8, 8, Int32Array.of(0, 0xff2020, 0x20ff20, 0x2020ff));
     for (let i = 0; i < indexedSprite.data.length; i++) {
         indexedSprite.data[i] = i % 3 === 0 ? 0 : ((i % 3) + 1);
@@ -265,6 +289,43 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
         96, 96,
         0
     );
+
+    Pix3D.hclip = true;
+    Pix3D.lowDetail = false;
+    Pix3D.trans = 96;
+    Pix3D.flatTriangle(158, 136, 148, 70, 92, 58, 0x40ffc0);
+    Pix3D.gouraudTriangle(140, 176, 154, 94, 100, 110, 48, 128, 240);
+    Pix3D.trans = 0;
+
+    Pix3D.lowMem = true;
+    Pix3D.hclip = false;
+    Pix3D.clearTexels();
+    Pix3D.initPool(1);
+    const lowMemPalette = new Int32Array(32);
+    for (let i = 1; i < lowMemPalette.length; i++) {
+        lowMemPalette[i] = ((i * 37) & 0xff) << 16 | ((i * 19) & 0xff) << 8 | ((0xe0 - i * 5) & 0xff);
+    }
+    const lowMemTexture = new Pix8(64, 64, lowMemPalette);
+    for (let yy = 0; yy < lowMemTexture.hi; yy++) {
+        for (let xx = 0; xx < lowMemTexture.wi; xx++) {
+            lowMemTexture.data[xx + yy * lowMemTexture.wi] = (((xx >> 2) ^ (yy >> 2)) % 31) + 1;
+        }
+    }
+    Pix3D.textures[2] = lowMemTexture;
+    Pix3D.texPal[2] = lowMemPalette;
+    Pix3D.numTextures = Math.max(Pix3D.numTextures, 3);
+    Pix3D.textureTriangle(
+        52, 78, 62,
+        18, 30, 56,
+        128, 192, 240,
+        64, 64, 96,
+        128, 64,
+        64, 128,
+        96, 96,
+        2
+    );
+    Pix3D.lowMem = false;
+    Pix3D.clearTexels();
 
     return pixelsToImageData(pixels, width, height);
 }
@@ -356,6 +417,8 @@ async function runValidation(): Promise<void> {
     let previousSamples = packetPresenter.validationStats.samplesCompared;
     const previousReplayed = packetPresenter.packetReplayStats.framesReplayed;
     let nativeFlatTrianglePackets = 0;
+    let nativeGouraudTrianglePackets = 0;
+    let nativeTextureTrianglePackets = 0;
     gpuRenderPackets.clearCpuRasterWriteSkipSurfaces();
     gpuRenderPackets.setEnabled(false);
     gpuRenderPackets.setSkipCpuRasterWrites(false);
@@ -365,6 +428,8 @@ async function runValidation(): Promise<void> {
     gpuRenderPackets.setSkipCpuRasterWrites(true);
     makePacketReplayFrame(width, height, true, 1);
     nativeFlatTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
+    nativeGouraudTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleGouraud' && packet.gpuRasterize).length;
+    nativeTextureTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleTexture' && packet.gpuRasterize).length;
     cpu.putImageData(packetFrame, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrame);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -378,6 +443,8 @@ async function runValidation(): Promise<void> {
     gpuRenderPackets.setSkipCpuRasterWrites(true);
     makePacketReplayFrame(width, height, true, 2);
     nativeFlatTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
+    nativeGouraudTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleGouraud' && packet.gpuRasterize).length;
+    nativeTextureTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleTexture' && packet.gpuRasterize).length;
     cpu.putImageData(packetFrameUpdated, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrameUpdated);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -393,14 +460,18 @@ async function runValidation(): Promise<void> {
         packetReplayStats.cpuImageDataUploads === 0 &&
         packetReplayStats.cpuRasterWriteBypasses > 0 &&
         packetReplayStats.nativeFlatTrianglesReplayed >= nativeFlatTrianglePackets &&
+        packetReplayStats.nativeGouraudTrianglesReplayed >= nativeGouraudTrianglePackets &&
+        packetReplayStats.nativeTextureTrianglesReplayed >= nativeTextureTrianglePackets &&
         nativeFlatTrianglePackets > 0 &&
+        nativeGouraudTrianglePackets > 0 &&
+        nativeTextureTrianglePackets > 0 &&
         packetReplayStats.lastError === '';
     const packetResult = {
         name: 'packet-replay-2d-primitives',
         passed: packetPassed,
         stats: packetStats,
         packetReplayStats,
-        evidence: { nativeFlatTrianglePackets }
+        evidence: { nativeFlatTrianglePackets, nativeGouraudTrianglePackets, nativeTextureTrianglePackets }
     };
     results.push(packetResult);
     printResult(packetResult);
