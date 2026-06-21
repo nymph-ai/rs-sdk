@@ -86,6 +86,7 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
         indexedSprite.data[i] = i % 3 === 0 ? 0 : ((i % 3) + 1);
     }
     indexedSprite.plotSprite(14, 86);
+    indexedSprite.scalePlotSprite(102, 84, 16, 12);
 
     const rgbSprite = new Pix32(10, 8);
     for (let y = 0; y < rgbSprite.hi; y++) {

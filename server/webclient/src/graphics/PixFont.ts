@@ -2,7 +2,7 @@ import Linkable2 from '#/datastruct/Linkable2.js';
 
 import { Colour } from '#/graphics/Colour.js';
 import Pix2D from '#/graphics/Pix2D.js';
-import { recordRgbaSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
+import { recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';

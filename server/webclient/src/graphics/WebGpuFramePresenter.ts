@@ -274,11 +274,11 @@ struct SpriteAlphaParams {
     y: i32,
     width: i32,
     height: i32,
-    srcX: i32,
-    srcY: i32,
+    srcXFixed: i32,
+    srcYFixed: i32,
     alpha: i32,
-    _pad0: i32,
-    _pad1: i32,
+    stepX: i32,
+    stepY: i32,
     _pad2: i32,
     _pad3: i32,
     _pad4: i32,
@@ -309,13 +309,20 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
         return vec4f(base.rgb, 1.0);
     }
 
-    let spritePixel = vec2<i32>(params.srcX + pixel.x - params.x, params.srcY + pixel.y - params.y);
+    let spritePixel = vec2<i32>(
+        (params.srcXFixed + (pixel.x - params.x) * params.stepX) / 65536,
+        (params.srcYFixed + (pixel.y - params.y) * params.stepY) / 65536
+    );
     let sprite = textureLoad(spriteTexture, spritePixel, 0);
     if (sprite.a < 0.5) {
         return vec4f(base.rgb, 1.0);
     }
 
     let alpha = u32(params.alpha);
+    if (alpha >= 256u) {
+        return vec4f(sprite.rgb, 1.0);
+    }
+
     let outR = blendChannel(toByte(sprite.r), toByte(base.r), alpha);
     let outG = blendChannel(toByte(sprite.g), toByte(base.g), alpha);
     let outB = blendChannel(toByte(sprite.b), toByte(base.b), alpha);
@@ -1263,10 +1270,10 @@ export default class WebGpuFramePresenter {
                         op: {
                             resource: packet.resource,
                             rect: targetRect,
-                            srcX: packet.srcX + (clippedSurfaceRect.x - packet.x) + (targetRect.x - unclippedTargetRect.x),
-                            srcY: packet.srcY + (clippedSurfaceRect.y - packet.y) + (targetRect.y - unclippedTargetRect.y),
-                            srcWidth: targetRect.width,
-                            srcHeight: targetRect.height,
+                            srcX: packet.srcX + ((clippedSurfaceRect.x - packet.x) + (targetRect.x - unclippedTargetRect.x)) * (packet.srcWidth / packet.width),
+                            srcY: packet.srcY + ((clippedSurfaceRect.y - packet.y) + (targetRect.y - unclippedTargetRect.y)) * (packet.srcHeight / packet.height),
+                            srcWidth: targetRect.width * (packet.srcWidth / packet.width),
+                            srcHeight: targetRect.height * (packet.srcHeight / packet.height),
                             alpha: packet.alpha
                         }
                     });
@@ -1292,7 +1299,7 @@ export default class WebGpuFramePresenter {
                 if (!resource) {
                     this.failPacketReplay(`sprite resource ${step.op.resource} is missing`);
                 }
-                if (step.op.alpha === null) {
+                if (step.op.alpha === null && step.op.srcX === Math.trunc(step.op.srcX) && step.op.srcY === Math.trunc(step.op.srcY) && step.op.srcWidth === step.op.rect.width && step.op.srcHeight === step.op.rect.height) {
                     this.replaySpriteOp(step.op, resource);
                 } else {
                     this.replayAlphaSpriteOp(step.op, resource);
@@ -1430,9 +1437,11 @@ export default class WebGpuFramePresenter {
         params[1] = op.rect.y;
         params[2] = op.rect.width;
         params[3] = op.rect.height;
-        params[4] = op.srcX;
-        params[5] = op.srcY;
+        params[4] = Math.trunc(op.srcX * 65536);
+        params[5] = Math.trunc(op.srcY * 65536);
         params[6] = op.alpha ?? 256;
+        params[7] = Math.trunc((op.srcWidth * 65536) / op.rect.width);
+        params[8] = Math.trunc((op.srcHeight * 65536) / op.rect.height);
         this.device.queue.writeBuffer(this.spriteAlphaUniformBuffer!, 0, params);
 
         const bindGroup = this.device.createBindGroup({

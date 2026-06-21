@@ -1,5 +1,5 @@
 import Pix2D from '#/graphics/Pix2D.js';
-import { recordRgbaSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
+import { recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -324,7 +324,6 @@ export default class Pix8 extends Pix2D {
     // mapview applet:
 
     scalePlotSprite(arg0: number, arg1: number, arg2: number, arg3: number): void {
-        recordUnsupported('Pix8.scalePlotSprite packets are not replayed yet');
         try {
             const local2: number = this.wi;
             const local5: number = this.hi;
@@ -371,6 +370,27 @@ export default class Pix8 extends Pix2D {
                 local144 = arg0 + arg2 - Pix2D.clipMaxX;
                 arg2 -= local144;
                 local137 += local144;
+            }
+            if (arg2 > 0 && arg3 > 0) {
+                recordRgbaSprite(
+                    this,
+                    `pix8:${Array.from(this.bpal).join(',')}`,
+                    this.wi,
+                    this.hi,
+                    () => this.makeRgba(false),
+                    arg0,
+                    arg1,
+                    arg2,
+                    arg3,
+                    local7 / 65536,
+                    local9 / 65536,
+                    (arg2 * local33) / 65536,
+                    (arg3 * local39) / 65536,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
             }
             this.plotScale(Pix2D.pixels, this.data, this.bpal, local7, local9, local133, local137, arg2, arg3, local33, local39, local2);
         } catch (_e) {
