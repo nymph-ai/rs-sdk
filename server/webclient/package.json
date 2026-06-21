@@ -10,6 +10,7 @@
         "build": "bun run bundle.ts",
         "build:dev": "bun run bundle.ts dev",
         "serve:renderer-validation": "bun run build:dev && bun run renderer-validation.ts",
+        "validate:renderer": "bun run renderer-validation-runner.ts",
         "watch": "bun --watch run bundle.ts dev"
     },
     "dependencies": {
