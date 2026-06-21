@@ -41,6 +41,7 @@ export type GpuRenderPacket =
           srcY: number;
           srcWidth: number;
           srcHeight: number;
+          alpha: number | null;
           clip: ClipBounds;
       })
     | (PacketBase & {
@@ -346,7 +347,8 @@ export function recordRgbaSprite(
     minX: number,
     minY: number,
     maxX: number,
-    maxY: number
+    maxY: number,
+    alpha: number | null = null
 ): void {
     if (!gpuRenderPackets.enabled) {
         return;
@@ -377,6 +379,7 @@ export function recordRgbaSprite(
         srcY,
         srcWidth,
         srcHeight,
+        alpha,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }

@@ -426,11 +426,12 @@ export default class PixFont extends Linkable2 {
     }
 
     plotLetterTrans(data: Int8Array, x: number, y: number, w: number, h: number, rgb: number, alpha: number): void {
-        recordUnsupported('PixFont.plotLetterTrans packets are not replayed yet');
         x |= 0;
         y |= 0;
         w |= 0;
         h |= 0;
+        const originalW = w;
+        const originalH = h;
 
         let dstOff: number = x + y * Pix2D.width;
         let dstStep: number = Pix2D.width - w;
@@ -468,6 +469,28 @@ export default class PixFont extends Linkable2 {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % originalW;
+            const srcY = (srcOff / originalW) | 0;
+            recordRgbaSprite(
+                data,
+                `glyph:${rgb}`,
+                originalW,
+                originalH,
+                () => this.makeGlyphRgba(data, originalW, originalH, rgb),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY,
+                alpha
+            );
             this.plotTrans(Pix2D.pixels, data, rgb, srcOff, dstOff, w, h, dstStep, srcStep, alpha);
         }
     }

@@ -248,10 +248,86 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const SPRITE_ALPHA_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct SpriteAlphaParams {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    srcX: i32,
+    srcY: i32,
+    alpha: i32,
+    _pad0: i32,
+    _pad1: i32,
+    _pad2: i32,
+    _pad3: i32,
+    _pad4: i32,
+    _pad5: i32,
+    _pad6: i32,
+    _pad7: i32,
+    _pad8: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var spriteTexture: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: SpriteAlphaParams;
+
+fn toByte(channel: f32) -> u32 {
+    return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
+}
+
+fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
+    return (src * alpha + dst * (256u - alpha)) >> 8u;
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+
+    if (pixel.x < params.x || pixel.x >= params.x + params.width || pixel.y < params.y || pixel.y >= params.y + params.height) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let spritePixel = vec2<i32>(params.srcX + pixel.x - params.x, params.srcY + pixel.y - params.y);
+    let sprite = textureLoad(spriteTexture, spritePixel, 0);
+    if (sprite.a < 0.5) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let alpha = u32(params.alpha);
+    let outR = blendChannel(toByte(sprite.r), toByte(base.r), alpha);
+    let outG = blendChannel(toByte(sprite.g), toByte(base.g), alpha);
+    let outB = blendChannel(toByte(sprite.b), toByte(base.b), alpha);
+    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
 const FRAME_TEXTURE_FORMAT = 'rgba8unorm';
 const FLOATS_PER_PRIMITIVE_VERTEX = 6;
 const FLOATS_PER_SPRITE_VERTEX = 4;
 const ALPHA_UNIFORM_INTS = 16;
+const SPRITE_ALPHA_UNIFORM_INTS = 16;
 
 type PacketClip = Extract<GpuRenderPacket, { kind: 'clip' }>['clip'];
 
@@ -300,6 +376,7 @@ type SpriteReplayOp = {
     srcY: number;
     srcWidth: number;
     srcHeight: number;
+    alpha: number | null;
 };
 
 function getGpu(): BrowserGpu | null {
@@ -624,6 +701,7 @@ export default class WebGpuFramePresenter {
     private scratchFrameTexture: GpuTexture | null = null;
     private bindGroup: object | null = null;
     private alphaUniformBuffer: GpuBuffer | null = null;
+    private spriteAlphaUniformBuffer: GpuBuffer | null = null;
     private primitiveVertexBuffer: GpuBuffer | null = null;
     private primitiveVertexBufferBytes: number = 0;
     private spriteVertexBuffer: GpuBuffer | null = null;
@@ -649,6 +727,7 @@ export default class WebGpuFramePresenter {
         private readonly pipeline: GpuRenderPipeline,
         private readonly primitivePipeline: GpuRenderPipeline,
         private readonly spritePipeline: GpuRenderPipeline,
+        private readonly spriteAlphaPipeline: GpuRenderPipeline,
         private readonly alphaPipeline: GpuRenderPipeline,
         options: WebGpuFramePresenterOptions
     ) {
@@ -810,6 +889,7 @@ export default class WebGpuFramePresenter {
             }
         });
         const alphaShaderModule = device.createShaderModule({ code: ALPHA_SHADER });
+        const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
         const alphaPipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -825,13 +905,28 @@ export default class WebGpuFramePresenter {
                 topology: 'triangle-list'
             }
         });
+        const spriteAlphaPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: spriteAlphaShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: spriteAlphaShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
 
         if (!installOverlayCanvas(sourceCanvas, overlayCanvas)) {
             overlayCanvas.remove();
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, spritePipeline, alphaPipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, spritePipeline, spriteAlphaPipeline, alphaPipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -1171,7 +1266,8 @@ export default class WebGpuFramePresenter {
                             srcX: packet.srcX + (clippedSurfaceRect.x - packet.x) + (targetRect.x - unclippedTargetRect.x),
                             srcY: packet.srcY + (clippedSurfaceRect.y - packet.y) + (targetRect.y - unclippedTargetRect.y),
                             srcWidth: targetRect.width,
-                            srcHeight: targetRect.height
+                            srcHeight: targetRect.height,
+                            alpha: packet.alpha
                         }
                     });
                     break;
@@ -1196,7 +1292,11 @@ export default class WebGpuFramePresenter {
                 if (!resource) {
                     this.failPacketReplay(`sprite resource ${step.op.resource} is missing`);
                 }
-                this.replaySpriteOp(step.op, resource);
+                if (step.op.alpha === null) {
+                    this.replaySpriteOp(step.op, resource);
+                } else {
+                    this.replayAlphaSpriteOp(step.op, resource);
+                }
             }
         }
     }
@@ -1318,6 +1418,66 @@ export default class WebGpuFramePresenter {
         this.device.queue.submit([encoder.finish()]);
     }
 
+    private replayAlphaSpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('alpha sprite replay requested before frame textures exist');
+        }
+
+        const cached = this.getSpriteTexture(resource);
+        this.ensureSpriteAlphaUniformBuffer();
+        const params = new Int32Array(SPRITE_ALPHA_UNIFORM_INTS);
+        params[0] = op.rect.x;
+        params[1] = op.rect.y;
+        params[2] = op.rect.width;
+        params[3] = op.rect.height;
+        params[4] = op.srcX;
+        params[5] = op.srcY;
+        params[6] = op.alpha ?? 256;
+        this.device.queue.writeBuffer(this.spriteAlphaUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.spriteAlphaPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: cached.texture.createView()
+                },
+                {
+                    binding: 2,
+                    resource: {
+                        buffer: this.spriteAlphaUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.spriteAlphaPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+    }
+
     private buildSpriteVertices(op: SpriteReplayOp, resource: GpuSpriteResource): Float32Array {
         const x0 = (op.rect.x / this.width) * 2 - 1;
         const x1 = ((op.rect.x + op.rect.width) / this.width) * 2 - 1;
@@ -1422,6 +1582,17 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private ensureSpriteAlphaUniformBuffer(): void {
+        if (this.spriteAlphaUniformBuffer) {
+            return;
+        }
+
+        this.spriteAlphaUniformBuffer = this.device.createBuffer({
+            size: SPRITE_ALPHA_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
     private failPacketReplay(reason: string): never {
         this.packetReplayStats.framesFailed++;
         this.packetReplayStats.lastError = reason;
@@ -1454,6 +1625,7 @@ export default class WebGpuFramePresenter {
         this.primitiveVertexBuffer?.destroy();
         this.spriteVertexBuffer?.destroy();
         this.alphaUniformBuffer?.destroy();
+        this.spriteAlphaUniformBuffer?.destroy();
         for (const cached of this.spriteTextures.values()) {
             cached.texture.destroy();
         }
@@ -1464,6 +1636,7 @@ export default class WebGpuFramePresenter {
         this.primitiveVertexBuffer = null;
         this.spriteVertexBuffer = null;
         this.alphaUniformBuffer = null;
+        this.spriteAlphaUniformBuffer = null;
         this.overlayCanvas.remove();
     }
 }

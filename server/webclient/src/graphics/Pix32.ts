@@ -411,7 +411,6 @@ export default class Pix32 extends Pix2D {
     }
 
     transPlotSprite(x: number, y: number, alpha: number): void {
-        recordUnsupported('Pix32.transPlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
 
@@ -455,6 +454,28 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const clippedSrcX = srcStep % this.wi;
+            const clippedSrcY = (srcStep / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                clippedSrcX,
+                clippedSrcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY,
+                alpha
+            );
             this.tranSprite(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, alpha);
         }
     }

@@ -95,6 +95,7 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     }
     rgbSprite.plotSprite(36, 84);
     rgbSprite.quickPlotSprite(52, 84);
+    rgbSprite.transPlotSprite(68, 84, 128);
 
     const font = new PixFont();
     const glyph = new Int8Array([
@@ -105,6 +106,7 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
         1, 0, 0, 0, 1
     ]);
     font.plotLetter(glyph, 76, 84, 5, 5, 0xfff080);
+    font.plotLetterTrans(glyph, 88, 84, 5, 5, 0x80f0ff, 128);
 
     return pixelsToImageData(pixels, width, height);
 }
