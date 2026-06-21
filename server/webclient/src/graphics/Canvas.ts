@@ -14,6 +14,7 @@ declare global {
         __rsSdkRendererStats?: {
             backend: 'canvas' | 'webgpu';
             validation: WebGpuFramePresenter['validationStats'];
+            packetReplay: WebGpuFramePresenter['packetReplayStats'] | null;
         };
     }
 }
@@ -39,28 +40,60 @@ function shouldValidateWebGpu(): boolean {
     return getRendererParam('rendererValidation') === '1' || getRendererParam('rendererValidate') === '1';
 }
 
+function parseRendererFlag(value: string | null): boolean | null {
+    if (value === null) {
+        return null;
+    }
+
+    if (value === '1' || value === 'true' || value === 'on') {
+        return true;
+    }
+
+    if (value === '0' || value === 'false' || value === 'off') {
+        return false;
+    }
+
+    return null;
+}
+
+function shouldReplayPackets(): boolean {
+    const queryValue = parseRendererFlag(getRendererParam('rendererPacketReplay'));
+    if (queryValue !== null) {
+        return queryValue;
+    }
+
+    try {
+        return parseRendererFlag(localStorage.getItem('rs-sdk.rendererPacketReplay')) ?? false;
+    } catch (_err) {
+        return false;
+    }
+}
+
 if (canvas && shouldUseWebGpu()) {
-    void WebGpuFramePresenter.create(canvas, { validate: shouldValidateWebGpu() })
+    void WebGpuFramePresenter.create(canvas, { validate: shouldValidateWebGpu(), packetReplay: shouldReplayPackets() })
         .then(presenter => {
             webGpuPresenter = presenter;
             webGpuUnavailable = !presenter;
             window.__rsSdkRendererStats = {
                 backend: presenter ? 'webgpu' : 'canvas',
-                validation: presenter?.validationStats ?? null
+                validation: presenter?.validationStats ?? null,
+                packetReplay: presenter?.packetReplayStats ?? null
             };
         })
         .catch(err => {
             webGpuUnavailable = true;
             window.__rsSdkRendererStats = {
                 backend: 'canvas',
-                validation: null
+                validation: null,
+                packetReplay: null
             };
             console.warn('[WebGPU] falling back to 2D canvas renderer', err);
         });
 } else {
     window.__rsSdkRendererStats = {
         backend: 'canvas',
-        validation: null
+        validation: null,
+        packetReplay: null
     };
 }
 

@@ -83,6 +83,24 @@ window.__rsSdkGpuRenderPackets
 
 The stream currently covers surface targets, clipping, clears, filled rectangles, alpha rectangles, horizontal/vertical lines, filled circles, flat triangles, Gouraud triangles, and textured triangles. When packet capture is disabled, hot-path hooks return before allocating packet objects.
 
+An experimental packet replay backend can be enabled with:
+
+```text
+?rendererPacketReplay=1
+```
+
+or:
+
+```js
+localStorage.setItem('rs-sdk.rendererPacketReplay', '1')
+```
+
+Packet replay currently consumes opaque 2D clear, filled-rectangle, horizontal-line, and vertical-line packets and rasterizes them into the WebGPU frame texture. The existing CPU renderer remains the oracle: unsupported packets, alpha-blended 2D packets, dropped packets, or packet/image surface mismatches fall back to the CPU `ImageData` upload path and advance the packet cursor from that CPU-synced frame. Replay counters are exposed at:
+
+```js
+window.__rsSdkRendererStats.packetReplay
+```
+
 ## Full WebGPU Renderer Target
 
 The real performance target is to replace the `Pix2D`/`Pix3D` software renderer with GPU-native passes:

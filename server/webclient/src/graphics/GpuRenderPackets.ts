@@ -144,12 +144,28 @@ function getLocalStorageItem(name: string): string | null {
 }
 
 function readInitialEnabled(): boolean {
-    const queryValue = parseFlag(getQueryParam('rendererPackets')) ?? parseFlag(getQueryParam('gpuPackets'));
-    if (queryValue !== null) {
-        return queryValue;
+    const replayQuery = parseFlag(getQueryParam('rendererPacketReplay'));
+    const packetQuery = parseFlag(getQueryParam('rendererPackets')) ?? parseFlag(getQueryParam('gpuPackets'));
+    if (replayQuery === true || packetQuery === true) {
+        return true;
+    }
+    if (packetQuery !== null) {
+        return packetQuery;
+    }
+    if (replayQuery !== null) {
+        return replayQuery;
     }
 
-    return parseFlag(getLocalStorageItem('rs-sdk.rendererPackets')) ?? false;
+    const replayPreference = parseFlag(getLocalStorageItem('rs-sdk.rendererPacketReplay'));
+    const packetPreference = parseFlag(getLocalStorageItem('rs-sdk.rendererPackets'));
+    if (replayPreference === true || packetPreference === true) {
+        return true;
+    }
+    if (packetPreference !== null) {
+        return packetPreference;
+    }
+
+    return replayPreference ?? false;
 }
 
 function readInitialMaxPackets(): number {

@@ -1,9 +1,12 @@
-import WebGpuFramePresenter, { type WebGpuFrameValidationStats } from '#/graphics/WebGpuFramePresenter.js';
+import { gpuRenderPackets } from '#/graphics/GpuRenderPackets.js';
+import Pix2D from '#/graphics/Pix2D.js';
+import WebGpuFramePresenter, { type WebGpuFrameValidationStats, type WebGpuPacketReplayStats } from '#/graphics/WebGpuFramePresenter.js';
 
 type ValidationResult = {
     name: string;
     passed: boolean;
     stats: WebGpuFrameValidationStats | null;
+    packetReplayStats: WebGpuPacketReplayStats | null;
 };
 
 declare global {
@@ -43,6 +46,37 @@ function makeFrame(width: number, height: number, seed: number): ImageData {
     return imageData;
 }
 
+function pixelsToImageData(pixels: Int32Array, width: number, height: number): ImageData {
+    const imageData = new ImageData(width, height);
+    const paint = new Uint32Array(imageData.data.buffer);
+    const len = pixels.length;
+
+    for (let i = 0; i < len; i++) {
+        const pixel = pixels[i];
+        paint[i] = ((pixel & 0xff0000) >> 16) | (pixel & 0xff00) | ((pixel & 0xff) << 16) | 0xff000000;
+    }
+
+    return imageData;
+}
+
+function makePacketReplayFrame(width: number, height: number): ImageData {
+    const pixels = new Int32Array(width * height);
+    Pix2D.setPixels(pixels, width, height);
+    gpuRenderPackets.reset();
+
+    Pix2D.cls();
+    Pix2D.fillRect(8, 6, 42, 21, 0x2448c8);
+    Pix2D.hline(5, 54, 76, 0xffaa00);
+    Pix2D.vline(96, 11, 72, 0x00dd88);
+    Pix2D.setClipping(24, 20, 112, 82);
+    Pix2D.fillRect(0, 0, 140, 104, 0x8a24a8);
+    Pix2D.hline(18, 33, 108, 0xffffff);
+    Pix2D.resetClipping();
+    Pix2D.fillRect(width - 30, height - 18, 50, 30, 0x102030);
+
+    return pixelsToImageData(pixels, width, height);
+}
+
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -60,7 +94,10 @@ async function waitForSample(stats: WebGpuFrameValidationStats, previousSamples:
 
 function printResult(result: ValidationResult): void {
     const line = document.createElement('div');
-    line.textContent = `${result.passed ? 'PASS' : 'FAIL'} ${result.name}: ${JSON.stringify(result.stats)}`;
+    line.textContent = `${result.passed ? 'PASS' : 'FAIL'} ${result.name}: ${JSON.stringify({
+        validation: result.stats,
+        packetReplay: result.packetReplayStats
+    })}`;
     line.style.font = '12px monospace';
     line.style.color = result.passed ? '#1b7f37' : '#b42318';
     document.body.appendChild(line);
@@ -85,7 +122,8 @@ async function runValidation(): Promise<void> {
 
     const presenter = await WebGpuFramePresenter.create(gpuCanvas, {
         validate: true,
-        validationSampleInterval: 1
+        validationSampleInterval: 1,
+        packetReplay: true
     });
     if (!presenter || !presenter.validationStats?.enabled) {
         throw new Error(`WebGPU unavailable: ${presenter?.validationStats?.lastError || 'no presenter'}`);
@@ -107,10 +145,34 @@ async function runValidation(): Promise<void> {
 
         const stats = { ...presenter.validationStats };
         const passed = stats.lastError === '' && stats.lastDiffPixels === 0 && stats.mismatches === 0;
-        const result = { name: testCase.name, passed, stats };
+        const result = { name: testCase.name, passed, stats, packetReplayStats: presenter.packetReplayStats ? { ...presenter.packetReplayStats } : null };
         results.push(result);
         printResult(result);
     }
+
+    const previousSamples = presenter.validationStats.samplesCompared;
+    const previousReplayed = presenter.packetReplayStats.framesReplayed;
+    const packetFrame = makePacketReplayFrame(width, height);
+    cpu.putImageData(packetFrame, 0, 0);
+    presenter.present(packetFrame, 0, 0);
+    await waitForSample(presenter.validationStats, previousSamples);
+
+    const packetStats = { ...presenter.validationStats };
+    const packetReplayStats = { ...presenter.packetReplayStats };
+    const packetPassed =
+        packetStats.lastError === '' &&
+        packetStats.lastDiffPixels === 0 &&
+        packetStats.mismatches === 0 &&
+        packetReplayStats.framesReplayed > previousReplayed &&
+        packetReplayStats.lastFallbackReason === '';
+    const packetResult = {
+        name: 'packet-replay-2d-primitives',
+        passed: packetPassed,
+        stats: packetStats,
+        packetReplayStats
+    };
+    results.push(packetResult);
+    printResult(packetResult);
 
     window.__rsSdkRendererValidation = {
         done: true,
