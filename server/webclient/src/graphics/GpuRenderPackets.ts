@@ -194,6 +194,32 @@ export type GpuRenderPacket =
           screenOriginX: number;
           screenOriginY: number;
           clip: ClipBounds;
+      })
+    | (PacketBase & {
+          kind: 'modelFlatTriangle';
+          xA: number;
+          yA: number;
+          zA: number;
+          xB: number;
+          yB: number;
+          zB: number;
+          xC: number;
+          yC: number;
+          zC: number;
+          sinYaw: number;
+          cosYaw: number;
+          sinEyePitch: number;
+          cosEyePitch: number;
+          sinEyeYaw: number;
+          cosEyeYaw: number;
+          relativeX: number;
+          relativeY: number;
+          relativeZ: number;
+          originX: number;
+          originY: number;
+          rgb: number;
+          alpha: number;
+          clip: ClipBounds;
       });
 
 export type GpuRenderPacketSnapshot = {
@@ -1086,6 +1112,58 @@ export function recordTextureTriangle(
         hclip,
         screenOriginX,
         screenOriginY,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
+}
+
+export function recordModelFlatTriangle(
+    xA: number, yA: number, zA: number,
+    xB: number, yB: number, zB: number,
+    xC: number, yC: number, zC: number,
+    sinYaw: number,
+    cosYaw: number,
+    sinEyePitch: number,
+    cosEyePitch: number,
+    sinEyeYaw: number,
+    cosEyeYaw: number,
+    relativeX: number,
+    relativeY: number,
+    relativeZ: number,
+    originX: number,
+    originY: number,
+    rgb: number,
+    alpha: number,
+    minX: number, minY: number, maxX: number, maxY: number
+): void {
+    if (!gpuRenderPackets.enabled || !shouldRecordCurrentSurface()) {
+        return;
+    }
+
+    pushPacket({
+        kind: 'modelFlatTriangle',
+        surface: currentSurface,
+        xA,
+        yA,
+        zA,
+        xB,
+        yB,
+        zB,
+        xC,
+        yC,
+        zC,
+        sinYaw,
+        cosYaw,
+        sinEyePitch,
+        cosEyePitch,
+        sinEyeYaw,
+        cosEyeYaw,
+        relativeX,
+        relativeY,
+        relativeZ,
+        originX,
+        originY,
+        rgb,
+        alpha,
         clip: makeClip(minX, minY, maxX, maxY)
     });
 }

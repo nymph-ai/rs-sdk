@@ -2,6 +2,7 @@ import AnimBase, { AnimTransform } from '#/dash3d/AnimBase.js';
 import AnimFrame from '#/dash3d/AnimFrame.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import { gpuRenderPackets, recordModelFlatTriangle } from '#/graphics/GpuRenderPackets.js';
 
 import Packet from '#/io/Packet.js';
 
@@ -126,6 +127,16 @@ export default class Model extends ModelSource {
     static mouseY: number = 0;
     static pickedCount: number = 0;
     static pickedEntityTypecode: Int32Array = new Int32Array(1000);
+    private static gpuModelTransformActive: boolean = false;
+    private static gpuModelSinYaw: number = 0;
+    private static gpuModelCosYaw: number = 65536;
+    private static gpuModelSinEyePitch: number = 0;
+    private static gpuModelCosEyePitch: number = 65536;
+    private static gpuModelSinEyeYaw: number = 0;
+    private static gpuModelCosEyeYaw: number = 65536;
+    private static gpuModelRelativeX: number = 0;
+    private static gpuModelRelativeY: number = 0;
+    private static gpuModelRelativeZ: number = 0;
 
     static init(total: number, provider: OnDemandProvider) {
         Model.meta = new Array(total);
@@ -1708,6 +1719,7 @@ export default class Model extends ModelSource {
 
         try {
             // try catch for example a model being drawn from 3d can crash like at baxtorian falls
+            Model.gpuModelTransformActive = false;
             this.render2(false, false, 0);
         } catch (_e) {
             // empty
@@ -1791,11 +1803,21 @@ export default class Model extends ModelSource {
         const centerY: number = Pix3D.originY;
 
         let sinYaw: number = 0;
-        let cosYaw: number = 0;
+        let cosYaw: number = 65536;
         if (yaw !== 0) {
             sinYaw = Pix3D.sinTable[yaw];
             cosYaw = Pix3D.cosTable[yaw];
         }
+        Model.gpuModelTransformActive = true;
+        Model.gpuModelSinYaw = sinYaw;
+        Model.gpuModelCosYaw = cosYaw;
+        Model.gpuModelSinEyePitch = sinEyePitch;
+        Model.gpuModelCosEyePitch = cosEyePitch;
+        Model.gpuModelSinEyeYaw = sinEyeYaw;
+        Model.gpuModelCosEyeYaw = cosEyeYaw;
+        Model.gpuModelRelativeX = relativeX;
+        Model.gpuModelRelativeY = relativeY;
+        Model.gpuModelRelativeZ = relativeZ;
 
         for (let v: number = 0; v < this.numPoints; v++) {
             let x: number = this.pointX![v];
@@ -2115,6 +2137,32 @@ export default class Model extends ModelSource {
                 this.faceColourA![face], this.faceColourB![face], this.faceColourC![face]
             );
         } else if (type === 1) {
+            if (Model.gpuModelTransformActive && this.pointX && this.pointY && this.pointZ && gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                recordModelFlatTriangle(
+                    this.pointX[a], this.pointY[a], this.pointZ[a],
+                    this.pointX[b], this.pointY[b], this.pointZ[b],
+                    this.pointX[c], this.pointY[c], this.pointZ[c],
+                    Model.gpuModelSinYaw,
+                    Model.gpuModelCosYaw,
+                    Model.gpuModelSinEyePitch,
+                    Model.gpuModelCosEyePitch,
+                    Model.gpuModelSinEyeYaw,
+                    Model.gpuModelCosEyeYaw,
+                    Model.gpuModelRelativeX,
+                    Model.gpuModelRelativeY,
+                    Model.gpuModelRelativeZ,
+                    Pix3D.originX,
+                    Pix3D.originY,
+                    Pix3D.colourTable[this.faceColourA![face]],
+                    Pix3D.trans === 0 ? 256 : 256 - Pix3D.trans,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
             Pix3D.flatTriangle(
                 Model.vertexScreenX[a], Model.vertexScreenX[b], Model.vertexScreenX[c],
                 Model.vertexScreenY[a], Model.vertexScreenY[b], Model.vertexScreenY[c],

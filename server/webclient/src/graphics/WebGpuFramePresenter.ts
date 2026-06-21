@@ -365,6 +365,228 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
+const MODEL_FLAT_SHADER = `
+struct VertexOutput {
+    @builtin(position) position: vec4f,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+    let positions = array<vec2f, 6>(
+        vec2f(-1.0, -1.0),
+        vec2f( 1.0, -1.0),
+        vec2f(-1.0,  1.0),
+        vec2f(-1.0,  1.0),
+        vec2f( 1.0, -1.0),
+        vec2f( 1.0,  1.0)
+    );
+
+    var output: VertexOutput;
+    output.position = vec4f(positions[vertexIndex], 0.0, 1.0);
+    return output;
+}
+
+struct ModelFlatParams {
+    xA: i32,
+    yA: i32,
+    zA: i32,
+    xB: i32,
+    yB: i32,
+    zB: i32,
+    xC: i32,
+    yC: i32,
+    zC: i32,
+    sinYaw: i32,
+    cosYaw: i32,
+    sinEyePitch: i32,
+    cosEyePitch: i32,
+    sinEyeYaw: i32,
+    cosEyeYaw: i32,
+    relativeX: i32,
+    relativeY: i32,
+    relativeZ: i32,
+    originX: i32,
+    originY: i32,
+    rgb: i32,
+    alpha: i32,
+    clipMinX: i32,
+    clipMinY: i32,
+    clipMaxX: i32,
+    clipMaxY: i32,
+    _pad0: i32,
+    _pad1: i32,
+    _pad2: i32,
+    _pad3: i32,
+    _pad4: i32,
+    _pad5: i32,
+};
+
+struct ProjectedVertex {
+    x: i32,
+    y: i32,
+    z: i32,
+    valid: i32,
+};
+
+@group(0) @binding(0) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: ModelFlatParams;
+
+fn projectLocal(localX: i32, localY: i32, localZ: i32) -> ProjectedVertex {
+    var x = localX;
+    var y = localY;
+    var z = localZ;
+    var tmp = (z * params.sinYaw + x * params.cosYaw) >> 16;
+    z = (z * params.cosYaw - x * params.sinYaw) >> 16;
+    x = tmp;
+
+    x = x + params.relativeX;
+    y = y + params.relativeY;
+    z = z + params.relativeZ;
+
+    tmp = (z * params.sinEyeYaw + x * params.cosEyeYaw) >> 16;
+    z = (z * params.cosEyeYaw - x * params.sinEyeYaw) >> 16;
+    x = tmp;
+
+    tmp = (y * params.cosEyePitch - z * params.sinEyePitch) >> 16;
+    z = (y * params.sinEyePitch + z * params.cosEyePitch) >> 16;
+    y = tmp;
+
+    if (z < 50) {
+        return ProjectedVertex(0, 0, z, 0);
+    }
+
+    return ProjectedVertex(params.originX + ((x << 9) / z), params.originY + ((y << 9) / z), z, 1);
+}
+
+fn edgeStep(x0: i32, y0: i32, x1: i32, y1: i32) -> i32 {
+    if (y0 == y1) {
+        return 0;
+    }
+
+    return ((x1 - x0) * 65536) / (y1 - y0);
+}
+
+fn edgeX(x0: i32, y0: i32, step: i32, y: i32) -> i32 {
+    return (x0 * 65536 + step * (y - y0)) >> 16;
+}
+
+fn shortEdgeX(xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32, upperStep: i32, lowerStep: i32, y: i32) -> i32 {
+    if (y < yMid) {
+        return edgeX(xTop, yTop, upperStep, y);
+    }
+
+    return edgeX(xMid, yMid, lowerStep, y);
+}
+
+fn inOrderedTriangle(pixel: vec2<i32>, xTop: i32, yTop: i32, xMid: i32, yMid: i32, xBot: i32, yBot: i32) -> bool {
+    if (yTop >= yBot || pixel.y < yTop || pixel.y >= yBot) {
+        return false;
+    }
+
+    let longStep = edgeStep(xTop, yTop, xBot, yBot);
+    let upperStep = edgeStep(xTop, yTop, xMid, yMid);
+    let lowerStep = edgeStep(xMid, yMid, xBot, yBot);
+    let longX = edgeX(xTop, yTop, longStep, pixel.y);
+    let shortX = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, pixel.y);
+
+    var sampleY = max(yTop, params.clipMinY);
+    if (sampleY >= yBot) {
+        sampleY = yTop;
+    }
+    let sampleLong = edgeX(xTop, yTop, longStep, sampleY);
+    let sampleShort = shortEdgeX(xTop, yTop, xMid, yMid, xBot, yBot, upperStep, lowerStep, sampleY);
+    var longLeft = sampleLong < sampleShort;
+    if (sampleLong == sampleShort) {
+        if (yTop == yMid) {
+            longLeft = xTop < xMid;
+        } else {
+            longLeft = longStep < upperStep;
+        }
+    }
+
+    var startX: i32;
+    var endX: i32;
+    if (longLeft) {
+        startX = longX;
+        endX = shortX;
+    } else {
+        startX = shortX;
+        endX = longX;
+    }
+
+    return pixel.x >= startX && pixel.x < endX;
+}
+
+fn inProjectedTriangle(pixel: vec2<i32>) -> bool {
+    if (pixel.x < params.clipMinX || pixel.x >= params.clipMaxX || pixel.y < params.clipMinY || pixel.y >= params.clipMaxY) {
+        return false;
+    }
+
+    let a = projectLocal(params.xA, params.yA, params.zA);
+    let b = projectLocal(params.xB, params.yB, params.zB);
+    let c = projectLocal(params.xC, params.yC, params.zC);
+    if (a.valid == 0 || b.valid == 0 || c.valid == 0) {
+        return false;
+    }
+
+    if (a.y <= b.y && a.y <= c.y) {
+        if (b.y < c.y) {
+            return inOrderedTriangle(pixel, a.x, a.y, b.x, b.y, c.x, c.y);
+        }
+        return inOrderedTriangle(pixel, a.x, a.y, c.x, c.y, b.x, b.y);
+    }
+
+    if (b.y <= c.y) {
+        if (c.y < a.y) {
+            return inOrderedTriangle(pixel, b.x, b.y, c.x, c.y, a.x, a.y);
+        }
+        return inOrderedTriangle(pixel, b.x, b.y, a.x, a.y, c.x, c.y);
+    }
+
+    if (a.y < b.y) {
+        return inOrderedTriangle(pixel, c.x, c.y, a.x, a.y, b.x, b.y);
+    }
+    return inOrderedTriangle(pixel, c.x, c.y, b.x, b.y, a.x, a.y);
+}
+
+fn toByte(channel: f32) -> u32 {
+    return u32(round(clamp(channel, 0.0, 1.0) * 255.0));
+}
+
+fn blendChannel(src: u32, dst: u32, alpha: u32) -> u32 {
+    return ((src * alpha) >> 8u) + ((dst * (256u - alpha)) >> 8u);
+}
+
+fn nextPixel(pixel: vec2<i32>) -> vec2<i32> {
+    let size = textureDimensions(sourceTexture);
+    let index = min(pixel.x + pixel.y * i32(size.x) + 1, i32(size.x * size.y) - 1);
+    return vec2<i32>(index % i32(size.x), index / i32(size.x));
+}
+
+@fragment
+fn fs(input: VertexOutput) -> @location(0) vec4f {
+    let pixel = vec2<i32>(floor(input.position.xy));
+    let base = textureLoad(sourceTexture, pixel, 0);
+    if (!inProjectedTriangle(pixel)) {
+        return vec4f(base.rgb, 1.0);
+    }
+
+    let rgb = u32(params.rgb);
+    let alpha = u32(params.alpha);
+    let srcR = (rgb >> 16u) & 255u;
+    let srcG = (rgb >> 8u) & 255u;
+    let srcB = rgb & 255u;
+    var blendBase = base;
+    if (alpha < 256u) {
+        blendBase = textureLoad(sourceTexture, nextPixel(pixel), 0);
+    }
+    let outR = blendChannel(srcR, toByte(blendBase.r), alpha);
+    let outG = blendChannel(srcG, toByte(blendBase.g), alpha);
+    let outB = blendChannel(srcB, toByte(blendBase.b), alpha);
+    return vec4f(f32(outR) / 255.0, f32(outG) / 255.0, f32(outB) / 255.0, 1.0);
+}
+`;
+
 const GOURAUD_SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -1461,6 +1683,7 @@ const FLOATS_PER_RECT_INSTANCE = 8;
 const FLOATS_PER_SPRITE_VERTEX = 4;
 const RECT_INSTANCE_UNIFORM_FLOATS = 4;
 const ALPHA_UNIFORM_INTS = 16;
+const MODEL_FLAT_UNIFORM_INTS = 32;
 const GOURAUD_UNIFORM_INTS = 16;
 const TEXTURE_TRIANGLE_UNIFORM_INTS = 32;
 const SPRITE_ALPHA_UNIFORM_INTS = 16;
@@ -1510,6 +1733,9 @@ type PacketReplayStep = {
 } | {
     kind: 'glyphSprite';
     op: GlyphReplayOp;
+} | {
+    kind: 'modelFlatTriangle';
+    op: ModelFlatReplayOp;
 } | {
     kind: 'transformSprite';
     op: TransformSpriteReplayOp;
@@ -1615,6 +1841,32 @@ type GlyphReplayOp = {
     srcY: number;
     rgb: number;
     alpha: number | null;
+};
+
+type ModelFlatReplayOp = {
+    xA: number;
+    yA: number;
+    zA: number;
+    xB: number;
+    yB: number;
+    zB: number;
+    xC: number;
+    yC: number;
+    zC: number;
+    sinYaw: number;
+    cosYaw: number;
+    sinEyePitch: number;
+    cosEyePitch: number;
+    sinEyeYaw: number;
+    cosEyeYaw: number;
+    relativeX: number;
+    relativeY: number;
+    relativeZ: number;
+    originX: number;
+    originY: number;
+    rgb: number;
+    alpha: number;
+    clip: Rect;
 };
 
 type TransformSpriteReplayOp = {
@@ -1882,6 +2134,7 @@ export type WebGpuPacketReplayStats = {
     gpuRectInstancesReplayed: number;
     gpuDynamicIndexedSpritesReplayed: number;
     gpuGlyphSpritesReplayed: number;
+    gpuModelFlatTrianglesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2039,6 +2292,7 @@ export default class WebGpuFramePresenter {
     private primitiveVertexBufferBytes: number = 0;
     private rectInstanceBuffer: GpuBuffer | null = null;
     private rectInstanceBufferBytes: number = 0;
+    private modelFlatUniformBuffer: GpuBuffer | null = null;
     private spriteVertexBuffer: GpuBuffer | null = null;
     private spriteVertexBufferBytes: number = 0;
     private readonly spriteTextures = new Map<number, { texture: GpuTexture; bindGroup: object; width: number; height: number; version: number }>();
@@ -2073,6 +2327,7 @@ export default class WebGpuFramePresenter {
         private readonly transformSpritePipeline: GpuRenderPipeline,
         private readonly maskedSpritePipeline: GpuRenderPipeline,
         private readonly alphaPipeline: GpuRenderPipeline,
+        private readonly modelFlatPipeline: GpuRenderPipeline,
         private readonly gouraudPipeline: GpuRenderPipeline,
         private readonly textureTrianglePipeline: GpuRenderPipeline,
         options: WebGpuFramePresenterOptions
@@ -2093,6 +2348,7 @@ export default class WebGpuFramePresenter {
             gpuRectInstancesReplayed: 0,
             gpuDynamicIndexedSpritesReplayed: 0,
             gpuGlyphSpritesReplayed: 0,
+            gpuModelFlatTrianglesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -2299,6 +2555,22 @@ export default class WebGpuFramePresenter {
                 topology: 'triangle-list'
             }
         });
+        const modelFlatShaderModule = device.createShaderModule({ code: MODEL_FLAT_SHADER });
+        const modelFlatPipeline = device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {
+                module: modelFlatShaderModule,
+                entryPoint: 'vs'
+            },
+            fragment: {
+                module: modelFlatShaderModule,
+                entryPoint: 'fs',
+                targets: [{ format: FRAME_TEXTURE_FORMAT }]
+            },
+            primitive: {
+                topology: 'triangle-list'
+            }
+        });
         const gouraudPipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
@@ -2410,7 +2682,7 @@ export default class WebGpuFramePresenter {
             return null;
         }
 
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, gouraudPipeline, textureTrianglePipeline, options);
+        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, modelFlatPipeline, gouraudPipeline, textureTrianglePipeline, options);
         device.lost?.then(info => {
             console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
             presenter.disable();
@@ -3019,6 +3291,42 @@ export default class WebGpuFramePresenter {
                         });
                     }
                     break;
+                case 'modelFlatTriangle':
+                    flushBatches();
+                    steps.push({
+                        kind: 'modelFlatTriangle',
+                        op: {
+                            xA: packet.xA,
+                            yA: packet.yA,
+                            zA: packet.zA,
+                            xB: packet.xB,
+                            yB: packet.yB,
+                            zB: packet.zB,
+                            xC: packet.xC,
+                            yC: packet.yC,
+                            zC: packet.zC,
+                            sinYaw: packet.sinYaw,
+                            cosYaw: packet.cosYaw,
+                            sinEyePitch: packet.sinEyePitch,
+                            cosEyePitch: packet.cosEyePitch,
+                            sinEyeYaw: packet.sinEyeYaw,
+                            cosEyeYaw: packet.cosEyeYaw,
+                            relativeX: packet.relativeX,
+                            relativeY: packet.relativeY,
+                            relativeZ: packet.relativeZ,
+                            originX: packet.originX + offsetX,
+                            originY: packet.originY + offsetY,
+                            rgb: packet.rgb,
+                            alpha: packet.alpha,
+                            clip: {
+                                x: packet.clip.minX + offsetX,
+                                y: packet.clip.minY + offsetY,
+                                width: packet.clip.maxX - packet.clip.minX,
+                                height: packet.clip.maxY - packet.clip.minY
+                            }
+                        }
+                    });
+                    break;
                 default:
                     this.failPacketReplay('unknown packet kind');
             }
@@ -3043,6 +3351,8 @@ export default class WebGpuFramePresenter {
                 }
 
                 this.replayGouraudOp(step.op, resource);
+            } else if (step.kind === 'modelFlatTriangle') {
+                this.replayModelFlatOp(step.op);
             } else if (step.kind === 'textureTriangle') {
                 const resource = gpuRenderPackets.snapshot().textureResources.find(item => item.id === step.op.texture);
                 if (!resource) {
@@ -3237,6 +3547,81 @@ export default class WebGpuFramePresenter {
         this.frameTexture = this.scratchFrameTexture;
         this.scratchFrameTexture = oldFrameTexture;
         this.recreateDisplayBindGroup();
+    }
+
+    private replayModelFlatOp(op: ModelFlatReplayOp): void {
+        if (!this.frameTexture || !this.scratchFrameTexture) {
+            this.failPacketReplay('model flat replay requested before frame textures exist');
+        }
+
+        this.ensureModelFlatUniformBuffer();
+        const params = new Int32Array(MODEL_FLAT_UNIFORM_INTS);
+        params[0] = op.xA;
+        params[1] = op.yA;
+        params[2] = op.zA;
+        params[3] = op.xB;
+        params[4] = op.yB;
+        params[5] = op.zB;
+        params[6] = op.xC;
+        params[7] = op.yC;
+        params[8] = op.zC;
+        params[9] = op.sinYaw;
+        params[10] = op.cosYaw;
+        params[11] = op.sinEyePitch;
+        params[12] = op.cosEyePitch;
+        params[13] = op.sinEyeYaw;
+        params[14] = op.cosEyeYaw;
+        params[15] = op.relativeX;
+        params[16] = op.relativeY;
+        params[17] = op.relativeZ;
+        params[18] = op.originX;
+        params[19] = op.originY;
+        params[20] = op.rgb;
+        params[21] = op.alpha;
+        params[22] = op.clip.x;
+        params[23] = op.clip.y;
+        params[24] = op.clip.x + op.clip.width;
+        params[25] = op.clip.y + op.clip.height;
+        this.device.queue.writeBuffer(this.modelFlatUniformBuffer!, 0, params);
+
+        const bindGroup = this.device.createBindGroup({
+            layout: this.modelFlatPipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: this.frameTexture.createView()
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.modelFlatUniformBuffer
+                    }
+                }
+            ]
+        });
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.scratchFrameTexture.createView(),
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store'
+                }
+            ]
+        });
+
+        pass.setPipeline(this.modelFlatPipeline);
+        pass.setBindGroup(0, bindGroup);
+        pass.draw(6);
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
+
+        const oldFrameTexture = this.frameTexture;
+        this.frameTexture = this.scratchFrameTexture;
+        this.scratchFrameTexture = oldFrameTexture;
+        this.recreateDisplayBindGroup();
+        this.packetReplayStats.gpuModelFlatTrianglesReplayed++;
     }
 
     private replayGouraudOp(op: GouraudReplayOp, resource: GpuColourTableResource): void {
@@ -4141,6 +4526,17 @@ export default class WebGpuFramePresenter {
         });
     }
 
+    private ensureModelFlatUniformBuffer(): void {
+        if (this.modelFlatUniformBuffer) {
+            return;
+        }
+
+        this.modelFlatUniformBuffer = this.device.createBuffer({
+            size: MODEL_FLAT_UNIFORM_INTS * 4,
+            usage: this.bufferUsage!.COPY_DST | this.bufferUsage!.UNIFORM
+        });
+    }
+
     private ensureRectInstanceUniformBuffer(): void {
         if (this.rectInstanceUniformBuffer) {
             return;
@@ -4260,6 +4656,7 @@ export default class WebGpuFramePresenter {
         this.scratchFrameTexture?.destroy();
         this.primitiveVertexBuffer?.destroy();
         this.rectInstanceBuffer?.destroy();
+        this.modelFlatUniformBuffer?.destroy();
         this.spriteVertexBuffer?.destroy();
         this.alphaUniformBuffer?.destroy();
         this.gouraudUniformBuffer?.destroy();
@@ -4295,6 +4692,7 @@ export default class WebGpuFramePresenter {
         this.bindGroup = null;
         this.primitiveVertexBuffer = null;
         this.rectInstanceBuffer = null;
+        this.modelFlatUniformBuffer = null;
         this.rectInstanceBufferBytes = 0;
         this.spriteVertexBuffer = null;
         this.alphaUniformBuffer = null;

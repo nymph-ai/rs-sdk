@@ -1,4 +1,4 @@
-import { gpuRenderPackets, recordDynamicIndexedSprite } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordDynamicIndexedSprite, recordModelFlatTriangle } from '#/graphics/GpuRenderPackets.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
@@ -145,6 +145,63 @@ function plotDynamicValidationSprite(seed: number, x: number, y: number): void {
             Pix2D.pixels[dstOffset] = blendRgb(palette[alpha], Pix2D.pixels[dstOffset], alpha);
         }
     }
+}
+
+function projectModelPoint(x: number, y: number, z: number, relativeX: number, relativeY: number, relativeZ: number): { x: number; y: number } {
+    const viewX = x + relativeX;
+    const viewY = y + relativeY;
+    const viewZ = z + relativeZ;
+    return {
+        x: Pix3D.originX + (((viewX << 9) / viewZ) | 0),
+        y: Pix3D.originY + (((viewY << 9) / viewZ) | 0)
+    };
+}
+
+function plotModelFlatValidationTriangle(): void {
+    const relativeX = 20;
+    const relativeY = 8;
+    const relativeZ = 320;
+    const xA = -24;
+    const yA = -16;
+    const zA = 0;
+    const xB = 26;
+    const yB = -10;
+    const zB = 0;
+    const xC = 0;
+    const yC = 28;
+    const zC = 0;
+    const rgb = 0x30e0a0;
+    if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+        recordModelFlatTriangle(
+            xA, yA, zA,
+            xB, yB, zB,
+            xC, yC, zC,
+            0,
+            65536,
+            0,
+            65536,
+            0,
+            65536,
+            relativeX,
+            relativeY,
+            relativeZ,
+            Pix3D.originX,
+            Pix3D.originY,
+            rgb,
+            256,
+            Pix2D.clipMinX,
+            Pix2D.clipMinY,
+            Pix2D.clipMaxX,
+            Pix2D.clipMaxY
+        );
+        gpuRenderPackets.recordCpuRasterWriteBypass();
+        return;
+    }
+
+    const a = projectModelPoint(xA, yA, zA, relativeX, relativeY, relativeZ);
+    const b = projectModelPoint(xB, yB, zB, relativeX, relativeY, relativeZ);
+    const c = projectModelPoint(xC, yC, zC, relativeX, relativeY, relativeZ);
+    Pix3D.flatTriangle(a.x, b.x, c.x, a.y, b.y, c.y, rgb);
 }
 
 function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrites: boolean = false, dynamicSeed: number = 0): ImageData {
@@ -335,6 +392,8 @@ function makePacketReplayFrame(width: number, height: number, skipCpuRasterWrite
     );
     Pix3D.lowMem = false;
     Pix3D.clearTexels();
+    Pix3D.trans = 0;
+    plotModelFlatValidationTriangle();
 
     return pixelsToImageData(pixels, width, height);
 }
@@ -474,6 +533,7 @@ async function runValidation(): Promise<void> {
         packetReplayStats.gpuRectInstancesReplayed > 0 &&
         packetReplayStats.gpuDynamicIndexedSpritesReplayed > 0 &&
         packetReplayStats.gpuGlyphSpritesReplayed > 0 &&
+        packetReplayStats.gpuModelFlatTrianglesReplayed > 0 &&
         nativeFlatTrianglePackets > 0 &&
         nativeGouraudTrianglePackets > 0 &&
         nativeTextureTrianglePackets > 0 &&
