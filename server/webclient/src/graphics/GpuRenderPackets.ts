@@ -11,17 +11,38 @@ type SurfaceInfo = {
     height: number;
 };
 
+export type GpuSpriteResource = {
+    id: number;
+    width: number;
+    height: number;
+    rgba: Uint8Array;
+};
+
 type PacketBase = {
     surface: number;
 };
 
 export type GpuRenderPacket =
     | (PacketBase & { kind: 'surface'; width: number; height: number })
+    | (PacketBase & { kind: 'unsupported'; reason: string })
     | (PacketBase & { kind: 'clip'; clip: ClipBounds })
     | (PacketBase & { kind: 'clear' })
     | (PacketBase & { kind: 'fillRect'; x: number; y: number; width: number; height: number; rgb: number; alpha: number | null })
     | (PacketBase & { kind: 'line'; axis: 'h' | 'v'; x: number; y: number; length: number; rgb: number; alpha: number | null })
     | (PacketBase & { kind: 'fillCircle'; xCenter: number; yCenter: number; yRadius: number; rgb: number; alpha: number })
+    | (PacketBase & {
+          kind: 'rgbaSprite';
+          resource: number;
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+          srcX: number;
+          srcY: number;
+          srcWidth: number;
+          srcHeight: number;
+          clip: ClipBounds;
+      })
     | (PacketBase & {
           kind: 'triangleGouraud';
           xA: number;
@@ -80,6 +101,7 @@ export type GpuRenderPacketSnapshot = {
     dropped: number;
     currentSurface: number;
     surfaces: SurfaceInfo[];
+    spriteResources: GpuSpriteResource[];
 };
 
 export type GpuRenderPacketState = {
@@ -102,9 +124,12 @@ declare global {
 
 const DEFAULT_MAX_PACKETS = 8192;
 const surfaceIds = new WeakMap<Int32Array, number>();
+const spriteResourceIds = new WeakMap<object, Map<string, number>>();
 const packets: GpuRenderPacket[] = [];
 const surfaces: SurfaceInfo[] = [];
+const spriteResources: GpuSpriteResource[] = [];
 let nextSurface = 1;
+let nextSpriteResource = 1;
 let currentSurface = 0;
 
 function parseFlag(value: string | null): boolean | null {
@@ -236,7 +261,8 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             packetCount: packets.length,
             dropped: this.dropped,
             currentSurface,
-            surfaces: surfaces.slice()
+            surfaces: surfaces.slice(),
+            spriteResources: spriteResources.slice()
         };
     }
 };
@@ -271,6 +297,14 @@ export function recordClear(): void {
     pushPacket({ kind: 'clear', surface: currentSurface });
 }
 
+export function recordUnsupported(reason: string): void {
+    if (!gpuRenderPackets.enabled) {
+        return;
+    }
+
+    pushPacket({ kind: 'unsupported', surface: currentSurface, reason });
+}
+
 export function recordFillRect(x: number, y: number, width: number, height: number, rgb: number, alpha: number | null = null): void {
     if (!gpuRenderPackets.enabled) {
         return;
@@ -293,6 +327,58 @@ export function recordFillCircle(xCenter: number, yCenter: number, yRadius: numb
     }
 
     pushPacket({ kind: 'fillCircle', surface: currentSurface, xCenter, yCenter, yRadius, rgb, alpha });
+}
+
+export function recordRgbaSprite(
+    key: object,
+    variant: string,
+    width: number,
+    height: number,
+    makeRgba: () => Uint8Array,
+    x: number,
+    y: number,
+    drawWidth: number,
+    drawHeight: number,
+    srcX: number,
+    srcY: number,
+    srcWidth: number,
+    srcHeight: number,
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+): void {
+    if (!gpuRenderPackets.enabled) {
+        return;
+    }
+
+    let variants = spriteResourceIds.get(key);
+    if (!variants) {
+        variants = new Map();
+        spriteResourceIds.set(key, variants);
+    }
+
+    let resource = variants.get(variant);
+    if (!resource) {
+        resource = nextSpriteResource++;
+        variants.set(variant, resource);
+        spriteResources.push({ id: resource, width, height, rgba: makeRgba() });
+    }
+
+    pushPacket({
+        kind: 'rgbaSprite',
+        surface: currentSurface,
+        resource,
+        x,
+        y,
+        width: drawWidth,
+        height: drawHeight,
+        srcX,
+        srcY,
+        srcWidth,
+        srcHeight,
+        clip: makeClip(minX, minY, maxX, maxY)
+    });
 }
 
 export function recordGouraudTriangle(

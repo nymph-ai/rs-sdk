@@ -1,5 +1,6 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import { decodeJpeg } from '#/graphics/Jpeg.js';
+import { recordRgbaSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -230,6 +231,27 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:quick',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(true),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
             this.plotQuick(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
     }
@@ -301,8 +323,42 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
+    }
+
+    private makeRgba(opaqueZero: boolean): Uint8Array {
+        const rgba = new Uint8Array(this.wi * this.hi * 4);
+        for (let i = 0; i < this.data.length; i++) {
+            const rgb = this.data[i];
+            const offset = i * 4;
+            rgba[offset] = (rgb >> 16) & 0xff;
+            rgba[offset + 1] = (rgb >> 8) & 0xff;
+            rgba[offset + 2] = rgb & 0xff;
+            rgba[offset + 3] = rgb === 0 && !opaqueZero ? 0 : 0xff;
+        }
+        return rgba;
     }
 
     private plot(w: number, h: number, src: Int32Array, srcOff: number, srcStep: number, dst: Int32Array, dstOff: number, dstStep: number): void {
@@ -355,6 +411,7 @@ export default class Pix32 extends Pix2D {
     }
 
     transPlotSprite(x: number, y: number, alpha: number): void {
+        recordUnsupported('Pix32.transPlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
 
@@ -422,6 +479,7 @@ export default class Pix32 extends Pix2D {
     }
 
     scanlineRotatePlotSprite(x: number, y: number, w: number, h: number, anchorX: number, anchorY: number, theta: number, zoom: number, lineStart: Int32Array, lineWidth: Int32Array): void {
+        recordUnsupported('Pix32.scanlineRotatePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
         w |= 0;
@@ -463,6 +521,7 @@ export default class Pix32 extends Pix2D {
     }
 
     rotatePlotSprite(x: number, y: number, w: number, h: number, anchorX: number, anchorY: number, theta: number, zoom: number): void {
+        recordUnsupported('Pix32.rotatePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
         w |= 0;
@@ -508,6 +567,7 @@ export default class Pix32 extends Pix2D {
     }
 
     scanlinePlotSprite(mask: Pix8, x: number, y: number): void {
+        recordUnsupported('Pix32.scanlinePlotSprite packets are not replayed yet');
         x |= 0;
         y |= 0;
 

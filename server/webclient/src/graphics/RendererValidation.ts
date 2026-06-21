@@ -1,5 +1,8 @@
 import { gpuRenderPackets } from '#/graphics/GpuRenderPackets.js';
 import Pix2D from '#/graphics/Pix2D.js';
+import Pix8 from '#/graphics/Pix8.js';
+import Pix32 from '#/graphics/Pix32.js';
+import PixFont from '#/graphics/PixFont.js';
 import WebGpuFramePresenter, { type WebGpuFrameValidationStats, type WebGpuPacketReplayStats } from '#/graphics/WebGpuFramePresenter.js';
 
 type ValidationResult = {
@@ -77,6 +80,31 @@ function makePacketReplayFrame(width: number, height: number): ImageData {
     Pix2D.resetClipping();
     Pix2D.fillCircle(124, 38, 18, 0x2080e0, 128);
     Pix2D.fillRect(width - 30, height - 18, 50, 30, 0x102030);
+
+    const indexedSprite = new Pix8(8, 8, Int32Array.of(0, 0xff2020, 0x20ff20, 0x2020ff));
+    for (let i = 0; i < indexedSprite.data.length; i++) {
+        indexedSprite.data[i] = i % 3 === 0 ? 0 : ((i % 3) + 1);
+    }
+    indexedSprite.plotSprite(14, 86);
+
+    const rgbSprite = new Pix32(10, 8);
+    for (let y = 0; y < rgbSprite.hi; y++) {
+        for (let x = 0; x < rgbSprite.wi; x++) {
+            rgbSprite.data[x + y * rgbSprite.wi] = (x + y) % 4 === 0 ? 0 : ((x * 24) << 16) | ((y * 28) << 8) | 0x90;
+        }
+    }
+    rgbSprite.plotSprite(36, 84);
+    rgbSprite.quickPlotSprite(52, 84);
+
+    const font = new PixFont();
+    const glyph = new Int8Array([
+        1, 1, 1, 0, 1,
+        1, 0, 0, 0, 1,
+        1, 1, 1, 0, 1,
+        1, 0, 0, 0, 1,
+        1, 0, 0, 0, 1
+    ]);
+    font.plotLetter(glyph, 76, 84, 5, 5, 0xfff080);
 
     return pixelsToImageData(pixels, width, height);
 }

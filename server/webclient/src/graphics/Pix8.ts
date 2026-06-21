@@ -1,4 +1,5 @@
 import Pix2D from '#/graphics/Pix2D.js';
+import { recordRgbaSprite, recordUnsupported } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -227,8 +228,48 @@ export default class Pix8 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                `pix8:${Array.from(this.bpal).join(',')}`,
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
+    }
+
+    private makeRgba(_opaqueZero: boolean): Uint8Array {
+        const rgba = new Uint8Array(this.wi * this.hi * 4);
+        for (let i = 0; i < this.data.length; i++) {
+            const palIndex = this.data[i] & 0xff;
+            const offset = i * 4;
+            if (palIndex === 0) {
+                rgba[offset + 3] = 0;
+                continue;
+            }
+
+            const rgb = this.bpal[palIndex];
+            rgba[offset] = (rgb >> 16) & 0xff;
+            rgba[offset + 1] = (rgb >> 8) & 0xff;
+            rgba[offset + 2] = rgb & 0xff;
+            rgba[offset + 3] = 0xff;
+        }
+        return rgba;
     }
 
     private plot(w: number, h: number, src: Int8Array, srcOff: number, srcStep: number, dst: Int32Array, dstOff: number, dstStep: number): void {
@@ -283,6 +324,7 @@ export default class Pix8 extends Pix2D {
     // mapview applet:
 
     scalePlotSprite(arg0: number, arg1: number, arg2: number, arg3: number): void {
+        recordUnsupported('Pix8.scalePlotSprite packets are not replayed yet');
         try {
             const local2: number = this.wi;
             const local5: number = this.hi;
