@@ -1734,6 +1734,7 @@ type FrameVertexBinding = {
 
 type PacketReplayContext = {
     encoder: GpuCommandEncoder;
+    directPass: GpuRenderPass | null;
 };
 
 type PacketReplayStep = {
@@ -2171,6 +2172,8 @@ export type WebGpuPacketReplayStats = {
     gpuTextureCopies: number;
     gpuFrameUniformBytesAllocated: number;
     gpuFrameVertexBytesAllocated: number;
+    gpuDirectDrawsReplayed: number;
+    gpuDirectRenderPassesReplayed: number;
     packetsReplayed: number;
     lastPacketCount: number;
     lastVertexCount: number;
@@ -2402,6 +2405,8 @@ export default class WebGpuFramePresenter {
             gpuTextureCopies: 0,
             gpuFrameUniformBytesAllocated: 0,
             gpuFrameVertexBytesAllocated: 0,
+            gpuDirectDrawsReplayed: 0,
+            gpuDirectRenderPassesReplayed: 0,
             packetsReplayed: 0,
             lastPacketCount: 0,
             lastVertexCount: 0,
@@ -3413,7 +3418,8 @@ export default class WebGpuFramePresenter {
         this.prepareFrameUniformArena(steps);
         this.prepareFrameVertexArenas(steps);
         const context: PacketReplayContext = {
-            encoder: this.device.createCommandEncoder()
+            encoder: this.device.createCommandEncoder(),
+            directPass: null
         };
 
         for (const step of steps) {
@@ -3481,6 +3487,7 @@ export default class WebGpuFramePresenter {
             }
         }
 
+        this.endDirectReplayPass(context);
         this.submitReplayCommands(context);
         this.recreateDisplayBindGroup();
     }
@@ -3488,20 +3495,12 @@ export default class WebGpuFramePresenter {
     private replayPrimitiveVertices(vertices: Float32Array, context: PacketReplayContext): void {
         const vertexBinding = this.allocatePrimitiveVertices(vertices);
 
-        const pass = this.beginReplayRenderPass(context, {
-            colorAttachments: [
-                {
-                    view: this.frameTexture!.createView(),
-                    loadOp: 'load',
-                    storeOp: 'store'
-                }
-            ]
-        });
+        const pass = this.beginDirectReplayPass(context);
 
         pass.setPipeline(this.primitivePipeline);
         pass.setVertexBuffer(0, vertexBinding.buffer, vertexBinding.offset, vertexBinding.size);
         pass.draw(vertices.length / FLOATS_PER_PRIMITIVE_VERTEX);
-        pass.end();
+        this.packetReplayStats.gpuDirectDrawsReplayed++;
     }
 
     private replayRectInstances(instances: Float32Array, context: PacketReplayContext): void {
@@ -3526,21 +3525,13 @@ export default class WebGpuFramePresenter {
                 }
             ]
         });
-        const pass = this.beginReplayRenderPass(context, {
-            colorAttachments: [
-                {
-                    view: this.frameTexture!.createView(),
-                    loadOp: 'load',
-                    storeOp: 'store'
-                }
-            ]
-        });
+        const pass = this.beginDirectReplayPass(context);
 
         pass.setPipeline(this.rectInstancePipeline);
         pass.setBindGroup(0, bindGroup);
         pass.setVertexBuffer(0, instanceBinding.buffer, instanceBinding.offset, instanceBinding.size);
         pass.draw(6, instanceCount);
-        pass.end();
+        this.packetReplayStats.gpuDirectDrawsReplayed++;
         this.packetReplayStats.gpuRectInstancesReplayed += instanceCount;
     }
 
@@ -3549,6 +3540,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('alpha replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const params = new Int32Array(ALPHA_UNIFORM_INTS);
         if (op.kind === 'rect') {
             params[0] = 0;
@@ -3629,6 +3621,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('model flat replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const params = new Int32Array(MODEL_FLAT_UNIFORM_INTS);
         params[0] = op.xA;
         params[1] = op.yA;
@@ -3721,6 +3714,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('gouraud replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const colourTable = this.getColourTableTexture(resource);
         const params = new Int32Array(GOURAUD_UNIFORM_INTS);
         params[0] = op.xA;
@@ -3788,6 +3782,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('texture triangle replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const texels = this.getTexelTexture(resource);
         const params = new Int32Array(TEXTURE_TRIANGLE_UNIFORM_INTS);
         params[0] = op.xA;
@@ -3872,21 +3867,13 @@ export default class WebGpuFramePresenter {
         const vertices = this.buildSpriteVertices(op, resource);
         const vertexBinding = this.allocateSpriteVertices(vertices);
 
-        const pass = this.beginReplayRenderPass(context, {
-            colorAttachments: [
-                {
-                    view: this.frameTexture!.createView(),
-                    loadOp: 'load',
-                    storeOp: 'store'
-                }
-            ]
-        });
+        const pass = this.beginDirectReplayPass(context);
 
         pass.setPipeline(this.spritePipeline);
         pass.setBindGroup(0, cached.bindGroup);
         pass.setVertexBuffer(0, vertexBinding.buffer, vertexBinding.offset, vertexBinding.size);
         pass.draw(6);
-        pass.end();
+        this.packetReplayStats.gpuDirectDrawsReplayed++;
     }
 
     private replayAlphaSpriteOp(op: SpriteReplayOp, resource: GpuSpriteResource, context: PacketReplayContext): void {
@@ -3894,6 +3881,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('alpha sprite replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const cached = this.getSpriteTexture(resource);
         const params = new Int32Array(SPRITE_ALPHA_UNIFORM_INTS);
         params[0] = op.rect.x;
@@ -3954,6 +3942,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('glyph replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const cached = this.getGlyphTexture(resource);
         const params = new Int32Array(GLYPH_UNIFORM_INTS);
         params[0] = op.rect.x;
@@ -4014,6 +4003,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('indexed sprite replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const cached = this.getIndexedSpriteTexture(resource);
         const params = new Int32Array(INDEXED_SPRITE_UNIFORM_INTS);
         params[0] = op.rect.x;
@@ -4083,6 +4073,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('transform sprite replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const cached = this.getSpriteTexture(resource);
         const params = new Int32Array(TRANSFORM_SPRITE_UNIFORM_INTS);
         params[0] = op.rect.x;
@@ -4146,6 +4137,7 @@ export default class WebGpuFramePresenter {
             this.failPacketReplay('masked sprite replay requested before frame textures exist');
         }
 
+        this.endDirectReplayPass(context);
         const cached = this.getSpriteTexture(resource);
         const cachedMask = this.getSpriteTexture(maskResource);
         const params = new Int32Array(MASKED_SPRITE_UNIFORM_INTS);
@@ -4855,6 +4847,33 @@ export default class WebGpuFramePresenter {
     private beginReplayRenderPass(context: PacketReplayContext, descriptor: object): GpuRenderPass {
         this.packetReplayStats.gpuRenderPassesEncoded++;
         return context.encoder.beginRenderPass(descriptor);
+    }
+
+    private beginDirectReplayPass(context: PacketReplayContext): GpuRenderPass {
+        if (context.directPass) {
+            return context.directPass;
+        }
+
+        context.directPass = this.beginReplayRenderPass(context, {
+            colorAttachments: [
+                {
+                    view: this.frameTexture!.createView(),
+                    loadOp: 'load',
+                    storeOp: 'store'
+                }
+            ]
+        });
+        this.packetReplayStats.gpuDirectRenderPassesReplayed++;
+        return context.directPass;
+    }
+
+    private endDirectReplayPass(context: PacketReplayContext): void {
+        if (!context.directPass) {
+            return;
+        }
+
+        context.directPass.end();
+        context.directPass = null;
     }
 
     private copyReplayTextureToTexture(context: PacketReplayContext, source: object, destination: object, size: object): void {
