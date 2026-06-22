@@ -69,6 +69,13 @@ type GpuCanvasContext = {
     getCurrentTexture(): GpuTexture;
 };
 
+type OverlayCanvasStack = {
+    wrapper: HTMLDivElement;
+    sourceDisplay: string;
+    sourcePosition: string;
+    sourceZIndex: string;
+};
+
 const SHADER = `
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -2069,10 +2076,10 @@ function createOverlayCanvas(source: HTMLCanvasElement): HTMLCanvasElement | nul
     return overlay;
 }
 
-function installOverlayCanvas(source: HTMLCanvasElement, overlay: HTMLCanvasElement): boolean {
+function installOverlayCanvas(source: HTMLCanvasElement, overlay: HTMLCanvasElement): OverlayCanvasStack | null {
     const parent = source.parentElement;
     if (!parent) {
-        return false;
+        return null;
     }
 
     const wrapper = document.createElement('div');
@@ -2082,6 +2089,13 @@ function installOverlayCanvas(source: HTMLCanvasElement, overlay: HTMLCanvasElem
     wrapper.style.width = source.style.width || `${source.width}px`;
     wrapper.style.height = source.style.height || `${source.height}px`;
 
+    const stack = {
+        wrapper,
+        sourceDisplay: source.style.display,
+        sourcePosition: source.style.position,
+        sourceZIndex: source.style.zIndex
+    };
+
     parent.insertBefore(wrapper, source);
     wrapper.appendChild(source);
     wrapper.appendChild(overlay);
@@ -2090,7 +2104,19 @@ function installOverlayCanvas(source: HTMLCanvasElement, overlay: HTMLCanvasElem
     source.style.position = 'relative';
     source.style.zIndex = '0';
 
-    return true;
+    return stack;
+}
+
+function uninstallOverlayCanvas(stack: OverlayCanvasStack, source: HTMLCanvasElement, overlay: HTMLCanvasElement): void {
+    const parent = stack.wrapper.parentElement;
+    if (parent) {
+        parent.insertBefore(source, stack.wrapper);
+    }
+    overlay.remove();
+    stack.wrapper.remove();
+    source.style.display = stack.sourceDisplay;
+    source.style.position = stack.sourcePosition;
+    source.style.zIndex = stack.sourceZIndex;
 }
 
 export type WebGpuFrameValidationStats = {
@@ -2178,6 +2204,23 @@ function isHardwareAdapter(info: WebGpuAdapterInfo | null): boolean {
 
     const label = `${info.vendor} ${info.architecture} ${info.device} ${info.description}`.trim().toLowerCase();
     return label !== '' && !SOFTWARE_ADAPTER_PATTERNS.some(pattern => label.includes(pattern));
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function requestHighPerformanceAdapter(gpu: BrowserGpu, timeoutMs: number = 3_000): Promise<GpuAdapter | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+        const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+        if (adapter) {
+            return adapter;
+        }
+        await sleep(100);
+    } while (Date.now() < deadline);
+
+    return null;
 }
 
 class WebGpuFrameValidator {
@@ -2311,6 +2354,7 @@ class WebGpuFrameValidator {
 }
 
 export default class WebGpuFramePresenter {
+    static lastCreateError: string = '';
     private frameTexture: GpuTexture | null = null;
     private scratchFrameTexture: GpuTexture | null = null;
     private modelDepthTexture: GpuTexture | null = null;
@@ -2445,336 +2489,348 @@ export default class WebGpuFramePresenter {
     }
 
     static async create(sourceCanvas: HTMLCanvasElement, options: WebGpuFramePresenterOptions = {}): Promise<WebGpuFramePresenter | null> {
+        WebGpuFramePresenter.lastCreateError = '';
         const gpu = getGpu();
         const textureUsage = getTextureUsage();
         if (!gpu || !textureUsage) {
+            WebGpuFramePresenter.lastCreateError = 'navigator.gpu/GPUTextureUsage unavailable';
             return null;
         }
 
         const overlayCanvas = createOverlayCanvas(sourceCanvas);
         if (!overlayCanvas) {
+            WebGpuFramePresenter.lastCreateError = 'overlay canvas creation failed';
             return null;
         }
 
-        const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+        const adapter = await requestHighPerformanceAdapter(gpu);
         if (!adapter) {
+            WebGpuFramePresenter.lastCreateError = 'requestAdapter returned null';
             overlayCanvas.remove();
             return null;
         }
 
         const adapterInfo = normalizeAdapterInfo(adapter.info);
         const device = await adapter.requestDevice();
-        const context = overlayCanvas.getContext('webgpu') as unknown as GpuCanvasContext | null;
-        if (!context) {
+        const overlayStack = installOverlayCanvas(sourceCanvas, overlayCanvas);
+        if (!overlayStack) {
+            WebGpuFramePresenter.lastCreateError = 'overlay canvas installation failed';
             overlayCanvas.remove();
             return null;
         }
 
-        const textureFormat = gpu.getPreferredCanvasFormat();
-        context.configure({
-            device,
-            format: textureFormat,
-            alphaMode: 'opaque'
-        });
+        try {
+            const context = overlayCanvas.getContext('webgpu') as unknown as GpuCanvasContext | null;
+            if (!context) {
+                WebGpuFramePresenter.lastCreateError = 'overlay canvas WebGPU context unavailable';
+                uninstallOverlayCanvas(overlayStack, sourceCanvas, overlayCanvas);
+                return null;
+            }
 
-        const sampler = device.createSampler({
-            magFilter: 'nearest',
-            minFilter: 'nearest'
-        });
-        const shaderModule = device.createShaderModule({ code: SHADER });
-        const pipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: shaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: shaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: textureFormat }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const primitiveShaderModule = device.createShaderModule({ code: PRIMITIVE_SHADER });
-        const rectInstanceShaderModule = device.createShaderModule({ code: RECT_INSTANCE_SHADER });
-        const primitivePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: primitiveShaderModule,
-                entryPoint: 'vs',
-                buffers: [
-                    {
-                        arrayStride: FLOATS_PER_PRIMITIVE_VERTEX * 4,
-                        attributes: [
-                            {
-                                shaderLocation: 0,
-                                offset: 0,
-                                format: 'float32x2'
-                            },
-                            {
-                                shaderLocation: 1,
-                                offset: 2 * 4,
-                                format: 'float32x4'
-                            }
-                        ]
-                    }
-                ]
-            },
-            fragment: {
-                module: primitiveShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const rectInstancePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: rectInstanceShaderModule,
-                entryPoint: 'vs',
-                buffers: [
-                    {
-                        arrayStride: FLOATS_PER_RECT_INSTANCE * 4,
-                        stepMode: 'instance',
-                        attributes: [
-                            {
-                                shaderLocation: 0,
-                                offset: 0,
-                                format: 'float32x4'
-                            },
-                            {
-                                shaderLocation: 1,
-                                offset: 4 * 4,
-                                format: 'float32x4'
-                            }
-                        ]
-                    }
-                ]
-            },
-            fragment: {
-                module: rectInstanceShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const spriteShaderModule = device.createShaderModule({ code: SPRITE_SHADER });
-        const spritePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: spriteShaderModule,
-                entryPoint: 'vs',
-                buffers: [
-                    {
-                        arrayStride: FLOATS_PER_SPRITE_VERTEX * 4,
-                        attributes: [
-                            {
-                                shaderLocation: 0,
-                                offset: 0,
-                                format: 'float32x2'
-                            },
-                            {
-                                shaderLocation: 1,
-                                offset: 2 * 4,
-                                format: 'float32x2'
-                            }
-                        ]
-                    }
-                ]
-            },
-            fragment: {
-                module: spriteShaderModule,
-                entryPoint: 'fs',
-                targets: [
-                    {
-                        format: FRAME_TEXTURE_FORMAT,
-                        blend: {
-                            color: {
-                                operation: 'add',
-                                srcFactor: 'src-alpha',
-                                dstFactor: 'one-minus-src-alpha'
-                            },
-                            alpha: {
-                                operation: 'add',
-                                srcFactor: 'one',
-                                dstFactor: 'one-minus-src-alpha'
+            const textureFormat = gpu.getPreferredCanvasFormat();
+            context.configure({
+                device,
+                format: textureFormat,
+                alphaMode: 'opaque'
+            });
+
+            const sampler = device.createSampler({
+                magFilter: 'nearest',
+                minFilter: 'nearest'
+            });
+            const shaderModule = device.createShaderModule({ code: SHADER });
+            const pipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: shaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: shaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: textureFormat }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const primitiveShaderModule = device.createShaderModule({ code: PRIMITIVE_SHADER });
+            const rectInstanceShaderModule = device.createShaderModule({ code: RECT_INSTANCE_SHADER });
+            const primitivePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: primitiveShaderModule,
+                    entryPoint: 'vs',
+                    buffers: [
+                        {
+                            arrayStride: FLOATS_PER_PRIMITIVE_VERTEX * 4,
+                            attributes: [
+                                {
+                                    shaderLocation: 0,
+                                    offset: 0,
+                                    format: 'float32x2'
+                                },
+                                {
+                                    shaderLocation: 1,
+                                    offset: 2 * 4,
+                                    format: 'float32x4'
+                                }
+                            ]
+                        }
+                    ]
+                },
+                fragment: {
+                    module: primitiveShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const rectInstancePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: rectInstanceShaderModule,
+                    entryPoint: 'vs',
+                    buffers: [
+                        {
+                            arrayStride: FLOATS_PER_RECT_INSTANCE * 4,
+                            stepMode: 'instance',
+                            attributes: [
+                                {
+                                    shaderLocation: 0,
+                                    offset: 0,
+                                    format: 'float32x4'
+                                },
+                                {
+                                    shaderLocation: 1,
+                                    offset: 4 * 4,
+                                    format: 'float32x4'
+                                }
+                            ]
+                        }
+                    ]
+                },
+                fragment: {
+                    module: rectInstanceShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const spriteShaderModule = device.createShaderModule({ code: SPRITE_SHADER });
+            const spritePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: spriteShaderModule,
+                    entryPoint: 'vs',
+                    buffers: [
+                        {
+                            arrayStride: FLOATS_PER_SPRITE_VERTEX * 4,
+                            attributes: [
+                                {
+                                    shaderLocation: 0,
+                                    offset: 0,
+                                    format: 'float32x2'
+                                },
+                                {
+                                    shaderLocation: 1,
+                                    offset: 2 * 4,
+                                    format: 'float32x2'
+                                }
+                            ]
+                        }
+                    ]
+                },
+                fragment: {
+                    module: spriteShaderModule,
+                    entryPoint: 'fs',
+                    targets: [
+                        {
+                            format: FRAME_TEXTURE_FORMAT,
+                            blend: {
+                                color: {
+                                    operation: 'add',
+                                    srcFactor: 'src-alpha',
+                                    dstFactor: 'one-minus-src-alpha'
+                                },
+                                alpha: {
+                                    operation: 'add',
+                                    srcFactor: 'one',
+                                    dstFactor: 'one-minus-src-alpha'
+                                }
                             }
                         }
-                    }
-                ]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const alphaShaderModule = device.createShaderModule({ code: ALPHA_SHADER });
-        const gouraudShaderModule = device.createShaderModule({ code: GOURAUD_SHADER });
-        const textureTriangleShaderModule = device.createShaderModule({ code: TEXTURE_TRIANGLE_SHADER });
-        const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
-        const glyphShaderModule = device.createShaderModule({ code: GLYPH_SHADER });
-        const indexedSpriteShaderModule = device.createShaderModule({ code: INDEXED_SPRITE_SHADER });
-        const transformSpriteShaderModule = device.createShaderModule({ code: TRANSFORM_SPRITE_SHADER });
-        const maskedSpriteShaderModule = device.createShaderModule({ code: MASKED_SPRITE_SHADER });
-        const alphaPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: alphaShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: alphaShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const modelFlatShaderModule = device.createShaderModule({ code: MODEL_FLAT_SHADER });
-        const modelFlatPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: modelFlatShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: modelFlatShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            },
-            depthStencil: {
-                format: 'depth24plus',
-                depthWriteEnabled: true,
-                depthCompare: 'less'
-            }
-        });
-        const gouraudPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: gouraudShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: gouraudShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const textureTrianglePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: textureTriangleShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: textureTriangleShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const spriteAlphaPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: spriteAlphaShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: spriteAlphaShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const glyphPipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: glyphShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: glyphShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const indexedSpritePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: indexedSpriteShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: indexedSpriteShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const transformSpritePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: transformSpriteShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: transformSpriteShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
-        const maskedSpritePipeline = device.createRenderPipeline({
-            layout: 'auto',
-            vertex: {
-                module: maskedSpriteShaderModule,
-                entryPoint: 'vs'
-            },
-            fragment: {
-                module: maskedSpriteShaderModule,
-                entryPoint: 'fs',
-                targets: [{ format: FRAME_TEXTURE_FORMAT }]
-            },
-            primitive: {
-                topology: 'triangle-list'
-            }
-        });
+                    ]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const alphaShaderModule = device.createShaderModule({ code: ALPHA_SHADER });
+            const gouraudShaderModule = device.createShaderModule({ code: GOURAUD_SHADER });
+            const textureTriangleShaderModule = device.createShaderModule({ code: TEXTURE_TRIANGLE_SHADER });
+            const spriteAlphaShaderModule = device.createShaderModule({ code: SPRITE_ALPHA_SHADER });
+            const glyphShaderModule = device.createShaderModule({ code: GLYPH_SHADER });
+            const indexedSpriteShaderModule = device.createShaderModule({ code: INDEXED_SPRITE_SHADER });
+            const transformSpriteShaderModule = device.createShaderModule({ code: TRANSFORM_SPRITE_SHADER });
+            const maskedSpriteShaderModule = device.createShaderModule({ code: MASKED_SPRITE_SHADER });
+            const alphaPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: alphaShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: alphaShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const modelFlatShaderModule = device.createShaderModule({ code: MODEL_FLAT_SHADER });
+            const modelFlatPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: modelFlatShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: modelFlatShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                },
+                depthStencil: {
+                    format: 'depth24plus',
+                    depthWriteEnabled: true,
+                    depthCompare: 'less'
+                }
+            });
+            const gouraudPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: gouraudShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: gouraudShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const textureTrianglePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: textureTriangleShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: textureTriangleShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const spriteAlphaPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: spriteAlphaShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: spriteAlphaShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const glyphPipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: glyphShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: glyphShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const indexedSpritePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: indexedSpriteShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: indexedSpriteShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const transformSpritePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: transformSpriteShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: transformSpriteShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
+            const maskedSpritePipeline = device.createRenderPipeline({
+                layout: 'auto',
+                vertex: {
+                    module: maskedSpriteShaderModule,
+                    entryPoint: 'vs'
+                },
+                fragment: {
+                    module: maskedSpriteShaderModule,
+                    entryPoint: 'fs',
+                    targets: [{ format: FRAME_TEXTURE_FORMAT }]
+                },
+                primitive: {
+                    topology: 'triangle-list'
+                }
+            });
 
-        if (!installOverlayCanvas(sourceCanvas, overlayCanvas)) {
-            overlayCanvas.remove();
-            return null;
+            const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, modelFlatPipeline, gouraudPipeline, textureTrianglePipeline, adapterInfo, options);
+            device.lost?.then(info => {
+                console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
+                presenter.disable();
+            });
+
+            return presenter;
+        } catch (err) {
+            uninstallOverlayCanvas(overlayStack, sourceCanvas, overlayCanvas);
+            throw err;
         }
-
-        const presenter = new WebGpuFramePresenter(sourceCanvas, overlayCanvas, device, context, textureFormat, sampler, pipeline, primitivePipeline, rectInstancePipeline, spritePipeline, spriteAlphaPipeline, glyphPipeline, indexedSpritePipeline, transformSpritePipeline, maskedSpritePipeline, alphaPipeline, modelFlatPipeline, gouraudPipeline, textureTrianglePipeline, adapterInfo, options);
-        device.lost?.then(info => {
-            console.warn(`[WebGPU] device lost: ${info.reason || 'unknown'} ${info.message || ''}`.trim());
-            presenter.disable();
-        });
-
-        return presenter;
     }
 
     present(imageData: ImageData, x: number, y: number): boolean {

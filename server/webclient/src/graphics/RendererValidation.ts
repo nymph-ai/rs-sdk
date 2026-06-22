@@ -455,7 +455,7 @@ async function runValidation(): Promise<void> {
         validationSampleInterval: 1
     });
     if (!presenter || !presenter.validationStats?.enabled) {
-        throw new Error(`WebGPU unavailable: ${presenter?.validationStats?.lastError || 'no presenter'}`);
+        throw new Error(`WebGPU unavailable: ${presenter?.validationStats?.lastError || WebGpuFramePresenter.lastCreateError || 'no presenter'}`);
     }
 
     const cases = [
@@ -485,7 +485,7 @@ async function runValidation(): Promise<void> {
         packetReplay: true
     });
     if (!packetPresenter || !packetPresenter.validationStats?.enabled || !packetPresenter.packetReplayStats.enabled) {
-        throw new Error(`WebGPU packet replay unavailable: ${packetPresenter?.validationStats?.lastError || packetPresenter?.packetReplayStats.lastError || 'no presenter'}`);
+        throw new Error(`WebGPU packet replay unavailable: ${packetPresenter?.validationStats?.lastError || packetPresenter?.packetReplayStats.lastError || WebGpuFramePresenter.lastCreateError || 'no presenter'}`);
     }
 
     let previousSamples = packetPresenter.validationStats.samplesCompared;

@@ -67,10 +67,9 @@ type ValidationState = {
     error?: string;
 };
 
-type ManagedDisplay = {
+type BrowserPresentation = {
     env: Record<string, string>;
-    proc: ReturnType<typeof Bun.spawn> | null;
-    name: string | null;
+    args: string[];
 };
 
 function sleep(ms: number): Promise<void> {
@@ -107,86 +106,22 @@ async function commandExists(command: string): Promise<boolean> {
     return await proc.exited === 0;
 }
 
-async function unixSocketExists(path: string): Promise<boolean> {
-    const proc = Bun.spawn(['sh', '-lc', `test -S ${path}`], {
-        stdout: 'ignore',
-        stderr: 'ignore'
-    });
-    return await proc.exited === 0;
-}
-
-async function xDisplayReady(display: string, hasXdpyinfo: boolean): Promise<boolean> {
-    if (hasXdpyinfo) {
-        const proc = Bun.spawn(['xdpyinfo', '-display', display], {
-            stdout: 'ignore',
-            stderr: 'ignore'
-        });
-        return await proc.exited === 0;
-    }
-
-    return await unixSocketExists(`/tmp/.X11-unix/X${display.slice(1)}`);
-}
-
-async function findFreeXDisplay(): Promise<string> {
-    for (let display = 90; display < 190; display++) {
-        const lockExists = await Bun.file(`/tmp/.X${display}-lock`).exists();
-        const socketExists = await unixSocketExists(`/tmp/.X11-unix/X${display}`);
-        if (!lockExists && !socketExists) {
-            return `:${display}`;
-        }
-    }
-
-    throw new Error('No free X display number found for renderer validation');
-}
-
-async function waitForXDisplay(display: string, proc: ReturnType<typeof Bun.spawn>, timeoutMs: number): Promise<void> {
-    const hasXdpyinfo = await commandExists('xdpyinfo');
-    const deadline = Date.now() + timeoutMs;
-    let exited: number | null = null;
-    proc.exited.then(code => {
-        exited = code;
-    }).catch(() => {
-        exited = -1;
-    });
-
-    while (Date.now() < deadline) {
-        if (await xDisplayReady(display, hasXdpyinfo)) {
-            return;
-        }
-        if (exited !== null) {
-            throw new Error(`Xvfb exited before display ${display} became ready (code ${exited})`);
-        }
-        await sleep(50);
-    }
-
-    throw new Error(`Timed out waiting for Xvfb display ${display}`);
-}
-
-async function startManagedDisplay(): Promise<ManagedDisplay> {
+function getBrowserPresentation(): BrowserPresentation {
     if (process.env.RENDERER_VALIDATION_DISPLAY) {
-        return { env: { DISPLAY: process.env.RENDERER_VALIDATION_DISPLAY }, proc: null, name: process.env.RENDERER_VALIDATION_DISPLAY };
+        return {
+            env: { DISPLAY: process.env.RENDERER_VALIDATION_DISPLAY },
+            args: ['--ozone-platform=x11']
+        };
     }
 
-    if (process.platform !== 'linux') {
-        return { env: {}, proc: null, name: null };
+    if (process.platform === 'linux') {
+        return {
+            env: {},
+            args: ['--headless=new', '--ozone-platform=headless', '--disable-vulkan-surface']
+        };
     }
 
-    if (!(await commandExists('Xvfb'))) {
-        throw new Error('Xvfb is required for Linux hardware WebGPU renderer validation. Install Xvfb or set RENDERER_VALIDATION_DISPLAY to an existing X11 display.');
-    }
-
-    const display = await findFreeXDisplay();
-    const proc = Bun.spawn(['Xvfb', display, '-screen', '0', '1280x720x24', '-nolisten', 'tcp'], {
-        stdout: 'ignore',
-        stderr: 'ignore'
-    });
-    try {
-        await waitForXDisplay(display, proc, 5_000);
-    } catch (err) {
-        await stopProcess(proc);
-        throw err;
-    }
-    return { env: { DISPLAY: display }, proc, name: display };
+    return { env: {}, args: ['--headless=new'] };
 }
 
 async function findChrome(): Promise<string | null> {
@@ -347,13 +282,13 @@ async function main(): Promise<void> {
         }
     });
 
-    let managedDisplay: ManagedDisplay | null = null;
     let chromeProc: ReturnType<typeof Bun.spawn> | null = null;
     try {
         const userDataDir = `/tmp/rs-sdk-renderer-validation-${process.pid}`;
-        managedDisplay = await startManagedDisplay();
+        const presentation = getBrowserPresentation();
         const chromeArgs = [
             chrome,
+            ...presentation.args,
             '--no-sandbox',
             '--disable-gpu-sandbox',
             '--no-first-run',
@@ -373,13 +308,8 @@ async function main(): Promise<void> {
             `--user-data-dir=${userDataDir}`,
             `http://localhost:${port}/`
         ];
-        if (managedDisplay.name) {
-            chromeArgs.splice(1, 0, '--ozone-platform=x11');
-        } else {
-            chromeArgs.splice(1, 0, '--headless=new');
-        }
 
-        const chromeEnv = { ...process.env, ...managedDisplay.env };
+        const chromeEnv = { ...process.env, ...presentation.env };
         if (process.env.RENDERER_VALIDATION_VK_DRIVER_FILES && !chromeEnv.VK_DRIVER_FILES) {
             chromeEnv.VK_DRIVER_FILES = process.env.RENDERER_VALIDATION_VK_DRIVER_FILES;
         }
@@ -401,7 +331,6 @@ async function main(): Promise<void> {
         console.log(`Renderer validation passed: adapter=${adapterLabel}, packetsReplayed=${packetStats.packetsReplayed}, cpuImageDataUploads=${packetStats.cpuImageDataUploads}, cpuRasterWriteBypasses=${packetStats.cpuRasterWriteBypasses}, rectInstances=${packetStats.gpuRectInstancesReplayed}, rectBindGroupReuses=${packetStats.gpuRectBindGroupsReused}, dynamicIndexed=${packetStats.gpuDynamicIndexedSpritesReplayed}, glyphs=${packetStats.gpuGlyphSpritesReplayed}, modelFlat=${packetStats.gpuModelFlatTrianglesReplayed}, retainedDepth=${packetStats.gpuRetainedDepthPassesReplayed}, frameSubmits=${packetStats.gpuFrameCommandSubmits}, renderPasses=${packetStats.gpuRenderPassesEncoded}, bindGroups=${packetStats.gpuBindGroupsCreated}, bufferWrites=${packetStats.gpuBufferWrites}, uniformWrites=${packetStats.gpuUniformBufferWrites}, textureCopies=${packetStats.gpuTextureCopies}, frameUniformBytes=${packetStats.gpuFrameUniformBytesAllocated}, frameVertexBytes=${packetStats.gpuFrameVertexBytesAllocated}, directDraws=${packetStats.gpuDirectDrawsReplayed}, directPasses=${packetStats.gpuDirectRenderPassesReplayed}, alphaStorageDraws=${packetStats.gpuAlphaStorageDrawsReplayed}, alphaBindGroupReuses=${packetStats.gpuAlphaBindGroupsReused}, gouraudStorageDraws=${packetStats.gpuGouraudStorageDrawsReplayed}, gouraudBindGroupReuses=${packetStats.gpuGouraudBindGroupsReused}, glyphStorageDraws=${packetStats.gpuGlyphStorageDrawsReplayed}, glyphBindGroupReuses=${packetStats.gpuGlyphBindGroupsReused}, spriteFamilyStorageDraws=${packetStats.gpuSpriteFamilyStorageDrawsReplayed}, spriteFamilyBindGroupReuses=${packetStats.gpuSpriteFamilyBindGroupsReused}, triangleStorageDraws=${packetStats.gpuTriangleStorageDrawsReplayed}, triangleBindGroupReuses=${packetStats.gpuTriangleBindGroupsReused}, nativeFlat=${packetStats.nativeFlatTrianglesReplayed}, nativeGouraud=${packetStats.nativeGouraudTrianglesReplayed}, nativeTexture=${packetStats.nativeTextureTrianglesReplayed}, framesFailed=${packetStats.framesFailed}`);
     } finally {
         await stopProcess(chromeProc);
-        await stopProcess(managedDisplay?.proc);
         await stopProcess(server);
     }
 }
