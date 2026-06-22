@@ -290,7 +290,17 @@ export default class OnDemand extends OnDemandProvider {
             return;
         }
 
-        const worker = new Worker(new URL('./ondemandworker.js', import.meta.url), { type: 'module' });
+        // Browser build loads the bundled out/bot/ondemandworker.js. When the
+        // client runs from TypeScript source under bun (headless), there is no
+        // bundle and bun's worker module graph gives a re-export shim a detached
+        // `self` (its message listener never fires). Point bun directly at the
+        // real worker source so its top-level self.addEventListener binds to the
+        // live worker scope.
+        const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
+        const workerUrl = isBun
+            ? new URL('./OnDemandWorker.ts', import.meta.url)
+            : new URL('./ondemandworker.js', import.meta.url);
+        const worker = new Worker(workerUrl, { type: 'module' });
         this.worker = worker;
         this.lastIngame = this.app.ingame;
 
