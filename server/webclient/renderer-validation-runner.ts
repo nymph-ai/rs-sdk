@@ -65,6 +65,15 @@ type ValidationState = {
     passed: boolean;
     results: ValidationResult[];
     error?: string;
+    artifacts?: {
+        packetReplay?: {
+            width: number;
+            height: number;
+            dynamicSeed: number;
+            cpuImageData: number[];
+            snapshot: unknown;
+        };
+    };
 };
 
 type BrowserPresentation = {
@@ -265,6 +274,45 @@ function validateResult(state: ValidationState): void {
     }
 }
 
+async function writeArtifacts(state: ValidationState): Promise<void> {
+    const artifactDir = process.env.RENDERER_VALIDATION_ARTIFACT_DIR;
+    if (!artifactDir) {
+        return;
+    }
+
+    const packetReplay = state.artifacts?.packetReplay;
+    if (!packetReplay) {
+        throw new Error('Renderer validation did not expose packet replay artifacts');
+    }
+
+    const mkdir = Bun.spawn(['mkdir', '-p', artifactDir]);
+    if (await mkdir.exited !== 0) {
+        throw new Error(`Failed to create artifact dir ${artifactDir}`);
+    }
+
+    await Bun.write(`${artifactDir}/packet-replay-snapshot.json`, JSON.stringify(packetReplay.snapshot));
+    await Bun.write(`${artifactDir}/packet-replay-meta.json`, JSON.stringify({
+        width: packetReplay.width,
+        height: packetReplay.height,
+        dynamicSeed: packetReplay.dynamicSeed
+    }, null, 2));
+
+    const rgba = packetReplay.cpuImageData;
+    const rgb = new Uint8Array(packetReplay.width * packetReplay.height * 3);
+    for (let src = 0, dst = 0; src < rgba.length; src += 4, dst += 3) {
+        rgb[dst] = rgba[src] & 0xff;
+        rgb[dst + 1] = rgba[src + 1] & 0xff;
+        rgb[dst + 2] = rgba[src + 2] & 0xff;
+    }
+
+    const header = new TextEncoder().encode(`P6\n${packetReplay.width} ${packetReplay.height}\n255\n`);
+    const ppm = new Uint8Array(header.length + rgb.length);
+    ppm.set(header);
+    ppm.set(rgb, header.length);
+    await Bun.write(`${artifactDir}/packet-replay-cpu.ppm`, ppm);
+    console.log(`Renderer validation artifacts wrote ${artifactDir}`);
+}
+
 async function main(): Promise<void> {
     const port = parsePort('RENDERER_VALIDATION_PORT', DEFAULT_PORT);
     const cdpPort = parsePort('RENDERER_VALIDATION_CDP_PORT', DEFAULT_CDP_PORT);
@@ -325,6 +373,7 @@ async function main(): Promise<void> {
         const target = await getValidationTarget(cdpPort, pageUrl);
         const state = await pollValidation(target);
         validateResult(state);
+        await writeArtifacts(state);
         const packetStats = state.results.find(result => result.name === 'packet-replay-2d-primitives')!.packetReplayStats!;
         const adapterInfo = state.results.find(result => result.name === 'packet-replay-2d-primitives')!.stats!.adapterInfo!;
         const adapterLabel = [adapterInfo.vendor, adapterInfo.architecture, adapterInfo.device, adapterInfo.description].filter(Boolean).join('/');

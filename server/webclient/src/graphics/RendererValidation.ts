@@ -14,6 +14,16 @@ type ValidationResult = {
     evidence?: Record<string, number>;
 };
 
+type RendererValidationArtifacts = {
+    packetReplay?: {
+        width: number;
+        height: number;
+        dynamicSeed: number;
+        cpuImageData: number[];
+        snapshot: unknown;
+    };
+};
+
 const validationDynamicSpriteKey = {};
 
 declare global {
@@ -23,6 +33,7 @@ declare global {
             passed: boolean;
             results: ValidationResult[];
             error?: string;
+            artifacts?: RendererValidationArtifacts;
         };
     }
 }
@@ -64,6 +75,30 @@ function pixelsToImageData(pixels: Int32Array, width: number, height: number): I
     }
 
     return imageData;
+}
+
+function bytesForJson(bytes: Uint8Array): number[] {
+    return Array.from(bytes);
+}
+
+function snapshotForJson(snapshot: ReturnType<typeof gpuRenderPackets.snapshot>): unknown {
+    return {
+        ...snapshot,
+        spriteResources: snapshot.spriteResources.map(resource => ({ ...resource, rgba: bytesForJson(resource.rgba) })),
+        colourTableResource: snapshot.colourTableResource ? { ...snapshot.colourTableResource, rgba: bytesForJson(snapshot.colourTableResource.rgba) } : null,
+        textureResources: snapshot.textureResources.map(resource => ({
+            ...resource,
+            indexRgba: bytesForJson(resource.indexRgba),
+            paletteRgba: bytesForJson(resource.paletteRgba)
+        })),
+        indexedSpriteResources: snapshot.indexedSpriteResources.map(resource => ({
+            ...resource,
+            intensityRgba: bytesForJson(resource.intensityRgba),
+            paletteRgba: bytesForJson(resource.paletteRgba),
+            lineOffsetRgba: bytesForJson(resource.lineOffsetRgba)
+        })),
+        glyphResources: snapshot.glyphResources.map(resource => ({ ...resource, maskRgba: bytesForJson(resource.maskRgba) }))
+    };
 }
 
 function makeDynamicValidationSprite(seed: number): { intensities: Uint8Array; palette: Int32Array; lineOffsets: Int32Array } {
@@ -516,9 +551,10 @@ async function runValidation(): Promise<void> {
     gpuRenderPackets.setEnabled(true);
     gpuRenderPackets.setSkipCpuRasterWrites(true);
     makePacketReplayFrame(width, height, true, 2);
-    nativeFlatTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
-    nativeGouraudTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleGouraud' && packet.gpuRasterize).length;
-    nativeTextureTrianglePackets += gpuRenderPackets.snapshot().packets.filter(packet => packet.kind === 'triangleTexture' && packet.gpuRasterize).length;
+    const packetSnapshotUpdated = gpuRenderPackets.snapshot();
+    nativeFlatTrianglePackets += packetSnapshotUpdated.packets.filter(packet => packet.kind === 'triangleFlat' && packet.gpuRasterize).length;
+    nativeGouraudTrianglePackets += packetSnapshotUpdated.packets.filter(packet => packet.kind === 'triangleGouraud' && packet.gpuRasterize).length;
+    nativeTextureTrianglePackets += packetSnapshotUpdated.packets.filter(packet => packet.kind === 'triangleTexture' && packet.gpuRasterize).length;
     cpu.putImageData(packetFrameUpdated, 0, 0);
     packetPresenter.presentPackets(width, height, 0, 0, packetFrameUpdated);
     await waitForSample(packetPresenter.validationStats, previousSamples);
@@ -579,7 +615,16 @@ async function runValidation(): Promise<void> {
     window.__rsSdkRendererValidation = {
         done: true,
         passed: results.every(result => result.passed),
-        results
+        results,
+        artifacts: {
+            packetReplay: {
+                width,
+                height,
+                dynamicSeed: 2,
+                cpuImageData: Array.from(packetFrameUpdated.data),
+                snapshot: snapshotForJson(packetSnapshotUpdated)
+            }
+        }
     };
 }
 
