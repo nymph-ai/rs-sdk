@@ -15,6 +15,7 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import { gpuRenderPackets, recordSceneCamera } from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -970,6 +971,19 @@ export default class World {
         World.cameraCosX = Pix3D.cosTable[eyePitch];
         World.cameraSinY = Pix3D.sinTable[eyeYaw];
         World.cameraCosY = Pix3D.cosTable[eyeYaw];
+
+        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            // NYM-210: one camera per frame, shared by every scene instance.
+            // pitch = cameraSinX/CosX, yaw = cameraSinY/CosY, origin = Pix3D origin.
+            recordSceneCamera(
+                World.cameraSinX,
+                World.cameraCosX,
+                World.cameraSinY,
+                World.cameraCosY,
+                Pix3D.originX,
+                Pix3D.originY,
+            );
+        }
 
         World.visBackingDirty = World.visBacking[((eyePitch - 128) / 32) | 0][(eyeYaw / 64) | 0];
         World.cx = eyeX;

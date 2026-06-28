@@ -78,6 +78,10 @@ export default class Pix3D extends Pix2D {
         this.originY = (height / 2) | 0;
     }
 
+    static recordGpuColourTable(): void {
+        recordColourTable(this.colourTable, this.colourTableVersion);
+    }
+
     static clearTexels(): void {
         this.texelPool = null;
         this.activeTexels.fill(null);

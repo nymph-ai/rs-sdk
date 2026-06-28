@@ -2,7 +2,7 @@ import AnimBase, { AnimTransform } from '#/dash3d/AnimBase.js';
 import AnimFrame from '#/dash3d/AnimFrame.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordModelFlatTriangle } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordModelFlatTriangle, recordModelGouraudTriangle, recordModelGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
 
 import Packet from '#/io/Packet.js';
 
@@ -101,6 +101,10 @@ export default class Model extends ModelSource {
     static vertexScreenX: Int32Array = new Int32Array(4096);
     static vertexScreenY: Int32Array = new Int32Array(4096);
     static vertexScreenZ: Int32Array = new Int32Array(4096);
+
+    // NYM-210: monotonic id assigned per Model instance for the GPU geometry
+    // cache (object identity is stable for static scenery built once per region).
+    static nextSceneGeomId: number = 1;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -1761,6 +1765,30 @@ export default class Model extends ModelSource {
             return;
         }
 
+        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            // NYM-210: the model passed bounding-cylinder culling (cheap, game
+            // logic). Emit its geometry once (cached by id) + a per-frame
+            // instance, then bail BEFORE the per-vertex CPU projection loop —
+            // the GPU does projection/lighting/raster. This is where the ~65ms
+            // renderAll cost disappears.
+            let geomId: number = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                geomId = Model.nextSceneGeomId++;
+                (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+            recordModelGeometryUpload(geomId, this);
+            recordSceneInstance(
+                geomId,
+                Pix3D.sinTable[yaw & 0x7ff],
+                Pix3D.cosTable[yaw & 0x7ff],
+                relativeX,
+                relativeY,
+                relativeZ,
+                256,
+            );
+            return;
+        }
+
         const radiusZ: number = radiusCosEyePitch + ((this.minY * sinEyePitch) >> 16);
 
         let clipped: boolean = midZ - radiusZ <= 50;
@@ -2131,6 +2159,37 @@ export default class Model extends ModelSource {
         }
 
         if (type === 0) {
+            if (Model.gpuModelTransformActive && this.pointX && this.pointY && this.pointZ && gpuRenderPackets.shouldRecordModelGouraudTriangles()) {
+                Pix3D.recordGpuColourTable();
+                recordModelGouraudTriangle(
+                    this.pointX[a], this.pointY[a], this.pointZ[a],
+                    this.pointX[b], this.pointY[b], this.pointZ[b],
+                    this.pointX[c], this.pointY[c], this.pointZ[c],
+                    Model.gpuModelSinYaw,
+                    Model.gpuModelCosYaw,
+                    Model.gpuModelSinEyePitch,
+                    Model.gpuModelCosEyePitch,
+                    Model.gpuModelSinEyeYaw,
+                    Model.gpuModelCosEyeYaw,
+                    Model.gpuModelRelativeX,
+                    Model.gpuModelRelativeY,
+                    Model.gpuModelRelativeZ,
+                    Pix3D.originX,
+                    Pix3D.originY,
+                    this.faceColourA![face],
+                    this.faceColourB![face],
+                    this.faceColourC![face],
+                    Pix3D.trans === 0 ? 256 : 256 - Pix3D.trans,
+                    Pix3D.lowDetail,
+                    Pix3D.hclip,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
             Pix3D.gouraudTriangle(
                 Model.vertexScreenX[a], Model.vertexScreenX[b], Model.vertexScreenX[c],
                 Model.vertexScreenY[a], Model.vertexScreenY[b], Model.vertexScreenY[c],

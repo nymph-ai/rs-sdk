@@ -33,6 +33,7 @@ export default class PixMap {
     }
 
     draw(x: number, y: number): void {
+        gpuRenderPackets.recordSurfacePresent(this.data, this.width, this.height, x, y);
         if (presentGpuRenderPackets(this.width, this.height, x, y, this.ctx, this.data)) {
             return;
         }
