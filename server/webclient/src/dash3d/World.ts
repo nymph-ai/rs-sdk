@@ -985,6 +985,10 @@ export default class World {
         World.cameraCosY = Pix3D.cosTable[eyeYaw];
 
         if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            // NYM-210: scene mode bypasses the gouraud/model CPU path that normally
+            // emits the HSL->RGB colour table, so emit it here (deduped by version)
+            // — else the GPU scene binds the black fallback table => invisible geometry.
+            Pix3D.recordGpuColourTable();
             // NYM-210: one camera per frame, shared by every scene instance.
             // pitch = cameraSinX/CosX, yaw = cameraSinY/CosY, origin = Pix3D origin.
             recordSceneCamera(
