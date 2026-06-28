@@ -11,7 +11,10 @@
 //   RS_BOT / RS_PASS  bot login (default headlessbot / test)
 //   FRAME_WIDTH/HEIGHT  dma-buf size (must match what publish negotiates; 1920x1080)
 //   AURAI_FRAMES      stop after N submitted frames (0 = forever, default 0)
-//   AURAI_PACKET_DUMP_DIR  optional .aur2 packet dump directory (renderer can be disabled)
+//   AURAI_DUMP_BLOB_DIR optional .aur2 packet dump directory (renderer can be disabled)
+//   AURAI_DUMP_BLOB_START first submitted frame index to dump (default 0)
+//   AURAI_DUMP_BLOB_LIMIT max dumped frames (0 = unlimited, default 0)
+//   AURAI_PACKET_DUMP_DIR legacy alias for AURAI_DUMP_BLOB_DIR
 //   PW_FPS            PipeWire node nominal fps (default 30)
 //   RS_TIMEOUT_MS     in-game wait timeout (default 90000)
 
@@ -66,7 +69,9 @@ const MODEL_GOURAUD_PACKETS = envEnabled(process.env.AURAI_MODEL_GOURAUD_PACKETS
 // NYM-210: emit a GPU scene description (geometry cached by id + per-frame
 // instances/camera) instead of pre-projected triangles; CPU skips projection.
 const SCENE_INSTANCE_MODE = envEnabled(process.env.AURAI_SCENE_INSTANCE_MODE, false);
-const PACKET_DUMP_DIR = process.env.AURAI_PACKET_DUMP_DIR ?? '';
+const PACKET_DUMP_DIR = process.env.AURAI_DUMP_BLOB_DIR ?? process.env.AURAI_PACKET_DUMP_DIR ?? '';
+const PACKET_DUMP_START = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_START ?? 0) || 0);
+const PACKET_DUMP_LIMIT = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_LIMIT ?? 0) || 0);
 const CPU_REF_PPM = process.env.AURAI_CPU_REF_PPM ?? '';
 const CPU_REF_FRAME = Number(process.env.AURAI_CPU_REF_FRAME ?? 5);
 const INIT_RENDERER = (process.env.AURAI_INIT_RENDERER ?? 'true') !== 'false';
@@ -288,6 +293,14 @@ const sentGlyphVersions = new Map<number, number>();
 const sentTextureVersions = new Map<number, number>();
 const sentIndexedSpriteVersions = new Map<number, number>();
 let sentColourTableVersion: number | null = null;
+
+function resetSentResources(): void {
+    sentSpriteVersions.clear();
+    sentGlyphVersions.clear();
+    sentTextureVersions.clear();
+    sentIndexedSpriteVersions.clear();
+    sentColourTableVersion = null;
+}
 
 type PackResult = {
     blob: Uint8Array;
@@ -901,6 +914,10 @@ function packSnapshot(snap: any): PackResult {
     let nTextureTris = 0;
     let nModelFlat = 0;
     let nModelGouraud = 0;
+    let nSceneGeometryUploads = 0;
+    let nSceneInstances = 0;
+    let nSceneCameras = 0;
+    let nSceneLights = 0;
     let nCpuSpanRects = 0;
     let nSkippedNonGpuTris = 0;
     const retainedWorldStats: RetainedWorldWriteStats = { refs: 0, refRuns: 0, sets: 0, clears: 0, evicts: 0 };
@@ -1087,30 +1104,33 @@ function packSnapshot(snap: any): PackResult {
                 w.u32(nf >>> 0);
                 for (let i = 0; i < nf; i++) {
                     w.u32(p.faceA[i] >>> 0); w.u32(p.faceB[i] >>> 0); w.u32(p.faceC[i] >>> 0);
-                    w.u32((p.faceColour ? p.faceColour[i] : 0) >>> 0);
+                    const ca = p.faceColourA ? p.faceColourA[i] : (p.faceColour ? p.faceColour[i] : 0);
+                    const cb = p.faceColourB ? p.faceColourB[i] : ca;
+                    const cc = p.faceColourC ? p.faceColourC[i] : ca;
+                    w.u32(ca >>> 0); w.u32(cb >>> 0); w.u32(cc >>> 0);
                     w.i32(p.faceType ? (p.faceType[i] | 0) : 0);
                     w.i32(p.faceAlpha ? (p.faceAlpha[i] | 0) : 0);
                     w.i32(p.facePriority ? (p.facePriority[i] | 0) : 0);
                 }
-                nPackets++; break;
+                nPackets++; nSceneGeometryUploads++; break;
             }
             case 'sceneInstance':
                 writePacketTag(T_SCENE_INSTANCE);
                 w.u32(p.geomId >>> 0); w.i32(p.sinYaw | 0); w.i32(p.cosYaw | 0);
                 w.i32(p.relativeX | 0); w.i32(p.relativeY | 0); w.i32(p.relativeZ | 0);
                 w.i32((p.alpha ?? 256) | 0); w.u32((p.flags ?? 0) >>> 0);
-                nPackets++; break;
+                nPackets++; nSceneInstances++; break;
             case 'sceneCamera':
                 writePacketTag(T_SCENE_CAMERA);
                 w.i32(p.sinEyePitch | 0); w.i32(p.cosEyePitch | 0);
                 w.i32(p.sinEyeYaw | 0); w.i32(p.cosEyeYaw | 0);
                 w.i32(p.originX | 0); w.i32(p.originY | 0);
-                nPackets++; break;
+                nPackets++; nSceneCameras++; break;
             case 'sceneLight':
                 writePacketTag(T_SCENE_LIGHT);
                 w.i32(p.ambient | 0); w.i32(p.contrast | 0);
                 w.i32(p.lightX | 0); w.i32(p.lightY | 0); w.i32(p.lightZ | 0);
-                nPackets++; break;
+                nPackets++; nSceneLights++; break;
             default:
                 break;
         }
@@ -1126,6 +1146,10 @@ function packSnapshot(snap: any): PackResult {
         nTextureTris,
         nModelFlat,
         nModelGouraud,
+        nSceneGeometryUploads,
+        nSceneInstances,
+        nSceneCameras,
+        nSceneLights,
         nCpuSpanRects,
         nSkippedNonGpuTris,
         retainedDeltaSurfaces: retainedDelta.deltaSurfaces,
@@ -1147,7 +1171,7 @@ function packSnapshot(snap: any): PackResult {
 async function main() {
     if (PACKET_DUMP_DIR) {
         await mkdir(PACKET_DUMP_DIR, { recursive: true });
-        log(`packet dump enabled -> ${PACKET_DUMP_DIR}`);
+        log(`packet dump enabled -> ${PACKET_DUMP_DIR} start=${PACKET_DUMP_START} limit=${PACKET_DUMP_LIMIT}`);
     }
 
     if (!INIT_RENDERER_AFTER_INGAME) {
@@ -1157,6 +1181,7 @@ async function main() {
     log('importing client modules…');
     const { Client } = await import('#/client/Client.js');
     const { gpuRenderPackets } = await import('#/graphics/GpuRenderPackets.js');
+    const { default: Pix3D } = await import('#/dash3d/Pix3D.js');
     gpuRenderPackets.setEnabled(true);
     gpuRenderPackets.setSkipCpuRasterWrites(SKIP_CPU_RASTER_WRITES);
     gpuRenderPackets.setModelGouraudTriangles(MODEL_GOURAUD_PACKETS);
@@ -1227,6 +1252,7 @@ async function main() {
     const ClientClass: any = (client as any).constructor;
     let lastDrawCycle = -1;
     let lastSubmitAt = 0;
+    let dumpResourceKeyframeDone = false;
 
     while (FRAME_LIMIT === 0 || frame < FRAME_LIMIT) {
         // Wait for either a game redraw or enough pending packet work to submit.
@@ -1257,6 +1283,12 @@ async function main() {
             lastDrawCycle = dc;
         }
 
+        const dumpingThisFrame = PACKET_DUMP_DIR && frame >= PACKET_DUMP_START && (PACKET_DUMP_LIMIT === 0 || frame < PACKET_DUMP_START + PACKET_DUMP_LIMIT);
+        if (dumpingThisFrame && !dumpResourceKeyframeDone) {
+            resetSentResources();
+            Pix3D.recordGpuColourTable();
+            dumpResourceKeyframeDone = true;
+        }
         const tSnap = performance.now();
         const snap = gpuRenderPackets.snapshot();
         const tPack = performance.now();
@@ -1287,6 +1319,10 @@ async function main() {
             nTextureTris,
             nModelFlat,
             nModelGouraud,
+            nSceneGeometryUploads,
+            nSceneInstances,
+            nSceneCameras,
+            nSceneLights,
             nCpuSpanRects,
             nSkippedNonGpuTris,
             retainedDeltaSurfaces,
@@ -1303,7 +1339,7 @@ async function main() {
             resources,
             commitResources
         } = packSnapshot(snap);
-        if (PACKET_DUMP_DIR) {
+        if (dumpingThisFrame) {
             const frameName = `frame-${String(frame).padStart(6, '0')}.aur2`;
             await Bun.write(`${PACKET_DUMP_DIR}/${frameName}`, blob);
         }
@@ -1332,6 +1368,7 @@ async function main() {
 
         if (frame === 1) {
             log(`frame 0: packets=${nPackets}/${inputPackets} tris=${nTris} textureTris=${nTextureTris} modelFlat=${nModelFlat} modelGouraud=${nModelGouraud} cpuSpanRects=${nCpuSpanRects} ` +
+                `sceneGeom=${nSceneGeometryUploads} sceneInstances=${nSceneInstances} sceneCameras=${nSceneCameras} sceneLights=${nSceneLights} ` +
                 `skippedNonGpuTris=${nSkippedNonGpuTris} ` +
                 `retainedDeltaSurfaces=${retainedDeltaSurfaces} retainedDeltaSkipped=${retainedDeltaPacketsSkipped} ` +
                 `retainedCacheableSurfaces=${retainedCacheableSurfaces} retainedHashSkipped=${retainedHashSkippedSurfaces}/${retainedHashSkippedPackets} ` +
@@ -1359,6 +1396,7 @@ async function main() {
                 process.exit(132);
             }
             log(`frame ${frame} gameFps=${fps.toFixed(1)} packets=${nPackets}/${inputPackets} tris=${nTris} textureTris=${nTextureTris} modelFlat=${nModelFlat} modelGouraud=${nModelGouraud} ` +
+                `sceneGeom=${nSceneGeometryUploads} sceneInstances=${nSceneInstances} sceneCameras=${nSceneCameras} sceneLights=${nSceneLights} ` +
                 `cpuSpanRects=${nCpuSpanRects} skippedNonGpuTris=${nSkippedNonGpuTris} ` +
                 `retainedDeltaSurfaces=${retainedDeltaSurfaces} avgRetainedDeltaSurfaces=${(retainedDeltaSurfacesTotal / frame).toFixed(1)} ` +
                 `retainedDeltaSkipped=${retainedDeltaPacketsSkipped} avgRetainedDeltaSkipped=${(retainedDeltaPacketsSkippedTotal / frame).toFixed(1)} ` +

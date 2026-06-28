@@ -1062,7 +1062,9 @@ export function recordModelGeometryUpload(geomId: number, model: any): void {
             faceA: model.faceVertexA,
             faceB: model.faceVertexB,
             faceC: model.faceVertexC,
-            faceColour: model.faceColour,
+            faceColourA: model.faceColour,
+            faceColourB: model.faceColour,
+            faceColourC: model.faceColour,
             faceType: model.faceRenderType,
             faceAlpha: model.faceAlpha,
             facePriority: model.facePriority,
@@ -1076,8 +1078,8 @@ export function isSceneGeometryUploaded(geomId: number): boolean {
 }
 
 /// NYM-210 Slice 2: upload a ground tile's world-space mesh once (cached by id).
-/// Terrain is gouraud, but Slice 2a flat-shades each face (faceColourA) to reuse
-/// the model geometry path unchanged. Hidden faces (12345678) are dropped.
+/// Ground terrain mesh. Hidden faces (12345678) are dropped; the three face
+/// colour arrays are preserved so WGSL can interpolate RuneScape Gouraud.
 /// The instance projects it with yaw=0 + rel=-camera (world verts → camera-rel).
 export function recordGroundGeometryUpload(geomId: number, ground: any): void {
     if (!gpuRenderPackets.enabled || sceneGeometryUploaded.has(geomId)) {
@@ -1088,7 +1090,9 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
     const faceA: number[] = [];
     const faceB: number[] = [];
     const faceC: number[] = [];
-    const faceColour: number[] = [];
+    const faceColourA: number[] = [];
+    const faceColourB: number[] = [];
+    const faceColourC: number[] = [];
     for (let v = 0; v < nf; v++) {
         const colour = ground.faceColourA[v];
         if (colour === 12345678) {
@@ -1097,7 +1101,9 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
         faceA.push(ground.faceVertexA[v]);
         faceB.push(ground.faceVertexB[v]);
         faceC.push(ground.faceVertexC[v]);
-        faceColour.push(colour);
+        faceColourA.push(colour);
+        faceColourB.push(ground.faceColourB[v]);
+        faceColourC.push(ground.faceColourC[v]);
     }
     pushPacket(
         {
@@ -1111,7 +1117,48 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceA,
             faceB,
             faceC,
-            faceColour,
+            faceColourA,
+            faceColourB,
+            faceColourC,
+            faceType: null,
+            faceAlpha: null,
+            facePriority: null,
+        } as any,
+        false,
+    );
+}
+
+export function recordQuickGroundRegionGeometryUpload(
+    geomId: number,
+    pointX: number[],
+    pointY: number[],
+    pointZ: number[],
+    faceA: number[],
+    faceB: number[],
+    faceC: number[],
+    faceColourA: number[],
+    faceColourB: number[],
+    faceColourC: number[],
+): void {
+    if (!gpuRenderPackets.enabled || sceneGeometryUploaded.has(geomId)) {
+        return;
+    }
+    sceneGeometryUploaded.add(geomId);
+    pushPacket(
+        {
+            kind: 'modelGeometryUpload',
+            geomId,
+            numPoints: pointX.length,
+            pointX,
+            pointY,
+            pointZ,
+            numFaces: faceA.length,
+            faceA,
+            faceB,
+            faceC,
+            faceColourA,
+            faceColourB,
+            faceColourC,
             faceType: null,
             faceAlpha: null,
             facePriority: null,

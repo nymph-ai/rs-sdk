@@ -15,7 +15,7 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordQuickGroundRegionGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -139,6 +139,9 @@ export default class World {
     private readonly groundh: Int32Array[][];
     private readonly squares: (Square | null)[][][];
     private readonly occlusionCycle: Int32Array[][];
+    private readonly sceneQuickGroundGeomIds: Int32Array;
+    private readonly sceneQuickGroundEmittedCycle: Int32Array;
+    private sceneNextQuickGroundGeomId: number = 1;
 
     private dynamicCount: number = 0;
     private readonly dynamicSprites: (Sprite | null)[] = new TypedArray1d(5000, null);
@@ -154,8 +157,14 @@ export default class World {
         this.squares = new TypedArray3d(maxLevel, maxTileX, maxTileZ, null);
         this.occlusionCycle = new Int32Array3d(maxLevel, maxTileX + 1, maxTileZ + 1);
         this.groundh = levelHeightmaps;
+        this.sceneQuickGroundGeomIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundEmittedCycle = new Int32Array(maxLevel);
 
         this.resetMap();
+    }
+
+    private invalidateSceneQuickGroundRegions(): void {
+        this.sceneQuickGroundGeomIds.fill(0);
     }
 
     resetMap(): void {
@@ -178,6 +187,8 @@ export default class World {
         for (let i: number = 0; i < this.dynamicCount; i++) {
             this.dynamicSprites[i] = null;
         }
+
+        this.invalidateSceneQuickGroundRegions();
 
         this.dynamicCount = 0;
 
@@ -247,6 +258,7 @@ export default class World {
         colour2SW: number, colour2SE: number, colour2NE: number, colour2NW: number,
         overlay: number, underlay: number
     ): void {
+        this.invalidateSceneQuickGroundRegions();
         if (shape === TerrainOverlayShape.PLAIN) {
             for (let l: number = level; l >= 0; l--) {
                 if (!this.squares[l][x][z]) {
@@ -1934,7 +1946,104 @@ export default class World {
         }
     }
 
+    private emitQuickGroundRegion(level: number): void {
+        if (this.sceneQuickGroundEmittedCycle[level] === World.cycleNo) {
+            return;
+        }
+        this.sceneQuickGroundEmittedCycle[level] = World.cycleNo;
+
+        let geomId = this.sceneQuickGroundGeomIds[level];
+        if (geomId < 0) {
+            return;
+        }
+        if (geomId === 0) {
+            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
+            this.sceneQuickGroundGeomIds[level] = geomId;
+
+            const pointX: number[] = [];
+            const pointY: number[] = [];
+            const pointZ: number[] = [];
+            const faceA: number[] = [];
+            const faceB: number[] = [];
+            const faceC: number[] = [];
+            const faceColourA: number[] = [];
+            const faceColourB: number[] = [];
+            const faceColourC: number[] = [];
+
+            const colourFor = (ground: QuickGround, colour: number): number => {
+                if (ground.texture === -1) {
+                    return colour;
+                }
+                return this.getTable(TEXTURE_AVERAGE[ground.texture], colour);
+            };
+
+            const pushFace = (a: number, b: number, c: number, ca: number, cb: number, cc: number): void => {
+                faceA.push(a);
+                faceB.push(b);
+                faceC.push(c);
+                faceColourA.push(ca);
+                faceColourB.push(cb);
+                faceColourC.push(cc);
+            };
+
+            for (let x = 0; x < this.maxTileX; x++) {
+                for (let z = 0; z < this.maxTileZ; z++) {
+                    const tile = this.squares[level][x][z];
+                    const quick = tile?.quickGround;
+                    if (!quick) {
+                        continue;
+                    }
+
+                    const base = pointX.length;
+                    pointX.push(x << 7, (x << 7) + 128, (x << 7) + 128, x << 7);
+                    pointZ.push(z << 7, z << 7, (z << 7) + 128, (z << 7) + 128);
+                    pointY.push(
+                        this.groundh[level][x][z],
+                        this.groundh[level][x + 1][z],
+                        this.groundh[level][x + 1][z + 1],
+                        this.groundh[level][x][z + 1],
+                    );
+
+                    const sw = colourFor(quick, quick.colourSW);
+                    const se = colourFor(quick, quick.colourSE);
+                    const ne = colourFor(quick, quick.colourNE);
+                    const nw = colourFor(quick, quick.colourNW);
+                    if (quick.texture !== -1 || quick.colourNE !== 12345678) {
+                        pushFace(base + 2, base + 3, base + 1, ne, nw, se);
+                    }
+                    if (quick.texture !== -1 || quick.colourSW !== 12345678) {
+                        pushFace(base, base + 1, base + 3, sw, se, nw);
+                    }
+                }
+            }
+
+            if (faceA.length === 0) {
+                this.sceneQuickGroundGeomIds[level] = -1;
+                return;
+            }
+
+            recordQuickGroundRegionGeometryUpload(
+                geomId,
+                pointX,
+                pointY,
+                pointZ,
+                faceA,
+                faceB,
+                faceC,
+                faceColourA,
+                faceColourB,
+                faceColourC,
+            );
+        }
+
+        recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256);
+    }
+
     private renderQuickGround(ground: QuickGround, level: number, tileX: number, tileZ: number, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
+        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            this.emitQuickGroundRegion(level);
+            return;
+        }
         let x3: number;
         let x0: number = (x3 = (tileX << 7) - World.cx);
         let z1: number;
