@@ -1075,6 +1075,51 @@ export function isSceneGeometryUploaded(geomId: number): boolean {
     return sceneGeometryUploaded.has(geomId);
 }
 
+/// NYM-210 Slice 2: upload a ground tile's world-space mesh once (cached by id).
+/// Terrain is gouraud, but Slice 2a flat-shades each face (faceColourA) to reuse
+/// the model geometry path unchanged. Hidden faces (12345678) are dropped.
+/// The instance projects it with yaw=0 + rel=-camera (world verts → camera-rel).
+export function recordGroundGeometryUpload(geomId: number, ground: any): void {
+    if (!gpuRenderPackets.enabled || sceneGeometryUploaded.has(geomId)) {
+        return;
+    }
+    sceneGeometryUploaded.add(geomId);
+    const nf: number = ground.faceVertexA.length;
+    const faceA: number[] = [];
+    const faceB: number[] = [];
+    const faceC: number[] = [];
+    const faceColour: number[] = [];
+    for (let v = 0; v < nf; v++) {
+        const colour = ground.faceColourA[v];
+        if (colour === 12345678) {
+            continue; // hidden tile face
+        }
+        faceA.push(ground.faceVertexA[v]);
+        faceB.push(ground.faceVertexB[v]);
+        faceC.push(ground.faceVertexC[v]);
+        faceColour.push(colour);
+    }
+    pushPacket(
+        {
+            kind: 'modelGeometryUpload',
+            geomId,
+            numPoints: ground.vertexX.length,
+            pointX: ground.vertexX,
+            pointY: ground.vertexY,
+            pointZ: ground.vertexZ,
+            numFaces: faceA.length,
+            faceA,
+            faceB,
+            faceC,
+            faceColour,
+            faceType: null,
+            faceAlpha: null,
+            facePriority: null,
+        } as any,
+        false,
+    );
+}
+
 /// Per-frame instance referencing cached geometry (yaw + world position only).
 export function recordSceneInstance(
     geomId: number,

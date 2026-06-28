@@ -15,7 +15,7 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordSceneCamera } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -2101,6 +2101,21 @@ export default class World {
     }
 
     private renderGround(tileX: number, tileZ: number, ground: Ground, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
+        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            // NYM-210 Slice 2: terrain on GPU. Ground verts are WORLD-space; the
+            // GPU projects them with yaw=0 + rel=-camera (world → camera-relative),
+            // identical to the CPU path below. Geometry cached per Ground object.
+            let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                const w = World as unknown as { __nextGroundGeomId?: number };
+                w.__nextGroundGeomId = (w.__nextGroundGeomId ?? 1) + 1;
+                geomId = 0x40000000 | (w.__nextGroundGeomId & 0x3fffffff);
+                (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+            recordGroundGeometryUpload(geomId, ground);
+            recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256);
+            return;
+        }
         let vertexCount: number = ground.vertexX.length;
 
         for (let i: number = 0; i < vertexCount; i++) {
