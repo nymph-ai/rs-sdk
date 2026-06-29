@@ -2,7 +2,17 @@ import AnimBase, { AnimTransform } from '#/dash3d/AnimBase.js';
 import AnimFrame from '#/dash3d/AnimFrame.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordModelFlatTriangle, recordModelGouraudTriangle, recordModelGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
+import {
+    gpuRenderPackets,
+    recordModelAnimFrameUpload,
+    recordModelFlatTriangle,
+    recordModelGeometryUpload,
+    recordModelGouraudTriangle,
+    recordModelLabelMapUpload,
+    recordModelSkeletonUpload,
+    recordSceneInstance,
+    type SceneAnimOpPacket
+} from '#/graphics/GpuRenderPackets.js';
 
 import Packet from '#/io/Packet.js';
 
@@ -34,6 +44,17 @@ class Metadata {
 
     faceTextureAxisOffset: number = -1;
 }
+
+type SceneAnimationDescriptor = {
+    baseModel: Model;
+    skeleton: AnimBase | null;
+    skeletonId: number;
+    animFrameId: number;
+    ops: SceneAnimOpPacket[];
+    resizeX: number;
+    resizeY: number;
+    resizeZ: number;
+};
 
 export default class Model extends ModelSource {
     static loaded: number = 0;
@@ -91,6 +112,7 @@ export default class Model extends ModelSource {
     faceColourC: Int32Array | null = null;
 
     useAABBMouseCheck: boolean = false;
+    private sceneAnimation: SceneAnimationDescriptor | null = null;
     radius: number = 0;
     maxDepth: number = 0;
     minDepth: number = 0;
@@ -106,6 +128,10 @@ export default class Model extends ModelSource {
     // cache (object identity is stable for static scenery built once per region).
     static nextSceneGeomId: number = 1;
     private static readonly SCENE_DYNAMIC_GEOM_BIT: number = 0x80000000;
+    private static nextSceneSkeletonId: number = 1;
+    private static nextSceneAnimFrameId: number = 1;
+    private static readonly sceneSkeletonIds: WeakMap<AnimBase, number> = new WeakMap();
+    private static readonly sceneAnimFrameIds: Map<string, number> = new Map();
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -962,6 +988,147 @@ export default class Model extends ModelSource {
         this.faceTextureP = src.faceTextureP;
         this.faceTextureM = src.faceTextureM;
         this.faceTextureN = src.faceTextureN;
+        this.sceneAnimation = null;
+    }
+
+    private static sceneSkeletonId(skeleton: AnimBase | null): number {
+        if (!skeleton) {
+            return 0;
+        }
+        let id = Model.sceneSkeletonIds.get(skeleton);
+        if (!id) {
+            id = Model.nextSceneSkeletonId++;
+            Model.sceneSkeletonIds.set(skeleton, id);
+        }
+        return id;
+    }
+
+    private static maskHash(mask: Int32Array | null): string {
+        if (!mask) {
+            return 'none';
+        }
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < mask.length; i++) {
+            h ^= mask[i] >>> 0;
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        return `${mask.length}:${h}`;
+    }
+
+    private static appendFrameSceneOps(ops: SceneAnimOpPacket[], frame: AnimFrame | null, skeleton: AnimBase | null): void {
+        if (!frame || !skeleton || !frame.ti || !frame.tx || !frame.ty || !frame.tz || !skeleton.labels || !skeleton.type) {
+            return;
+        }
+        for (let i = 0; i < frame.size; i++) {
+            const group = frame.ti[i];
+            const labels = skeleton.labels[group];
+            if (!labels) {
+                continue;
+            }
+            ops.push({
+                type: skeleton.type[group] | 0,
+                x: frame.tx[i] | 0,
+                y: frame.ty[i] | 0,
+                z: frame.tz[i] | 0,
+                labels
+            });
+        }
+    }
+
+    private static appendMaskedSceneOps(ops: SceneAnimOpPacket[], primary: AnimFrame, secondary: AnimFrame, mask: Int32Array, skeleton: AnimBase | null): void {
+        if (!skeleton || !skeleton.type || !skeleton.labels) {
+            return;
+        }
+
+        let counter = 0;
+        let maskBase = mask[counter++];
+        if (primary.ti && primary.tx && primary.ty && primary.tz) {
+            for (let i = 0; i < primary.size; i++) {
+                const group = primary.ti[i];
+                while (group > maskBase) {
+                    maskBase = mask[counter++];
+                }
+                if (group !== maskBase || skeleton.type[group] === AnimTransform.ORIGIN) {
+                    ops.push({
+                        type: skeleton.type[group] | 0,
+                        x: primary.tx[i] | 0,
+                        y: primary.ty[i] | 0,
+                        z: primary.tz[i] | 0,
+                        labels: skeleton.labels[group]
+                    });
+                }
+            }
+        }
+
+        // CPU maskAnimate resets Model.oX/Y/Z before the secondary pass. A zero
+        // origin op with no labels gives the GPU deform kernel the same state.
+        ops.push({ type: AnimTransform.ORIGIN, x: 0, y: 0, z: 0, labels: null });
+
+        counter = 0;
+        maskBase = mask[counter++];
+        if (secondary.ti && secondary.tx && secondary.ty && secondary.tz) {
+            for (let i = 0; i < secondary.size; i++) {
+                const group = secondary.ti[i];
+                while (group > maskBase) {
+                    maskBase = mask[counter++];
+                }
+                if (group === maskBase || skeleton.type[group] === AnimTransform.ORIGIN) {
+                    ops.push({
+                        type: skeleton.type[group] | 0,
+                        x: secondary.tx[i] | 0,
+                        y: secondary.ty[i] | 0,
+                        z: secondary.tz[i] | 0,
+                        labels: skeleton.labels[group]
+                    });
+                }
+            }
+        }
+    }
+
+    setSceneAnimation(baseModel: Model, primaryId: number, secondaryId: number, mask: Int32Array | null, resizeX: number = 128, resizeY: number = 128, resizeZ: number = 128): void {
+        this.sceneAnimation = null;
+
+        if (!baseModel.labelVertices) {
+            return;
+        }
+
+        if (resizeX !== 128 || resizeY !== 128 || resizeZ !== 128) {
+            // Resized NPCs need a scale stage outside skeletal animation. Keep
+            // them on the existing dynamic bridge until that path is explicit.
+            return;
+        }
+
+        const primary = primaryId === -1 ? null : AnimFrame.get(primaryId);
+        const secondary = secondaryId === -1 ? null : AnimFrame.get(secondaryId);
+        const skeleton: AnimBase | null = primary?.base ?? secondary?.base ?? null;
+        const ops: SceneAnimOpPacket[] = [];
+
+        if (primary && secondary && mask) {
+            Model.appendMaskedSceneOps(ops, primary, secondary, mask, skeleton);
+        } else {
+            Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
+        }
+
+        const skeletonId = ops.length > 0 ? Model.sceneSkeletonId(skeleton) : 0;
+        let animFrameId = 0;
+        if (ops.length > 0) {
+            const key = `${primaryId}:${secondaryId}:${Model.maskHash(mask)}:${skeletonId}`;
+            animFrameId = Model.sceneAnimFrameIds.get(key) ?? 0;
+            if (!animFrameId) {
+                animFrameId = Model.nextSceneAnimFrameId++;
+                Model.sceneAnimFrameIds.set(key, animFrameId);
+            }
+        }
+        this.sceneAnimation = {
+            baseModel,
+            skeleton,
+            skeletonId,
+            animFrameId,
+            ops,
+            resizeX,
+            resizeY,
+            resizeZ
+        };
     }
 
     addPoint(src: Model, vertex: number) {
@@ -1774,8 +1941,16 @@ export default class Model extends ModelSource {
             // renderAll cost disappears.
             const entityKind: number = (typecode >>> 29) & 0x3;
             const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+            const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
+            const uploadModel = sceneAnimation?.baseModel ?? this;
             let geomId: number;
-            if (volatileEntityGeometry) {
+            if (sceneAnimation) {
+                geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+                if (geomId < 0) {
+                    geomId = Model.nextSceneGeomId++;
+                    (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+                }
+            } else if (volatileEntityGeometry) {
                 // Interim NYM-217 bridge: player/NPC models are already CPU-animated
                 // into Model.tempModel before worldRender(). Re-upload that final
                 // geometry each frame under a stable entity geom id so the GPU scene
@@ -1789,15 +1964,20 @@ export default class Model extends ModelSource {
                     (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
                 }
             }
-            if (this.faceRenderType && this.faceColour) {
-                for (let f = 0; f < this.numFaces; f++) {
-                    const type = this.faceRenderType[f] & 0x3;
+            if (uploadModel.faceRenderType && uploadModel.faceColour) {
+                for (let f = 0; f < uploadModel.numFaces; f++) {
+                    const type = uploadModel.faceRenderType[f] & 0x3;
                     if (type === 2 || type === 3) {
-                        Pix3D.recordGpuTextureResource(this.faceColour[f]);
+                        Pix3D.recordGpuTextureResource(uploadModel.faceColour[f]);
                     }
                 }
             }
-            recordModelGeometryUpload(geomId, this, volatileEntityGeometry);
+            recordModelGeometryUpload(geomId, uploadModel, volatileEntityGeometry && !sceneAnimation);
+            if (sceneAnimation) {
+                recordModelLabelMapUpload(geomId, uploadModel);
+                recordModelSkeletonUpload(sceneAnimation.skeletonId, sceneAnimation.skeleton);
+                recordModelAnimFrameUpload(sceneAnimation.animFrameId, sceneAnimation.skeletonId, sceneAnimation.ops);
+            }
             recordSceneInstance(
                 geomId,
                 Pix3D.sinTable[yaw & 0x7ff],
@@ -1806,6 +1986,7 @@ export default class Model extends ModelSource {
                 relativeY,
                 relativeZ,
                 256,
+                sceneAnimation?.animFrameId ?? 0,
             );
             return;
         }

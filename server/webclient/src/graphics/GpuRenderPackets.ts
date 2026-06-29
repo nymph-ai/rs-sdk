@@ -1041,6 +1041,9 @@ function readInitialSceneInstanceMode(): boolean {
 // GPU-resident geometry: ids uploaded this session (mirrors the native cache).
 // Not cleared by reset() — geometry persists across frames on the GPU.
 const sceneGeometryUploaded = new Set<number>();
+const sceneLabelMapUploaded = new Set<number>();
+const sceneSkeletonUploaded = new Set<number>();
+const sceneAnimFrameUploaded = new Set<number>();
 // NYM-210/#239: scene geometry is uploaded once (deduped here) to keep per-frame
 // blobs small. But the native renderer only parses the LATEST submitted blob, so
 // if the OBS consumer connects AFTER the one-time geometry frame, that geometry is
@@ -1059,7 +1062,31 @@ function maybeResetSceneGeometryKeyframe(): void {
     sceneKeyframeCounter++;
     if (sceneKeyframeCounter % SCENE_GEOMETRY_KEYFRAME_INTERVAL === 0) {
         sceneGeometryUploaded.clear();
+        sceneLabelMapUploaded.clear();
+        sceneSkeletonUploaded.clear();
+        sceneAnimFrameUploaded.clear();
     }
+}
+
+function buildModelSceneVertexLabels(model: any): Int32Array | null {
+    if (model.vertexLabel) {
+        return model.vertexLabel;
+    }
+    if (!model.labelVertices) {
+        return null;
+    }
+
+    const labels = new Int32Array(model.numPoints);
+    for (let label = 0; label < model.labelVertices.length; label++) {
+        const vertices: Int32Array | null = model.labelVertices[label];
+        if (!vertices) {
+            continue;
+        }
+        for (let i = 0; i < vertices.length; i++) {
+            labels[vertices[i]] = label;
+        }
+    }
+    return labels;
 }
 
 function buildModelSceneTextureMetadata(model: any): {
@@ -1125,6 +1152,9 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
         sceneGeometryUploaded.add(geomId);
     }
     const textureMetadata = buildModelSceneTextureMetadata(model);
+    const faceColourA = model.faceColourA ?? model.faceColour;
+    const faceColourB = model.faceColourB ?? faceColourA;
+    const faceColourC = model.faceColourC ?? faceColourA;
     pushPacket(
         {
             kind: 'modelGeometryUpload',
@@ -1137,9 +1167,9 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceA: sceneGeometryField(model.faceVertexA, model.numFaces, force),
             faceB: sceneGeometryField(model.faceVertexB, model.numFaces, force),
             faceC: sceneGeometryField(model.faceVertexC, model.numFaces, force),
-            faceColourA: sceneGeometryField(model.faceColour, model.numFaces, force),
-            faceColourB: sceneGeometryField(model.faceColour, model.numFaces, force),
-            faceColourC: sceneGeometryField(model.faceColour, model.numFaces, force),
+            faceColourA: sceneGeometryField(faceColourA, model.numFaces, force),
+            faceColourB: sceneGeometryField(faceColourB, model.numFaces, force),
+            faceColourC: sceneGeometryField(faceColourC, model.numFaces, force),
             faceType: sceneGeometryField(model.faceRenderType, model.numFaces, force),
             faceAlpha: sceneGeometryField(model.faceAlpha, model.numFaces, force),
             facePriority: sceneGeometryField(model.facePriority, model.numFaces, force),
@@ -1147,6 +1177,79 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceTextureA: textureMetadata?.faceTextureA ?? null,
             faceTextureB: textureMetadata?.faceTextureB ?? null,
             faceTextureC: textureMetadata?.faceTextureC ?? null,
+        } as any,
+        false,
+    );
+}
+
+export function recordModelLabelMapUpload(geomId: number, model: any, force: boolean = false): void {
+    if (!gpuRenderPackets.enabled || (!force && sceneLabelMapUploaded.has(geomId))) {
+        return;
+    }
+    const labels = buildModelSceneVertexLabels(model);
+    if (!labels) {
+        return;
+    }
+    if (!force) {
+        sceneLabelMapUploaded.add(geomId);
+    }
+    pushPacket(
+        {
+            kind: 'modelLabelMapUpload',
+            geomId,
+            labels: sceneGeometryField(labels, model.numPoints, force),
+        } as any,
+        false,
+    );
+}
+
+export function recordModelSkeletonUpload(skeletonId: number, skeleton: any, force: boolean = false): void {
+    if (!gpuRenderPackets.enabled || skeletonId <= 0 || !skeleton || (!force && sceneSkeletonUploaded.has(skeletonId))) {
+        return;
+    }
+    if (!skeleton.type || !skeleton.labels) {
+        return;
+    }
+    if (!force) {
+        sceneSkeletonUploaded.add(skeletonId);
+    }
+    pushPacket(
+        {
+            kind: 'modelSkeletonUpload',
+            skeletonId,
+            types: skeleton.type,
+            labels: skeleton.labels,
+        } as any,
+        false,
+    );
+}
+
+export type SceneAnimOpPacket = {
+    type: number;
+    x: number;
+    y: number;
+    z: number;
+    labels: Uint8Array | number[] | null;
+};
+
+export function recordModelAnimFrameUpload(
+    animFrameId: number,
+    skeletonId: number,
+    ops: SceneAnimOpPacket[],
+    force: boolean = false,
+): void {
+    if (!gpuRenderPackets.enabled || animFrameId <= 0 || (!force && sceneAnimFrameUploaded.has(animFrameId))) {
+        return;
+    }
+    if (!force) {
+        sceneAnimFrameUploaded.add(animFrameId);
+    }
+    pushPacket(
+        {
+            kind: 'modelAnimFrameUpload',
+            animFrameId,
+            skeletonId,
+            ops,
         } as any,
         false,
     );
@@ -1285,12 +1388,24 @@ export function recordSceneInstance(
     relativeY: number,
     relativeZ: number,
     alpha: number,
+    animFrameId: number = 0,
 ): void {
     if (!gpuRenderPackets.enabled) {
         return;
     }
     pushPacket(
-        { kind: 'sceneInstance', geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, flags: 0 } as any,
+        {
+            kind: 'sceneInstance',
+            geomId,
+            sinYaw,
+            cosYaw,
+            relativeX,
+            relativeY,
+            relativeZ,
+            alpha,
+            flags: animFrameId > 0 ? 1 : 0,
+            animFrameId,
+        } as any,
         false,
     );
 }

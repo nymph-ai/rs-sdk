@@ -254,7 +254,8 @@ const T_SURFACE = 0, T_CLIP = 1, T_CLEAR = 2, T_FILLRECT = 3, T_LINE = 4,
     T_RETAINED_PACKET_EVICT = 18, T_RETAINED_PACKET_REF_RUN = 19,
     T_MODEL_GOURAUD_TRIANGLE = 20,
     // NYM-210 GPU-native scene renderer
-    T_MODEL_GEOMETRY_UPLOAD = 21, T_SCENE_INSTANCE = 25, T_SCENE_CAMERA = 26, T_SCENE_LIGHT = 27,
+    T_MODEL_GEOMETRY_UPLOAD = 21, T_MODEL_SKELETON_UPLOAD = 22, T_MODEL_LABELMAP_UPLOAD = 23,
+    T_MODEL_ANIM_FRAME_UPLOAD = 24, T_SCENE_INSTANCE = 25, T_SCENE_CAMERA = 26, T_SCENE_LIGHT = 27,
     T_MODEL_GEOMETRY_UPLOAD_TEXTURED = 30;
 
 function alphaI32(a: number | null | undefined): number {
@@ -1119,11 +1120,47 @@ function packSnapshot(snap: any): PackResult {
                 }
                 nPackets++; nSceneGeometryUploads++; break;
             }
+            case 'modelSkeletonUpload':
+                writePacketTag(T_MODEL_SKELETON_UPLOAD);
+                w.u32(p.skeletonId >>> 0);
+                w.u32((p.types?.length ?? 0) >>> 0);
+                for (let i = 0; i < (p.types?.length ?? 0); i++) {
+                    const labels = p.labels?.[i] ?? null;
+                    w.i32(p.types[i] | 0);
+                    w.u32((labels?.length ?? 0) >>> 0);
+                    for (let j = 0; j < (labels?.length ?? 0); j++) {
+                        w.i32(labels[j] | 0);
+                    }
+                }
+                nPackets++; break;
+            case 'modelLabelMapUpload':
+                writePacketTag(T_MODEL_LABELMAP_UPLOAD);
+                w.u32(p.geomId >>> 0);
+                w.u32((p.labels?.length ?? 0) >>> 0);
+                for (let i = 0; i < (p.labels?.length ?? 0); i++) {
+                    w.i32(p.labels[i] | 0);
+                }
+                nPackets++; break;
+            case 'modelAnimFrameUpload':
+                writePacketTag(T_MODEL_ANIM_FRAME_UPLOAD);
+                w.u32(p.animFrameId >>> 0);
+                w.u32((p.skeletonId ?? 0) >>> 0);
+                w.u32((p.ops?.length ?? 0) >>> 0);
+                for (const op of p.ops ?? []) {
+                    const labels = op.labels ?? null;
+                    w.i32(op.type | 0); w.i32(op.x | 0); w.i32(op.y | 0); w.i32(op.z | 0);
+                    w.u32((labels?.length ?? 0) >>> 0);
+                    for (let j = 0; j < (labels?.length ?? 0); j++) {
+                        w.i32(labels[j] | 0);
+                    }
+                }
+                nPackets++; break;
             case 'sceneInstance':
                 writePacketTag(T_SCENE_INSTANCE);
                 w.u32(p.geomId >>> 0); w.i32(p.sinYaw | 0); w.i32(p.cosYaw | 0);
                 w.i32(p.relativeX | 0); w.i32(p.relativeY | 0); w.i32(p.relativeZ | 0);
                 w.i32((p.alpha ?? 256) | 0); w.u32((p.flags ?? 0) >>> 0);
+                w.u32((p.animFrameId ?? 0) >>> 0);
                 nPackets++; nSceneInstances++; break;
             case 'sceneCamera':
                 writePacketTag(T_SCENE_CAMERA);
