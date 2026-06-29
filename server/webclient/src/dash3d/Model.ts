@@ -105,6 +105,7 @@ export default class Model extends ModelSource {
     // NYM-210: monotonic id assigned per Model instance for the GPU geometry
     // cache (object identity is stable for static scenery built once per region).
     static nextSceneGeomId: number = 1;
+    private static readonly SCENE_DYNAMIC_GEOM_BIT: number = 0x80000000;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -1771,10 +1772,22 @@ export default class Model extends ModelSource {
             // instance, then bail BEFORE the per-vertex CPU projection loop —
             // the GPU does projection/lighting/raster. This is where the ~65ms
             // renderAll cost disappears.
-            let geomId: number = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
-            if (geomId < 0) {
-                geomId = Model.nextSceneGeomId++;
-                (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            const entityKind: number = (typecode >>> 29) & 0x3;
+            const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+            let geomId: number;
+            if (volatileEntityGeometry) {
+                // Interim NYM-217 bridge: player/NPC models are already CPU-animated
+                // into Model.tempModel before worldRender(). Re-upload that final
+                // geometry each frame under a stable entity geom id so the GPU scene
+                // path at least contains the entities. The full NYM-217 target is
+                // still GPU skeletal deform via raster-kernels.
+                geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
+            } else {
+                geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+                if (geomId < 0) {
+                    geomId = Model.nextSceneGeomId++;
+                    (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+                }
             }
             if (this.faceRenderType && this.faceColour) {
                 for (let f = 0; f < this.numFaces; f++) {
@@ -1784,7 +1797,7 @@ export default class Model extends ModelSource {
                     }
                 }
             }
-            recordModelGeometryUpload(geomId, this);
+            recordModelGeometryUpload(geomId, this, volatileEntityGeometry);
             recordSceneInstance(
                 geomId,
                 Pix3D.sinTable[yaw & 0x7ff],

@@ -1097,6 +1097,23 @@ function buildModelSceneTextureMetadata(model: any): {
     return anyTextured ? { faceTexture, faceTextureA, faceTextureB, faceTextureC } : null;
 }
 
+function sceneGeometryField<T extends ArrayLike<number> | null>(values: T, count: number, copy: boolean): T | number[] {
+    if (!values || !copy) {
+        return values;
+    }
+
+    const slicer = (values as unknown as { slice?: (start?: number, end?: number) => T }).slice;
+    if (slicer) {
+        return slicer.call(values, 0, count);
+    }
+
+    const copied: number[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+        copied[i] = values[i] | 0;
+    }
+    return copied;
+}
+
 /// Upload a model's raw geometry once (cached by id). No-op on cache hit. The
 /// payload references the model's typed arrays directly (no copy); valid for
 /// static geometry. `model` is structural to avoid a Model import cycle.
@@ -1113,19 +1130,19 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             kind: 'modelGeometryUpload',
             geomId,
             numPoints: model.numPoints,
-            pointX: model.pointX,
-            pointY: model.pointY,
-            pointZ: model.pointZ,
+            pointX: sceneGeometryField(model.pointX, model.numPoints, force),
+            pointY: sceneGeometryField(model.pointY, model.numPoints, force),
+            pointZ: sceneGeometryField(model.pointZ, model.numPoints, force),
             numFaces: model.numFaces,
-            faceA: model.faceVertexA,
-            faceB: model.faceVertexB,
-            faceC: model.faceVertexC,
-            faceColourA: model.faceColour,
-            faceColourB: model.faceColour,
-            faceColourC: model.faceColour,
-            faceType: model.faceRenderType,
-            faceAlpha: model.faceAlpha,
-            facePriority: model.facePriority,
+            faceA: sceneGeometryField(model.faceVertexA, model.numFaces, force),
+            faceB: sceneGeometryField(model.faceVertexB, model.numFaces, force),
+            faceC: sceneGeometryField(model.faceVertexC, model.numFaces, force),
+            faceColourA: sceneGeometryField(model.faceColour, model.numFaces, force),
+            faceColourB: sceneGeometryField(model.faceColour, model.numFaces, force),
+            faceColourC: sceneGeometryField(model.faceColour, model.numFaces, force),
+            faceType: sceneGeometryField(model.faceRenderType, model.numFaces, force),
+            faceAlpha: sceneGeometryField(model.faceAlpha, model.numFaces, force),
+            facePriority: sceneGeometryField(model.facePriority, model.numFaces, force),
             faceTexture: textureMetadata?.faceTexture ?? null,
             faceTextureA: textureMetadata?.faceTextureA ?? null,
             faceTextureB: textureMetadata?.faceTextureB ?? null,
