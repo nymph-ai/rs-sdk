@@ -1776,6 +1776,14 @@ export default class Model extends ModelSource {
                 geomId = Model.nextSceneGeomId++;
                 (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
             }
+            if (this.faceRenderType && this.faceColour) {
+                for (let f = 0; f < this.numFaces; f++) {
+                    const type = this.faceRenderType[f] & 0x3;
+                    if (type === 2 || type === 3) {
+                        Pix3D.recordGpuTextureResource(this.faceColour[f]);
+                    }
+                }
+            }
             recordModelGeometryUpload(geomId, this);
             recordSceneInstance(
                 geomId,

@@ -82,6 +82,18 @@ export default class Pix3D extends Pix2D {
         recordColourTable(this.colourTable, this.colourTableVersion);
     }
 
+    static recordGpuTextureResource(texture: number): boolean {
+        const sourceTexture: Pix8 | null = this.textures[texture];
+        const palette: Int32Array | null = this.texPal[texture];
+        if (!sourceTexture || !palette || !gpuRenderPackets.enabled) {
+            return false;
+        }
+
+        this.texelVersions[texture]++;
+        recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture]);
+        return true;
+    }
+
     static clearTexels(): void {
         this.texelPool = null;
         this.activeTexels.fill(null);

@@ -254,7 +254,8 @@ const T_SURFACE = 0, T_CLIP = 1, T_CLEAR = 2, T_FILLRECT = 3, T_LINE = 4,
     T_RETAINED_PACKET_EVICT = 18, T_RETAINED_PACKET_REF_RUN = 19,
     T_MODEL_GOURAUD_TRIANGLE = 20,
     // NYM-210 GPU-native scene renderer
-    T_MODEL_GEOMETRY_UPLOAD = 21, T_SCENE_INSTANCE = 25, T_SCENE_CAMERA = 26, T_SCENE_LIGHT = 27;
+    T_MODEL_GEOMETRY_UPLOAD = 21, T_SCENE_INSTANCE = 25, T_SCENE_CAMERA = 26, T_SCENE_LIGHT = 27,
+    T_MODEL_GEOMETRY_UPLOAD_TEXTURED = 30;
 
 function alphaI32(a: number | null | undefined): number {
     return (a === null || a === undefined) ? -1 : (a | 0);
@@ -1095,7 +1096,7 @@ function packSnapshot(snap: any): PackResult {
                 nPackets++; nModelGouraud++; break;
             // ----- NYM-210 GPU-native scene description -----
             case 'modelGeometryUpload': {
-                writePacketTag(T_MODEL_GEOMETRY_UPLOAD);
+                writePacketTag(T_MODEL_GEOMETRY_UPLOAD_TEXTURED);
                 w.u32(p.geomId >>> 0);
                 const np = p.numPoints | 0;
                 w.u32(np >>> 0);
@@ -1111,6 +1112,10 @@ function packSnapshot(snap: any): PackResult {
                     w.i32(p.faceType ? (p.faceType[i] | 0) : 0);
                     w.i32(p.faceAlpha ? (p.faceAlpha[i] | 0) : 0);
                     w.i32(p.facePriority ? (p.facePriority[i] | 0) : 0);
+                    w.i32(p.faceTexture ? (p.faceTexture[i] | 0) : -1);
+                    w.u32(p.faceTextureA ? (p.faceTextureA[i] >>> 0) : 0);
+                    w.u32(p.faceTextureB ? (p.faceTextureB[i] >>> 0) : 0);
+                    w.u32(p.faceTextureC ? (p.faceTextureC[i] >>> 0) : 0);
                 }
                 nPackets++; nSceneGeometryUploads++; break;
             }

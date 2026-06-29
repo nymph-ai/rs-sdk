@@ -1062,14 +1062,52 @@ function maybeResetSceneGeometryKeyframe(): void {
     }
 }
 
+function buildModelSceneTextureMetadata(model: any): {
+    faceTexture: Int32Array;
+    faceTextureA: Int32Array;
+    faceTextureB: Int32Array;
+    faceTextureC: Int32Array;
+} | null {
+    if (!model.faceRenderType || !model.faceColour || !model.faceTextureP || !model.faceTextureM || !model.faceTextureN) {
+        return null;
+    }
+
+    const faceTexture = new Int32Array(model.numFaces);
+    const faceTextureA = new Int32Array(model.numFaces);
+    const faceTextureB = new Int32Array(model.numFaces);
+    const faceTextureC = new Int32Array(model.numFaces);
+    faceTexture.fill(-1);
+
+    let anyTextured = false;
+    for (let f = 0; f < model.numFaces; f++) {
+        const renderType = model.faceRenderType[f] | 0;
+        const type = renderType & 0x3;
+        if (type !== 2 && type !== 3) {
+            continue;
+        }
+
+        const texturedFace = renderType >> 2;
+        faceTexture[f] = model.faceColour[f] | 0;
+        faceTextureA[f] = model.faceTextureP[texturedFace] | 0;
+        faceTextureB[f] = model.faceTextureM[texturedFace] | 0;
+        faceTextureC[f] = model.faceTextureN[texturedFace] | 0;
+        anyTextured = true;
+    }
+
+    return anyTextured ? { faceTexture, faceTextureA, faceTextureB, faceTextureC } : null;
+}
+
 /// Upload a model's raw geometry once (cached by id). No-op on cache hit. The
 /// payload references the model's typed arrays directly (no copy); valid for
 /// static geometry. `model` is structural to avoid a Model import cycle.
-export function recordModelGeometryUpload(geomId: number, model: any): void {
-    if (!gpuRenderPackets.enabled || sceneGeometryUploaded.has(geomId)) {
+export function recordModelGeometryUpload(geomId: number, model: any, force: boolean = false): void {
+    if (!gpuRenderPackets.enabled || (!force && sceneGeometryUploaded.has(geomId))) {
         return;
     }
-    sceneGeometryUploaded.add(geomId);
+    if (!force) {
+        sceneGeometryUploaded.add(geomId);
+    }
+    const textureMetadata = buildModelSceneTextureMetadata(model);
     pushPacket(
         {
             kind: 'modelGeometryUpload',
@@ -1088,6 +1126,10 @@ export function recordModelGeometryUpload(geomId: number, model: any): void {
             faceType: model.faceRenderType,
             faceAlpha: model.faceAlpha,
             facePriority: model.facePriority,
+            faceTexture: textureMetadata?.faceTexture ?? null,
+            faceTextureA: textureMetadata?.faceTextureA ?? null,
+            faceTextureB: textureMetadata?.faceTextureB ?? null,
+            faceTextureC: textureMetadata?.faceTextureC ?? null,
         } as any,
         false,
     );
@@ -1113,6 +1155,11 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
     const faceColourA: number[] = [];
     const faceColourB: number[] = [];
     const faceColourC: number[] = [];
+    const faceType: number[] = [];
+    const faceTexture: number[] = [];
+    const faceTextureA: number[] = [];
+    const faceTextureB: number[] = [];
+    const faceTextureC: number[] = [];
     for (let v = 0; v < nf; v++) {
         const colour = ground.faceColourA[v];
         if (colour === 12345678) {
@@ -1124,6 +1171,18 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
         faceColourA.push(colour);
         faceColourB.push(ground.faceColourB[v]);
         faceColourC.push(ground.faceColourC[v]);
+        const texture = ground.faceTexture && ground.faceTexture[v] !== -1 ? ground.faceTexture[v] | 0 : -1;
+        faceType.push(texture >= 0 ? 2 : 0);
+        faceTexture.push(texture);
+        if (texture >= 0) {
+            faceTextureA.push(ground.flat ? 0 : ground.faceVertexA[v]);
+            faceTextureB.push(ground.flat ? 1 : ground.faceVertexB[v]);
+            faceTextureC.push(ground.flat ? 3 : ground.faceVertexC[v]);
+        } else {
+            faceTextureA.push(0);
+            faceTextureB.push(0);
+            faceTextureC.push(0);
+        }
     }
     pushPacket(
         {
@@ -1140,9 +1199,13 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceColourA,
             faceColourB,
             faceColourC,
-            faceType: null,
+            faceType,
             faceAlpha: null,
             facePriority: null,
+            faceTexture,
+            faceTextureA,
+            faceTextureB,
+            faceTextureC,
         } as any,
         false,
     );
@@ -1159,6 +1222,11 @@ export function recordQuickGroundRegionGeometryUpload(
     faceColourA: number[],
     faceColourB: number[],
     faceColourC: number[],
+    faceType?: number[] | null,
+    faceTexture?: number[] | null,
+    faceTextureA?: number[] | null,
+    faceTextureB?: number[] | null,
+    faceTextureC?: number[] | null,
 ): void {
     if (!gpuRenderPackets.enabled || sceneGeometryUploaded.has(geomId)) {
         return;
@@ -1179,9 +1247,13 @@ export function recordQuickGroundRegionGeometryUpload(
             faceColourA,
             faceColourB,
             faceColourC,
-            faceType: null,
+            faceType: faceType ?? null,
             faceAlpha: null,
             facePriority: null,
+            faceTexture: faceTexture ?? null,
+            faceTextureA: faceTextureA ?? null,
+            faceTextureB: faceTextureB ?? null,
+            faceTextureC: faceTextureC ?? null,
         } as any,
         false,
     );

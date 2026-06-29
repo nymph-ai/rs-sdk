@@ -1973,21 +1973,42 @@ export default class World {
             const faceColourA: number[] = [];
             const faceColourB: number[] = [];
             const faceColourC: number[] = [];
+            const faceType: number[] = [];
+            const faceTexture: number[] = [];
+            const faceTextureA: number[] = [];
+            const faceTextureB: number[] = [];
+            const faceTextureC: number[] = [];
 
             const colourFor = (ground: QuickGround, colour: number): number => {
                 if (ground.texture === -1) {
                     return colour;
                 }
-                return this.getTable(TEXTURE_AVERAGE[ground.texture], colour);
+                return colour;
             };
 
-            const pushFace = (a: number, b: number, c: number, ca: number, cb: number, cc: number): void => {
+            const pushFace = (
+                a: number,
+                b: number,
+                c: number,
+                ca: number,
+                cb: number,
+                cc: number,
+                texture: number,
+                ta: number,
+                tb: number,
+                tc: number,
+            ): void => {
                 faceA.push(a);
                 faceB.push(b);
                 faceC.push(c);
                 faceColourA.push(ca);
                 faceColourB.push(cb);
                 faceColourC.push(cc);
+                faceType.push(texture >= 0 ? 2 : 0);
+                faceTexture.push(texture);
+                faceTextureA.push(texture >= 0 ? ta : 0);
+                faceTextureB.push(texture >= 0 ? tb : 0);
+                faceTextureC.push(texture >= 0 ? tc : 0);
             };
 
             for (let x = 0; x < this.maxTileX; x++) {
@@ -2013,10 +2034,27 @@ export default class World {
                     const ne = colourFor(quick, quick.colourNE);
                     const nw = colourFor(quick, quick.colourNW);
                     if (quick.texture !== -1 || quick.colourNE !== 12345678) {
-                        pushFace(base + 2, base + 3, base + 1, ne, nw, se);
+                        if (quick.texture !== -1) {
+                            Pix3D.recordGpuTextureResource(quick.texture);
+                        }
+                        pushFace(
+                            base + 2,
+                            base + 3,
+                            base + 1,
+                            ne,
+                            nw,
+                            se,
+                            quick.texture,
+                            quick.flat ? base : base + 2,
+                            quick.flat ? base + 1 : base + 3,
+                            quick.flat ? base + 3 : base + 1,
+                        );
                     }
                     if (quick.texture !== -1 || quick.colourSW !== 12345678) {
-                        pushFace(base, base + 1, base + 3, sw, se, nw);
+                        if (quick.texture !== -1) {
+                            Pix3D.recordGpuTextureResource(quick.texture);
+                        }
+                        pushFace(base, base + 1, base + 3, sw, se, nw, quick.texture, base, base + 1, base + 3);
                     }
                 }
             }
@@ -2037,6 +2075,11 @@ export default class World {
                 faceColourA,
                 faceColourB,
                 faceColourC,
+                faceType,
+                faceTexture,
+                faceTextureA,
+                faceTextureB,
+                faceTextureC,
             );
         }
 
@@ -2218,6 +2261,13 @@ export default class World {
             // NYM-210 Slice 2: terrain on GPU. Ground verts are WORLD-space; the
             // GPU projects them with yaw=0 + rel=-camera (world → camera-relative),
             // identical to the CPU path below. Geometry cached per Ground object.
+            if (ground.faceTexture) {
+                for (let i = 0; i < ground.faceTexture.length; i++) {
+                    if (ground.faceTexture[i] !== -1) {
+                        Pix3D.recordGpuTextureResource(ground.faceTexture[i]);
+                    }
+                }
+            }
             let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
             if (geomId < 0) {
                 const w = World as unknown as { __nextGroundGeomId?: number };
