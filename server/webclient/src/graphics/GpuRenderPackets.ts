@@ -1041,6 +1041,26 @@ function readInitialSceneInstanceMode(): boolean {
 // GPU-resident geometry: ids uploaded this session (mirrors the native cache).
 // Not cleared by reset() — geometry persists across frames on the GPU.
 const sceneGeometryUploaded = new Set<number>();
+// NYM-210/#239: scene geometry is uploaded once (deduped here) to keep per-frame
+// blobs small. But the native renderer only parses the LATEST submitted blob, so
+// if the OBS consumer connects AFTER the one-time geometry frame, that geometry is
+// never cached on the GPU — every instance then references uncached geometry and is
+// skipped, leaving a black 3D viewport (UI/minimap still render). Re-emit all scene
+// geometry as a periodic keyframe so a consumer connecting at any time gets a
+// complete scene within the interval. The native side dedups re-uploads by geom id
+// (upload_geometry is a no-op for cached ids), so this only costs blob bandwidth on
+// keyframe frames, not GPU work.
+let sceneKeyframeCounter = 0;
+const SCENE_GEOMETRY_KEYFRAME_INTERVAL = Math.max(
+    1,
+    Number((globalThis as any).process?.env?.AURAI_SCENE_GEOMETRY_KEYFRAME ?? 60) || 60,
+);
+function maybeResetSceneGeometryKeyframe(): void {
+    sceneKeyframeCounter++;
+    if (sceneKeyframeCounter % SCENE_GEOMETRY_KEYFRAME_INTERVAL === 0) {
+        sceneGeometryUploaded.clear();
+    }
+}
 
 /// Upload a model's raw geometry once (cached by id). No-op on cache hit. The
 /// payload references the model's typed arrays directly (no copy); valid for
@@ -1198,6 +1218,10 @@ export function recordSceneCamera(
     if (!gpuRenderPackets.enabled) {
         return;
     }
+    // Camera is emitted once per frame at the start of the scene pass, before the
+    // per-model geometry/instance emission — so reset the geometry keyframe here so
+    // this frame's models re-upload when a keyframe is due.
+    maybeResetSceneGeometryKeyframe();
     pushPacket(
         { kind: 'sceneCamera', sinEyePitch, cosEyePitch, sinEyeYaw, cosEyeYaw, originX, originY } as any,
         false,
