@@ -2066,9 +2066,11 @@ export default class World {
             }
 
             if (faceA.length === 0) {
+                console.log(`[qg] EMPTY build L${level} geom=${(geomId >>> 0).toString(16)} cycle=${World.cycleNo} -> kill`);
                 this.sceneQuickGroundGeomIds[level] = -1;
                 return;
             }
+            console.log(`[qg] BUILD L${level} geom=${(geomId >>> 0).toString(16)} faces=${faceA.length} pts=${pointX.length} cycle=${World.cycleNo}`);
 
             recordQuickGroundRegionGeometryUpload(
                 geomId,
@@ -2089,10 +2091,16 @@ export default class World {
             );
         }
 
+        if ((World.cycleNo % 120) === 0) {
+            console.log(`[qg] emit L${level} geom=${(geomId >>> 0).toString(16)} uploaded=${isSceneGeometryUploaded(geomId)} cycle=${World.cycleNo}`);
+        }
         recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256);
     }
 
     private renderQuickGround(ground: QuickGround, level: number, tileX: number, tileZ: number, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
+        if ((World.cycleNo % 120) === 0 && level === 0) {
+            console.log(`[rqg] called L${level} emit=${gpuRenderPackets.shouldEmitSceneInstances()} cycle=${World.cycleNo}`);
+        }
         if (gpuRenderPackets.shouldEmitSceneInstances()) {
             this.emitQuickGroundRegion(level);
             return;
