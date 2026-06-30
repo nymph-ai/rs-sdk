@@ -15,7 +15,7 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordQuickGroundRegionGeometryUpload, recordSceneInstance } from '#/graphics/GpuRenderPackets.js';
+import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordQuickGroundRegionGeometryUpload, recordSceneInstance, isSceneGeometryUploaded } from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -1963,7 +1963,13 @@ export default class World {
         if (geomId === 0) {
             geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
             this.sceneQuickGroundGeomIds[level] = geomId;
-
+        }
+        // NYM-218: re-build + re-upload the region geometry whenever the native
+        // geometry cache was cleared at a keyframe boundary (sceneGeometryUploaded
+        // no longer has this geomId). Otherwise the QuickGround terrain mesh is
+        // sent exactly once and lost when a consumer (OBS) connects after that
+        // frame, leaving the ground black. geomId stays stable so no cache leak.
+        if (!isSceneGeometryUploaded(geomId)) {
             const pointX: number[] = [];
             const pointY: number[] = [];
             const pointZ: number[] = [];
