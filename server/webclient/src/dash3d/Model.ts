@@ -18,6 +18,7 @@ import {
     recordSceneGpuDrawRecord,
     recordSceneInstance,
     sceneDrawFaceKind,
+    shouldEmitSceneNativeDeform,
     shouldRecordSceneCpuDrawset,
     type SceneDrawInstanceIdentity,
     type SceneDrawSource,
@@ -1216,6 +1217,10 @@ export default class Model extends ModelSource {
 
     setSceneAnimation(baseModel: Model, primaryId: number, secondaryId: number, mask: Int32Array | null, resizeX: number = 128, resizeY: number = 128, resizeZ: number = 128): void {
         this.sceneAnimation = null;
+
+        if (!shouldEmitSceneNativeDeform()) {
+            return;
+        }
 
         if (!baseModel.labelVertices) {
             return;

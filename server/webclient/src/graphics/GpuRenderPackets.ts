@@ -1089,6 +1089,14 @@ function readInitialSceneInstanceMode(): boolean {
     return v != null && v !== '' && v !== 'false' && v !== '0';
 }
 
+export function shouldEmitSceneNativeDeform(): boolean {
+    // Tags 22/23/24 are reserved in fused.ts, but the native blob parser and
+    // renderer do not consume skeleton/label/anim-frame packets yet. Keep
+    // animated entities on the CPU-deformed dynamic geometry bridge until that
+    // renderer path exists.
+    return false;
+}
+
 type SceneManifestGeometry = {
     pointX: ArrayLike<number> | null;
     pointY: ArrayLike<number> | null;
