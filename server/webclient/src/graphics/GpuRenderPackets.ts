@@ -1858,20 +1858,20 @@ function emitSceneGpuDrawRecords(
     source: SceneDrawSource,
     animated: boolean,
     animFrameId: number,
-): void {
+): SceneDrawInstanceIdentity | null {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
-        return;
+        return null;
     }
 
     const baseGeom = sceneManifestGeometry.get(geomId);
     if (!baseGeom) {
-        return;
+        return null;
     }
     const geom = sceneManifestGeometryForAnim(geomId, baseGeom, animFrameId);
 
     const identity = beginSceneGpuDrawInstance();
     if (!identity) {
-        return;
+        return null;
     }
     for (let face = 0; face < geom.numFaces; face++) {
         const textureId = geom.faceTexture ? geom.faceTexture[face] | 0 : -1;
@@ -1880,6 +1880,9 @@ function emitSceneGpuDrawRecords(
         const colourB = geom.faceColourB ? geom.faceColourB[face] | 0 : colourA;
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
         const projected = sceneProjectedFace(geom, face, sinYaw, cosYaw, relativeX, relativeY, relativeZ);
+        if (projected.nearClipped) {
+            continue;
+        }
         recordSceneGpuDrawRecord({
             drawId: identity.drawId,
             instanceId: identity.instanceId,
@@ -1898,6 +1901,7 @@ function emitSceneGpuDrawRecords(
             sortDepth: projected.depth,
         });
     }
+    return identity;
 }
 
 function buildModelSceneVertexLabels(model: any): Int32Array | null {
@@ -2321,11 +2325,11 @@ export function recordSceneInstance(
     animFrameId: number = 0,
     source: SceneDrawSource = SCENE_DRAW_SOURCE_MODEL,
     animated: boolean = animFrameId > 0,
-): void {
+): SceneDrawInstanceIdentity | null {
     if (!gpuRenderPackets.enabled) {
-        return;
+        return null;
     }
-    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source, animated, animFrameId);
+    const identity = emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source, animated, animFrameId);
     pushPacket(
         {
             kind: 'sceneInstance',
@@ -2341,6 +2345,7 @@ export function recordSceneInstance(
         },
         false,
     );
+    return identity;
 }
 
 /// Per-frame camera shared by all instances.
