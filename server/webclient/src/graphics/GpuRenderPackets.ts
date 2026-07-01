@@ -335,6 +335,7 @@ export type GpuRenderPacket =
           kind: 'modelLabelMapUpload';
           geomId: number;
           labels: ArrayLike<number> | null;
+          faceLabels: ArrayLike<number> | null;
       })
     | (ScenePacketBase & {
           kind: 'modelAnimFrameUpload';
@@ -1239,6 +1240,7 @@ const SCENE_ANIM_ORIGIN = 0;
 const SCENE_ANIM_TRANSLATE = 1;
 const SCENE_ANIM_ROTATE = 2;
 const SCENE_ANIM_SCALE = 3;
+const SCENE_ANIM_TRANSPARENCY = 5;
 
 // GPU-resident geometry: ids uploaded this session (mirrors the native cache).
 // Not cleared by reset() — geometry persists across frames on the GPU.
@@ -1248,6 +1250,7 @@ const sceneSkeletonUploaded = new Set<number>();
 const sceneAnimFrameUploaded = new Set<number>();
 const sceneManifestGeometry = new Map<number, SceneManifestGeometry>();
 const sceneManifestLabelMaps = new Map<number, ArrayLike<number>>();
+const sceneManifestFaceLabelMaps = new Map<number, ArrayLike<number>>();
 const sceneManifestAnimFrames = new Map<number, SceneAnimOpPacket[]>();
 const sceneManifestDeformedGeometry = new Map<string, SceneManifestGeometry>();
 const sceneCpuDrawRecords: SceneDrawRecord[] = [];
@@ -1506,11 +1509,23 @@ function sceneVertexLabelMatches(labels: ArrayLike<number>, vertex: number, opLa
     return false;
 }
 
+function sceneFaceLabelMatches(labels: ArrayLike<number>, face: number, opLabels: ArrayLike<number>): boolean {
+    const label = labels[face] | 0;
+    for (let i = 0; i < opLabels.length; i++) {
+        if ((opLabels[i] | 0) === label) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function applySceneManifestAnimOp(
     pointX: Int32Array,
     pointY: Int32Array,
     pointZ: Int32Array,
     vertexLabels: ArrayLike<number>,
+    faceAlpha: Int32Array | null,
+    faceLabels: ArrayLike<number> | null,
     op: SceneAnimOpPacket,
     origin: Int32Array,
 ): void {
@@ -1525,6 +1540,19 @@ function applySceneManifestAnimOp(
     }
 
     const type = op.type | 0;
+    if (type === SCENE_ANIM_TRANSPARENCY) {
+        if (!faceAlpha || !faceLabels) {
+            return;
+        }
+        const delta = (op.x | 0) * 8;
+        for (let face = 0; face < faceAlpha.length; face++) {
+            if (sceneFaceLabelMatches(faceLabels, face, labels)) {
+                faceAlpha[face] = Math.max(0, Math.min(255, (faceAlpha[face] | 0) + delta));
+            }
+        }
+        return;
+    }
+
     if (type === SCENE_ANIM_ORIGIN) {
         let x = 0;
         let y = 0;
@@ -1618,6 +1646,7 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
         return cached;
     }
     const labels = sceneManifestLabelMaps.get(geomId);
+    const faceLabels = sceneManifestFaceLabelMaps.get(geomId) ?? null;
     const ops = sceneManifestAnimFrames.get(animFrameId);
     if (!labels || !ops) {
         return geom;
@@ -1632,9 +1661,16 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
         pointY[i] = geom.pointY[i] | 0;
         pointZ[i] = geom.pointZ[i] | 0;
     }
+    let faceAlpha: Int32Array | null = null;
+    if (geom.faceAlpha) {
+        faceAlpha = new Int32Array(geom.numFaces);
+        for (let face = 0; face < geom.numFaces; face++) {
+            faceAlpha[face] = geom.faceAlpha[face] | 0;
+        }
+    }
     const origin = new Int32Array(3);
     for (const op of ops) {
-        applySceneManifestAnimOp(pointX, pointY, pointZ, labels, op, origin);
+        applySceneManifestAnimOp(pointX, pointY, pointZ, labels, faceAlpha, faceLabels, op, origin);
     }
 
     const deformed = {
@@ -1642,6 +1678,7 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
         pointX,
         pointY,
         pointZ,
+        faceAlpha: faceAlpha ?? geom.faceAlpha,
     };
     sceneManifestDeformedGeometry.set(key, deformed);
     return deformed;
@@ -1772,6 +1809,28 @@ function buildModelSceneVertexLabels(model: any): Int32Array | null {
     return labels;
 }
 
+function buildModelSceneFaceLabels(model: any): Int32Array | null {
+    if (model.faceLabel) {
+        return model.faceLabel;
+    }
+    if (!model.labelFaces) {
+        return null;
+    }
+
+    const labels = new Int32Array(model.numFaces);
+    labels.fill(-1);
+    for (let label = 0; label < model.labelFaces.length; label++) {
+        const faces: Int32Array | null = model.labelFaces[label];
+        if (!faces) {
+            continue;
+        }
+        for (let i = 0; i < faces.length; i++) {
+            labels[faces[i]] = label;
+        }
+    }
+    return labels;
+}
+
 function buildModelSceneTextureMetadata(model: any): {
     faceTexture: Int32Array;
     faceTextureA: Int32Array;
@@ -1892,11 +1951,17 @@ export function recordModelLabelMapUpload(geomId: number, model: any, force: boo
     if (!labels) {
         return;
     }
+    const faceLabels = buildModelSceneFaceLabels(model);
     if (!force) {
         sceneLabelMapUploaded.add(geomId);
     }
     if (SCENE_DRAWSET_MANIFEST_ENABLED) {
         sceneManifestLabelMaps.set(geomId, sceneGeometryField(labels, model.numPoints, force));
+        if (faceLabels) {
+            sceneManifestFaceLabelMaps.set(geomId, sceneGeometryField(faceLabels, model.numFaces, force));
+        } else {
+            sceneManifestFaceLabelMaps.delete(geomId);
+        }
         clearSceneManifestDeformedGeometryForGeom(geomId);
     }
     pushPacket(
@@ -1904,6 +1969,7 @@ export function recordModelLabelMapUpload(geomId: number, model: any, force: boo
             kind: 'modelLabelMapUpload',
             geomId,
             labels: sceneGeometryField(labels, model.numPoints, force),
+            faceLabels: sceneGeometryField(faceLabels, model.numFaces, force),
         },
         false,
     );

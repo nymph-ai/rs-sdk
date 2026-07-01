@@ -1173,6 +1173,10 @@ function packSnapshot(snap: any): PackResult {
                 for (let i = 0; i < (p.labels?.length ?? 0); i++) {
                     w.i32(p.labels[i] | 0);
                 }
+                w.u32((p.faceLabels?.length ?? 0) >>> 0);
+                for (let i = 0; i < (p.faceLabels?.length ?? 0); i++) {
+                    w.i32(p.faceLabels[i] | 0);
+                }
                 nPackets++; break;
             case 'modelAnimFrameUpload':
                 writePacketTag(T_MODEL_ANIM_FRAME_UPLOAD);

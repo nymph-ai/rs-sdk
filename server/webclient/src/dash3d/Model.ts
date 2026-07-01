@@ -1249,9 +1249,11 @@ export default class Model extends ModelSource {
         } else {
             Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
         }
-        if (ops.some(op => op.type === AnimTransform.TRANSPARENCY)) {
-            // Face-alpha animation needs native face-alpha mutation, not just
-            // vertex deform. Keep those models on the dynamic bridge for now.
+        const hasTransparency = ops.some(op => op.type === AnimTransform.TRANSPARENCY);
+        if (hasTransparency && (!baseModel.labelFaces || !baseModel.faceAlpha)) {
+            // Native transparency deform needs the same face labels and mutable
+            // face-alpha source that CPU animate2 uses. Keep unsupported cases
+            // on the dynamic bridge.
             return;
         }
 
