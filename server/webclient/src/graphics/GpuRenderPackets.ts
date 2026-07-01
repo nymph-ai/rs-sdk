@@ -1194,7 +1194,7 @@ export function shouldEmitSceneNativeTextures(): boolean {
     // coordinate vertex metadata into the native atlas sampler. The remaining
     // fallback covers texture modes that still lack parity: low-memory/detail,
     // hclip, transparency/discard, and near-clipped texture splitting.
-    return false;
+    return true;
 }
 
 type SceneManifestGeometry = {
