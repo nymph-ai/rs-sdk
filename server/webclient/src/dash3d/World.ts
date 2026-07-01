@@ -1041,6 +1041,8 @@ export default class World {
                 World.cameraCosY,
                 Pix3D.originX,
                 Pix3D.originY,
+                Pix2D.width,
+                Pix2D.height,
             );
         }
 

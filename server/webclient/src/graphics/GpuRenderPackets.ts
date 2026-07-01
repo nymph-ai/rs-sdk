@@ -1140,6 +1140,8 @@ type SceneManifestCamera = {
     cosEyeYaw: number;
     originX: number;
     originY: number;
+    viewportWidth: number;
+    viewportHeight: number;
 };
 
 type SceneManifestProjectedVertex = {
@@ -1893,6 +1895,8 @@ export function recordSceneCamera(
     cosEyeYaw: number,
     originX: number,
     originY: number,
+    viewportWidth: number,
+    viewportHeight: number,
 ): void {
     if (!gpuRenderPackets.enabled) {
         return;
@@ -1905,6 +1909,8 @@ export function recordSceneCamera(
             cosEyeYaw,
             originX,
             originY,
+            viewportWidth,
+            viewportHeight,
         };
     }
     // Camera is emitted once per frame at the start of the scene pass, before the
@@ -1912,7 +1918,17 @@ export function recordSceneCamera(
     // this frame's models re-upload when a keyframe is due.
     maybeResetSceneGeometryKeyframe();
     pushPacket(
-        { kind: 'sceneCamera', sinEyePitch, cosEyePitch, sinEyeYaw, cosEyeYaw, originX, originY } as any,
+        {
+            kind: 'sceneCamera',
+            sinEyePitch,
+            cosEyePitch,
+            sinEyeYaw,
+            cosEyeYaw,
+            originX,
+            originY,
+            viewportWidth,
+            viewportHeight,
+        } as any,
         false,
     );
 }

@@ -1180,6 +1180,8 @@ function packSnapshot(snap: any): PackResult {
                 w.i32(p.sinEyePitch | 0); w.i32(p.cosEyePitch | 0);
                 w.i32(p.sinEyeYaw | 0); w.i32(p.cosEyeYaw | 0);
                 w.i32(p.originX | 0); w.i32(p.originY | 0);
+                w.i32((p.viewportWidth ?? p.originX * 2) | 0);
+                w.i32((p.viewportHeight ?? p.originY * 2) | 0);
                 nPackets++; nSceneCameras++; break;
             case 'sceneLight':
                 writePacketTag(T_SCENE_LIGHT);
