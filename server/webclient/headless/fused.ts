@@ -1280,6 +1280,7 @@ function sceneDrawRecordLine(r: any): string {
         i(r.alpha, 256),
         i(r.priority),
         r.nearClipped ? 1 : 0,
+        r.hclip ? 1 : 0,
         r.animated ? 1 : 0,
     ].join(' ');
 }
@@ -1290,7 +1291,7 @@ function appendSceneDrawsetManifest(path: string, records: any[]): void {
     }
     if (!sceneDrawsetManifestReady.has(path)) {
         mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha priority nearClipped animated\n');
+        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha priority nearClipped hclip animated\n');
         sceneDrawsetManifestReady.add(path);
     }
     appendFileSync(path, records.map(sceneDrawRecordLine).join('\n') + '\n');

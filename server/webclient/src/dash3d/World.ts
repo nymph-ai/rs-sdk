@@ -2183,6 +2183,7 @@ export default class World {
             alpha: 256,
             priority: 0,
             nearClipped: false,
+            hclip: Pix3D.hclip,
             animated: false,
         };
         if (gpuFallback) {

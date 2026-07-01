@@ -97,6 +97,7 @@ export type SceneDrawRecord = {
     alpha: number;
     priority: number;
     nearClipped: boolean;
+    hclip: boolean;
     animated: boolean;
     /** Native-scene projected face depth, used only for order-sensitive drawset transcripts. */
     sortDepth?: number;
@@ -1797,9 +1798,9 @@ function sceneProjectedFace(
     relativeX: number,
     relativeY: number,
     relativeZ: number,
-): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean; depth: number } {
+): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean; hclip: boolean; depth: number } {
     if (!geom.pointX || !geom.pointY || !geom.pointZ || !geom.faceA || !geom.faceB || !geom.faceC) {
-        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false, depth: 0 };
+        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false, hclip: false, depth: 0 };
     }
 
     const vertexA = geom.faceA[face] | 0;
@@ -1836,9 +1837,12 @@ function sceneProjectedFace(
         relativeZ,
     );
 
+    const screen: [[number, number], [number, number], [number, number]] = [a.screen, b.screen, c.screen];
+    const sizeX = Math.max(0, (sceneManifestCamera?.viewportWidth ?? 0) - 1);
     return {
-        screen: [a.screen, b.screen, c.screen],
+        screen,
         nearClipped: !a.valid || !b.valid || !c.valid,
+        hclip: screen.some(([x]) => x < 0 || x > sizeX),
         depth: Math.trunc((a.z + b.z + c.z) / 3),
     };
 }
@@ -1889,6 +1893,7 @@ function emitSceneGpuDrawRecords(
             alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
             priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),
             nearClipped: projected.nearClipped,
+            hclip: projected.hclip,
             animated,
             sortDepth: projected.depth,
         });

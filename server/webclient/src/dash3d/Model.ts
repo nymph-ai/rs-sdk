@@ -252,6 +252,7 @@ export default class Model extends ModelSource {
         colours: [number, number, number],
         textureId: number,
         nearClipped: boolean,
+        hclip: boolean = Pix3D.hclip,
     ): void {
         const context = Model.sceneCpuDrawContext;
         const rawAlpha = this.faceAlpha ? this.faceAlpha[face] | 0 : 0;
@@ -264,6 +265,7 @@ export default class Model extends ModelSource {
             alpha: rawAlpha > 0 ? 256 - rawAlpha : 256,
             priority: this.facePriority ? this.facePriority[face] | 0 : this.priority | 0,
             nearClipped,
+            hclip,
         };
         if (context) {
             recordSceneCpuDrawRecord({
@@ -295,6 +297,7 @@ export default class Model extends ModelSource {
         screen: [[number, number], [number, number], [number, number]],
         nearClipped: boolean,
         clippedColours: [number, number, number] | null = null,
+        hclip: boolean = Pix3D.hclip,
     ): void {
         if (!this.faceColourA) {
             return;
@@ -304,7 +307,7 @@ export default class Model extends ModelSource {
         const colourB = clippedColours ? clippedColours[1] | 0 : (this.faceColourB ? this.faceColourB[face] | 0 : colourA);
         const colourC = clippedColours ? clippedColours[2] | 0 : (this.faceColourC ? this.faceColourC[face] | 0 : colourA);
         const textureId = (renderType === 2 || renderType === 3) && this.faceColour ? this.faceColour[face] | 0 : -1;
-        this.recordSceneCpuFace(face, renderType, screen, [colourA, colourB, colourC], textureId, nearClipped);
+        this.recordSceneCpuFace(face, renderType, screen, [colourA, colourB, colourC], textureId, nearClipped, hclip);
     }
 
     static init(total: number, provider: OnDemandProvider) {
@@ -2768,6 +2771,9 @@ export default class Model extends ModelSource {
             type = this.faceRenderType[face] & 0x3;
         }
 
+        const clippedHclip = elements === 3
+            ? x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX
+            : x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX || Model.clippedX[3] < 0 || Model.clippedX[3] > Pix2D.sizeX;
         if ((Model.sceneCpuDrawContext || Model.sceneGpuFallbackDrawContext) && (elements === 3 || elements === 4)) {
             this.recordSceneCpuProjectedFace(
                 face,
@@ -2779,13 +2785,12 @@ export default class Model extends ModelSource {
                 ],
                 true,
                 [Model.clippedColour[0], Model.clippedColour[1], Model.clippedColour[2]],
+                clippedHclip,
             );
         }
 
         if (elements === 3) {
-            if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX) {
-                Pix3D.hclip = true;
-            }
+            Pix3D.hclip = clippedHclip;
 
             if (type === 0) {
                 Pix3D.gouraudTriangle(
@@ -2833,9 +2838,7 @@ export default class Model extends ModelSource {
                 );
             }
         } else if (elements === 4) {
-            if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX || Model.clippedX[3] < 0 || Model.clippedX[3] > Pix2D.sizeX) {
-                Pix3D.hclip = true;
-            }
+            Pix3D.hclip = clippedHclip;
 
             if (type === 0) {
                 Pix3D.gouraudTriangle(
