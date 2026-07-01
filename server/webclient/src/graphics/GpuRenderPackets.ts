@@ -322,6 +322,9 @@ export type GpuRenderPacket =
           faceColourB: ArrayLike<number> | null;
           faceColourC: ArrayLike<number> | null;
           faceBaseColour: ArrayLike<number> | null;
+          faceNormalX: ArrayLike<number> | null;
+          faceNormalY: ArrayLike<number> | null;
+          faceNormalZ: ArrayLike<number> | null;
           vertexNormalX: ArrayLike<number> | null;
           vertexNormalY: ArrayLike<number> | null;
           vertexNormalZ: ArrayLike<number> | null;
@@ -1192,9 +1195,9 @@ export function shouldEmitSceneNativeDeform(): boolean {
 }
 
 export function shouldEmitSceneNativeLighting(): boolean {
-    // World.shareLight/Model.light still bake scene lighting into face colour
-    // indices for the shader today, but SceneLight plus model base-HSL/normal
-    // metadata now keep the raw relight inputs in the native stream.
+    // World.shareLight/Model.light still emits compatibility pre-lit indices,
+    // but SceneLight plus model base-HSL/normal metadata let the native scene
+    // cache rebuild colour words from raw relight inputs.
     return true;
 }
 
@@ -2051,6 +2054,9 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceColourB: sceneGeometryField(faceColourB, model.numFaces, force),
             faceColourC: sceneGeometryField(faceColourC, model.numFaces, force),
             faceBaseColour: sceneGeometryField(model.sceneBaseFaceColour, model.numFaces, force),
+            faceNormalX: sceneGeometryField(model.sceneFaceNormalX, model.numFaces, force),
+            faceNormalY: sceneGeometryField(model.sceneFaceNormalY, model.numFaces, force),
+            faceNormalZ: sceneGeometryField(model.sceneFaceNormalZ, model.numFaces, force),
             vertexNormalX: sceneGeometryField(model.sceneVertexNormalX, model.numPoints, force),
             vertexNormalY: sceneGeometryField(model.sceneVertexNormalY, model.numPoints, force),
             vertexNormalZ: sceneGeometryField(model.sceneVertexNormalZ, model.numPoints, force),
@@ -2243,6 +2249,9 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceColourB,
             faceColourC,
             faceBaseColour: null,
+            faceNormalX: null,
+            faceNormalY: null,
+            faceNormalZ: null,
             vertexNormalX: null,
             vertexNormalY: null,
             vertexNormalZ: null,
@@ -2315,6 +2324,9 @@ export function recordQuickGroundRegionGeometryUpload(
             faceColourB,
             faceColourC,
             faceBaseColour: null,
+            faceNormalX: null,
+            faceNormalY: null,
+            faceNormalZ: null,
             vertexNormalX: null,
             vertexNormalY: null,
             vertexNormalZ: null,

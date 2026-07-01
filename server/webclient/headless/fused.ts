@@ -1132,8 +1132,9 @@ function packSnapshot(snap: any): PackResult {
             // ----- NYM-210 GPU-native scene description -----
             case 'modelGeometryUpload': {
                 const hasFaceBaseColour = !!p.faceBaseColour;
+                const hasFaceNormals = !!p.faceNormalX && !!p.faceNormalY && !!p.faceNormalZ;
                 const hasVertexNormals = !!p.vertexNormalX && !!p.vertexNormalY && !!p.vertexNormalZ && !!p.vertexNormalW;
-                const hasRelight = hasFaceBaseColour || hasVertexNormals;
+                const hasRelight = hasFaceBaseColour && (hasFaceNormals || hasVertexNormals);
                 writePacketTag(hasRelight ? T_MODEL_GEOMETRY_UPLOAD_RELIGHT : T_MODEL_GEOMETRY_UPLOAD_TEXTURED);
                 w.u32(p.geomId >>> 0);
                 const np = p.numPoints | 0;
@@ -1156,9 +1157,16 @@ function packSnapshot(snap: any): PackResult {
                     w.u32(p.faceTextureC ? (p.faceTextureC[i] >>> 0) : 0);
                 }
                 if (hasRelight) {
-                    w.u32((hasFaceBaseColour ? 1 : 0) | (hasVertexNormals ? 2 : 0));
+                    w.u32((hasFaceBaseColour ? 1 : 0) | (hasVertexNormals ? 2 : 0) | (hasFaceNormals ? 4 : 0));
                     if (hasFaceBaseColour) {
                         for (let i = 0; i < nf; i++) w.i32(p.faceBaseColour[i] | 0);
+                    }
+                    if (hasFaceNormals) {
+                        for (let i = 0; i < nf; i++) {
+                            w.i32(p.faceNormalX[i] | 0);
+                            w.i32(p.faceNormalY[i] | 0);
+                            w.i32(p.faceNormalZ[i] | 0);
+                        }
                     }
                     if (hasVertexNormals) {
                         for (let i = 0; i < np; i++) {

@@ -124,6 +124,9 @@ export default class Model extends ModelSource {
     faceColourB: Int32Array | null = null;
     faceColourC: Int32Array | null = null;
     sceneBaseFaceColour: Int32Array | null = null;
+    sceneFaceNormalX: Int32Array | null = null;
+    sceneFaceNormalY: Int32Array | null = null;
+    sceneFaceNormalZ: Int32Array | null = null;
     sceneVertexNormalX: Int32Array | null = null;
     sceneVertexNormalY: Int32Array | null = null;
     sceneVertexNormalZ: Int32Array | null = null;
@@ -1836,6 +1839,16 @@ export default class Model extends ModelSource {
                 this.pointNormal[v] = new PointNormal();
             }
         }
+        const retainSceneLighting = shouldEmitSceneNativeLighting();
+        if (retainSceneLighting) {
+            this.sceneFaceNormalX = new Int32Array(this.numFaces);
+            this.sceneFaceNormalY = new Int32Array(this.numFaces);
+            this.sceneFaceNormalZ = new Int32Array(this.numFaces);
+        } else {
+            this.sceneFaceNormalX = null;
+            this.sceneFaceNormalY = null;
+            this.sceneFaceNormalZ = null;
+        }
 
         for (let f: number = 0; f < this.numFaces; f++) {
             const a: number = this.faceVertexA![f];
@@ -1868,6 +1881,11 @@ export default class Model extends ModelSource {
             nx = ((nx * 256) / length) | 0;
             ny = ((ny * 256) / length) | 0;
             nz = ((nz * 256) / length) | 0;
+            if (retainSceneLighting && this.sceneFaceNormalX && this.sceneFaceNormalY && this.sceneFaceNormalZ) {
+                this.sceneFaceNormalX[f] = nx;
+                this.sceneFaceNormalY[f] = ny;
+                this.sceneFaceNormalZ[f] = nz;
+            }
 
             if (!this.faceRenderType || (this.faceRenderType[f] & 0x1) === 0) {
                 let n: PointNormal | null = this.pointNormal[a];
@@ -1998,6 +2016,9 @@ export default class Model extends ModelSource {
         this.sceneVertexNormalW = null;
 
         if (!shouldEmitSceneNativeLighting()) {
+            this.sceneFaceNormalX = null;
+            this.sceneFaceNormalY = null;
+            this.sceneFaceNormalZ = null;
             return;
         }
         if (this.faceColour) {
