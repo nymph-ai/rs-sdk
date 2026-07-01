@@ -98,6 +98,8 @@ export type SceneDrawRecord = {
     priority: number;
     nearClipped: boolean;
     animated: boolean;
+    /** Native-scene projected face depth, used only for order-sensitive drawset transcripts. */
+    sortDepth?: number;
 };
 
 type PacketBase = {
@@ -1369,6 +1371,96 @@ export function recordSceneGpuDrawRecord(record: Omit<SceneDrawRecord, 'frameId'
     });
 }
 
+function sceneAlphaPriorityBucket(priority: number): number {
+    return Math.max(0, Math.min(11, priority | 0));
+}
+
+function sceneRecordIsNativeAlphaPriority(record: SceneDrawRecord): boolean {
+    return typeof record.sortDepth === 'number' && ((record.alpha | 0) < 256 || (record.priority | 0) !== 0);
+}
+
+type SceneAlphaPriorityRecord = {
+    record: SceneDrawRecord;
+    order: number;
+    depth: number;
+};
+
+function averageSceneAlphaPriorityDepth(
+    buckets: SceneAlphaPriorityRecord[][],
+    first: number,
+    second: number,
+): number {
+    const count = buckets[first].length + buckets[second].length;
+    if (count === 0) {
+        return 0;
+    }
+    let sum = 0;
+    for (const item of buckets[first]) {
+        sum += item.depth;
+    }
+    for (const item of buckets[second]) {
+        sum += item.depth;
+    }
+    return Math.trunc(sum / count);
+}
+
+function sortSceneAlphaPriorityRecords(records: SceneAlphaPriorityRecord[]): SceneDrawRecord[] {
+    const buckets: SceneAlphaPriorityRecord[][] = Array.from({ length: 12 }, () => []);
+    for (const item of records) {
+        buckets[sceneAlphaPriorityBucket(item.record.priority)].push(item);
+    }
+    for (const bucket of buckets) {
+        bucket.sort((left, right) => (right.depth - left.depth) || (left.order - right.order));
+    }
+
+    const average1_2 = averageSceneAlphaPriorityDepth(buckets, 1, 2);
+    const average3_4 = averageSceneAlphaPriorityDepth(buckets, 3, 4);
+    const average6_8 = averageSceneAlphaPriorityDepth(buckets, 6, 8);
+    const special = buckets[10].concat(buckets[11]);
+    let specialIndex = 0;
+    const ordered: SceneDrawRecord[] = [];
+    for (let priority = 0; priority < 10; priority++) {
+        let threshold: number | null = null;
+        if (priority === 0) {
+            threshold = average1_2;
+        } else if (priority === 3) {
+            threshold = average3_4;
+        } else if (priority === 5) {
+            threshold = average6_8;
+        }
+        if (threshold !== null) {
+            while (specialIndex < special.length && special[specialIndex].depth > threshold) {
+                ordered.push(special[specialIndex++].record);
+            }
+        }
+        for (const item of buckets[priority]) {
+            ordered.push(item.record);
+        }
+    }
+    while (specialIndex < special.length) {
+        ordered.push(special[specialIndex++].record);
+    }
+    return ordered;
+}
+
+function sceneGpuDrawRecordsForSnapshot(): SceneDrawRecord[] {
+    const records: SceneDrawRecord[] = [];
+    const alphaPriority: SceneAlphaPriorityRecord[] = [];
+    for (const record of sceneGpuDrawRecords) {
+        if (sceneRecordIsNativeAlphaPriority(record)) {
+            alphaPriority.push({
+                record,
+                order: alphaPriority.length,
+                depth: record.sortDepth ?? 0,
+            });
+        } else {
+            records.push(record);
+        }
+    }
+    records.push(...sortSceneAlphaPriorityRecords(alphaPriority));
+    return records;
+}
+
 function rememberSceneManifestGeometry(
     geomId: number,
     pointX: ArrayLike<number> | null,
@@ -1705,9 +1797,9 @@ function sceneProjectedFace(
     relativeX: number,
     relativeY: number,
     relativeZ: number,
-): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean } {
+): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean; depth: number } {
     if (!geom.pointX || !geom.pointY || !geom.pointZ || !geom.faceA || !geom.faceB || !geom.faceC) {
-        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false };
+        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false, depth: 0 };
     }
 
     const vertexA = geom.faceA[face] | 0;
@@ -1747,6 +1839,7 @@ function sceneProjectedFace(
     return {
         screen: [a.screen, b.screen, c.screen],
         nearClipped: !a.valid || !b.valid || !c.valid,
+        depth: Math.trunc((a.z + b.z + c.z) / 3),
     };
 }
 
@@ -1797,6 +1890,7 @@ function emitSceneGpuDrawRecords(
             priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),
             nearClipped: projected.nearClipped,
             animated,
+            sortDepth: projected.depth,
         });
     }
 }
@@ -2465,7 +2559,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             indexedSpriteResources: indexedSpriteResources.slice(),
             glyphResources: glyphResources.slice(),
             sceneCpuDrawRecords: sceneCpuDrawRecords.slice(),
-            sceneGpuDrawRecords: sceneGpuDrawRecords.slice()
+            sceneGpuDrawRecords: sceneGpuDrawRecordsForSnapshot()
         };
     }
 };
