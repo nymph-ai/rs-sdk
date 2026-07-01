@@ -313,6 +313,7 @@ export type GpuRenderPacketSnapshot = {
     textureResources: GpuTextureResource[];
     indexedSpriteResources: GpuIndexedSpriteResource[];
     glyphResources: GpuGlyphResource[];
+    sceneCpuDrawRecords: SceneDrawRecord[];
     sceneGpuDrawRecords: SceneDrawRecord[];
 };
 
@@ -1110,10 +1111,13 @@ const sceneLabelMapUploaded = new Set<number>();
 const sceneSkeletonUploaded = new Set<number>();
 const sceneAnimFrameUploaded = new Set<number>();
 const sceneManifestGeometry = new Map<number, SceneManifestGeometry>();
+const sceneCpuDrawRecords: SceneDrawRecord[] = [];
 const sceneGpuDrawRecords: SceneDrawRecord[] = [];
 let sceneFrameId = -1;
-let sceneNextDrawId = 0;
-let sceneNextInstanceId = 0;
+let sceneNextCpuDrawId = 0;
+let sceneNextCpuInstanceId = 0;
+let sceneNextGpuDrawId = 0;
+let sceneNextGpuInstanceId = 0;
 // NYM-210/#239: scene geometry is uploaded once (deduped here) to keep per-frame
 // blobs small. But the native renderer only parses the LATEST submitted blob, so
 // if the OBS consumer connects AFTER the one-time geometry frame, that geometry is
@@ -1138,7 +1142,7 @@ function maybeResetSceneGeometryKeyframe(): void {
     }
 }
 
-function sceneFaceKind(renderType: number, textureId: number): number {
+export function sceneDrawFaceKind(renderType: number, textureId: number): number {
     const type = renderType & 0x3;
     if (textureId >= 0 || type === 2 || type === 3) {
         return type === 3 ? SCENE_FACE_KIND_TEXTURED_FLAT : SCENE_FACE_KIND_TEXTURED_GOURAUD;
@@ -1150,6 +1154,48 @@ function sceneDrawAlpha(faceAlpha: ArrayLike<number> | null, face: number, insta
     const rawFaceAlpha = faceAlpha ? faceAlpha[face] | 0 : 0;
     const faceEffectiveAlpha = rawFaceAlpha > 0 ? 256 - rawFaceAlpha : 256;
     return Math.max(0, Math.min(256, Math.min(instanceAlpha | 0, faceEffectiveAlpha)));
+}
+
+export type SceneDrawInstanceIdentity = {
+    drawId: number;
+    instanceId: number;
+};
+
+export function shouldRecordSceneCpuDrawset(): boolean {
+    return SCENE_DRAWSET_MANIFEST_ENABLED;
+}
+
+export function beginSceneDrawsetFrame(): void {
+    if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
+        return;
+    }
+    sceneFrameId++;
+    sceneNextCpuDrawId = 0;
+    sceneNextCpuInstanceId = 0;
+    sceneNextGpuDrawId = 0;
+    sceneNextGpuInstanceId = 0;
+    sceneCpuDrawRecords.length = 0;
+    sceneGpuDrawRecords.length = 0;
+}
+
+export function beginSceneCpuDrawInstance(): SceneDrawInstanceIdentity | null {
+    if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
+        return null;
+    }
+    return {
+        drawId: sceneNextCpuDrawId++,
+        instanceId: sceneNextCpuInstanceId++,
+    };
+}
+
+export function recordSceneCpuDrawRecord(record: Omit<SceneDrawRecord, 'frameId'>): void {
+    if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
+        return;
+    }
+    sceneCpuDrawRecords.push({
+        frameId: sceneFrameId >= 0 ? sceneFrameId : 0,
+        ...record,
+    });
 }
 
 function rememberSceneManifestGeometry(
@@ -1186,7 +1232,8 @@ function emitSceneGpuDrawRecords(geomId: number, instanceAlpha: number, source: 
         return;
     }
 
-    const instanceId = sceneNextInstanceId++;
+    const drawId = sceneNextGpuDrawId++;
+    const instanceId = sceneNextGpuInstanceId++;
     const frameId = sceneFrameId >= 0 ? sceneFrameId : 0;
     for (let face = 0; face < geom.numFaces; face++) {
         const textureId = geom.faceTexture ? geom.faceTexture[face] | 0 : -1;
@@ -1196,11 +1243,11 @@ function emitSceneGpuDrawRecords(geomId: number, instanceAlpha: number, source: 
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
         sceneGpuDrawRecords.push({
             frameId,
-            drawId: sceneNextDrawId++,
+            drawId,
             instanceId,
             geomId,
             face,
-            kind: sceneFaceKind(renderType, textureId),
+            kind: sceneDrawFaceKind(renderType, textureId),
             source,
             // NYM-220 first producer: descriptor coverage. The GPU-side
             // post-projection transcript will fill these once readback lands.
@@ -1603,11 +1650,6 @@ export function recordSceneCamera(
     // per-model geometry/instance emission — so reset the geometry keyframe here so
     // this frame's models re-upload when a keyframe is due.
     maybeResetSceneGeometryKeyframe();
-    if (SCENE_DRAWSET_MANIFEST_ENABLED) {
-        sceneFrameId++;
-        sceneNextDrawId = 0;
-        sceneNextInstanceId = 0;
-    }
     pushPacket(
         { kind: 'sceneCamera', sinEyePitch, cosEyePitch, sinEyeYaw, cosEyeYaw, originX, originY } as any,
         false,
@@ -1651,6 +1693,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
         packets.length = 0;
         deferredSurfacePackets.length = 0;
         deferredSurfaceIds.clear();
+        sceneCpuDrawRecords.length = 0;
         sceneGpuDrawRecords.length = 0;
         frameSurfacePacketCounts.clear();
         framePresentKeys.clear();
@@ -1784,6 +1827,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
             textureResources: textureResources.slice(),
             indexedSpriteResources: indexedSpriteResources.slice(),
             glyphResources: glyphResources.slice(),
+            sceneCpuDrawRecords: sceneCpuDrawRecords.slice(),
             sceneGpuDrawRecords: sceneGpuDrawRecords.slice()
         };
     }

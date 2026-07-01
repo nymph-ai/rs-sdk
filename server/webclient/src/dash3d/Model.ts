@@ -5,6 +5,7 @@ import Pix3D from '#/dash3d/Pix3D.js';
 import {
     SCENE_DRAW_SOURCE_ENTITY,
     SCENE_DRAW_SOURCE_MODEL,
+    beginSceneCpuDrawInstance,
     gpuRenderPackets,
     recordModelAnimFrameUpload,
     recordModelFlatTriangle,
@@ -12,7 +13,12 @@ import {
     recordModelGouraudTriangle,
     recordModelLabelMapUpload,
     recordModelSkeletonUpload,
+    recordSceneCpuDrawRecord,
     recordSceneInstance,
+    sceneDrawFaceKind,
+    shouldRecordSceneCpuDrawset,
+    type SceneDrawInstanceIdentity,
+    type SceneDrawSource,
     type SceneAnimOpPacket
 } from '#/graphics/GpuRenderPackets.js';
 
@@ -134,6 +140,11 @@ export default class Model extends ModelSource {
     private static nextSceneAnimFrameId: number = 1;
     private static readonly sceneSkeletonIds: WeakMap<AnimBase, number> = new WeakMap();
     private static readonly sceneAnimFrameIds: Map<string, number> = new Map();
+    private static sceneCpuDrawContext: {
+        geomId: number;
+        source: SceneDrawSource;
+        identity: SceneDrawInstanceIdentity;
+    } | null = null;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -170,6 +181,90 @@ export default class Model extends ModelSource {
     private static gpuModelRelativeX: number = 0;
     private static gpuModelRelativeY: number = 0;
     private static gpuModelRelativeZ: number = 0;
+
+    private beginSceneCpuDrawContext(typecode: number): typeof Model.sceneCpuDrawContext {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+
+        const identity = beginSceneCpuDrawInstance();
+        if (!identity) {
+            return null;
+        }
+
+        const entityKind: number = (typecode >>> 29) & 0x3;
+        const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+        const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
+        const uploadModel = sceneAnimation?.baseModel ?? this;
+        let geomId: number;
+        if (sceneAnimation) {
+            geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                geomId = Model.nextSceneGeomId++;
+                (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+        } else if (volatileEntityGeometry) {
+            geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
+        } else {
+            geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                geomId = Model.nextSceneGeomId++;
+                (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+        }
+
+        return {
+            geomId,
+            source: volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
+            identity,
+        };
+    }
+
+    private recordSceneCpuFace(
+        face: number,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        colours: [number, number, number],
+        textureId: number,
+        nearClipped: boolean,
+    ): void {
+        const context = Model.sceneCpuDrawContext;
+        if (!context) {
+            return;
+        }
+        const rawAlpha = this.faceAlpha ? this.faceAlpha[face] | 0 : 0;
+        recordSceneCpuDrawRecord({
+            drawId: context.identity.drawId,
+            instanceId: context.identity.instanceId,
+            geomId: context.geomId,
+            face,
+            kind: sceneDrawFaceKind(renderType, textureId),
+            source: context.source,
+            screen,
+            colours,
+            textureId,
+            alpha: rawAlpha > 0 ? 256 - rawAlpha : 256,
+            nearClipped,
+        });
+    }
+
+    private recordSceneCpuProjectedFace(
+        face: number,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        nearClipped: boolean,
+        clippedColours: [number, number, number] | null = null,
+    ): void {
+        if (!this.faceColourA) {
+            return;
+        }
+
+        const colourA = clippedColours ? clippedColours[0] | 0 : this.faceColourA[face] | 0;
+        const colourB = clippedColours ? clippedColours[1] | 0 : (this.faceColourB ? this.faceColourB[face] | 0 : colourA);
+        const colourC = clippedColours ? clippedColours[2] | 0 : (this.faceColourC ? this.faceColourC[face] | 0 : colourA);
+        const textureId = (renderType === 2 || renderType === 3) && this.faceColour ? this.faceColour[face] | 0 : -1;
+        this.recordSceneCpuFace(face, renderType, screen, [colourA, colourB, colourC], textureId, nearClipped);
+    }
 
     static init(total: number, provider: OnDemandProvider) {
         Model.meta = new Array(total);
@@ -2093,11 +2188,17 @@ export default class Model extends ModelSource {
             }
         }
 
+        const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
+        Model.sceneCpuDrawContext = this.beginSceneCpuDrawContext(typecode);
         try {
-            // try catch for example a model being drawn from 3d can crash like at baxtorian falls
-            this.render2(clipped, picking, typecode);
-        } catch (_e) {
-            // empty
+            try {
+                // try catch for example a model being drawn from 3d can crash like at baxtorian falls
+                this.render2(clipped, picking, typecode);
+            } catch (_e) {
+                // empty
+            }
+        } finally {
+            Model.sceneCpuDrawContext = previousSceneCpuDrawContext;
         }
     }
 
@@ -2363,6 +2464,19 @@ export default class Model extends ModelSource {
             type = this.faceRenderType[face] & 0x3;
         }
 
+        if (Model.sceneCpuDrawContext) {
+            this.recordSceneCpuProjectedFace(
+                face,
+                type,
+                [
+                    [Model.vertexScreenX[a], Model.vertexScreenY[a]],
+                    [Model.vertexScreenX[b], Model.vertexScreenY[b]],
+                    [Model.vertexScreenX[c], Model.vertexScreenY[c]],
+                ],
+                false,
+            );
+        }
+
         if (type === 0) {
             if (Model.gpuModelTransformActive && this.pointX && this.pointY && this.pointZ && gpuRenderPackets.shouldRecordModelGouraudTriangles()) {
                 Pix3D.recordGpuColourTable();
@@ -2566,16 +2680,30 @@ export default class Model extends ModelSource {
 
         Pix3D.hclip = false;
 
+        let type: number;
+        if (!this.faceRenderType) {
+            type = 0;
+        } else {
+            type = this.faceRenderType[face] & 0x3;
+        }
+
+        if (Model.sceneCpuDrawContext && (elements === 3 || elements === 4)) {
+            this.recordSceneCpuProjectedFace(
+                face,
+                type,
+                [
+                    [x0, y0],
+                    [x1, y1],
+                    [x2, y2],
+                ],
+                true,
+                [Model.clippedColour[0], Model.clippedColour[1], Model.clippedColour[2]],
+            );
+        }
+
         if (elements === 3) {
             if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX) {
                 Pix3D.hclip = true;
-            }
-
-            let type: number;
-            if (!this.faceRenderType) {
-                type = 0;
-            } else {
-                type = this.faceRenderType[face] & 0x3;
             }
 
             if (type === 0) {
@@ -2626,13 +2754,6 @@ export default class Model extends ModelSource {
         } else if (elements === 4) {
             if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX || Model.clippedX[3] < 0 || Model.clippedX[3] > Pix2D.sizeX) {
                 Pix3D.hclip = true;
-            }
-
-            let type: number;
-            if (!this.faceRenderType) {
-                type = 0;
-            } else {
-                type = this.faceRenderType[face] & 0x3;
             }
 
             if (type === 0) {

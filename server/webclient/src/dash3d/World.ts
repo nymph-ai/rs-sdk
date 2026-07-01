@@ -18,6 +18,7 @@ import Pix3D from '#/dash3d/Pix3D.js';
 import {
     SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
     SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+    beginSceneDrawsetFrame,
     gpuRenderPackets,
     isSceneGeometryUploaded,
     recordGroundGeometryUpload,
@@ -992,6 +993,8 @@ export default class World {
         World.cameraCosX = Pix3D.cosTable[eyePitch];
         World.cameraSinY = Pix3D.sinTable[eyeYaw];
         World.cameraCosY = Pix3D.cosTable[eyeYaw];
+
+        beginSceneDrawsetFrame();
 
         if (gpuRenderPackets.shouldEmitSceneInstances()) {
             // NYM-210: scene mode bypasses the gouraud/model CPU path that normally
