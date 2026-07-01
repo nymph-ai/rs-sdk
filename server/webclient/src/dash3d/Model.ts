@@ -19,6 +19,7 @@ import {
     recordSceneInstance,
     sceneDrawFaceKind,
     shouldEmitSceneNativeDeform,
+    shouldEmitSceneNativeTextures,
     shouldRecordSceneCpuDrawset,
     type SceneDrawInstanceIdentity,
     type SceneDrawSource,
@@ -1265,6 +1266,20 @@ export default class Model extends ModelSource {
         };
     }
 
+    private hasSceneTexturedFaces(): boolean {
+        if (!this.faceRenderType || !this.faceColour || !this.faceTextureP || !this.faceTextureM || !this.faceTextureN) {
+            return false;
+        }
+
+        for (let face = 0; face < this.numFaces; face++) {
+            const type = this.faceRenderType[face] & 0x3;
+            if (type === 2 || type === 3) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     addPoint(src: Model, vertex: number) {
         let index = -1;
 
@@ -2069,17 +2084,20 @@ export default class Model extends ModelSource {
 
         const radiusZ: number = radiusCosEyePitch + ((this.minY * sinEyePitch) >> 16);
         const nearClipFallback: boolean = midZ - radiusZ <= 50;
+        const entityKind: number = (typecode >>> 29) & 0x3;
+        const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+        const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
+        const uploadModel = sceneAnimation?.baseModel ?? this;
+        const textureFallback: boolean = gpuRenderPackets.shouldEmitSceneInstances()
+            && !shouldEmitSceneNativeTextures()
+            && uploadModel.hasSceneTexturedFaces();
 
-        if (gpuRenderPackets.shouldEmitSceneInstances() && !nearClipFallback) {
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !nearClipFallback && !textureFallback) {
             // NYM-210: the model passed bounding-cylinder culling (cheap, game
             // logic). Emit its geometry once (cached by id) + a per-frame
             // instance, then bail BEFORE the per-vertex CPU projection loop —
             // the GPU does projection/lighting/raster. This is where the ~65ms
             // renderAll cost disappears.
-            const entityKind: number = (typecode >>> 29) & 0x3;
-            const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
-            const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
-            const uploadModel = sceneAnimation?.baseModel ?? this;
             let geomId: number;
             if (sceneAnimation) {
                 geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
@@ -2228,10 +2246,9 @@ export default class Model extends ModelSource {
 
         const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
         const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
-        Model.sceneCpuDrawContext = nearClipFallback && gpuRenderPackets.shouldEmitSceneInstances()
-            ? null
-            : this.beginSceneCpuDrawContext(typecode);
-        Model.sceneGpuFallbackDrawContext = nearClipFallback && gpuRenderPackets.shouldEmitSceneInstances()
+        const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipFallback || textureFallback);
+        Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode);
+        Model.sceneGpuFallbackDrawContext = sceneGpuFallback
             ? this.beginSceneGpuFallbackDrawContext(typecode)
             : null;
         try {

@@ -1105,6 +1105,14 @@ export function shouldEmitSceneNativeLighting(): boolean {
     return false;
 }
 
+export function shouldEmitSceneNativeTextures(): boolean {
+    // Textured scene faces carry texture ids + coordinate vertex metadata, but
+    // the native scene shader still shades them through colour-table indices.
+    // Keep textured faces on the texture-triangle packet path until the native
+    // scene shader samples UV texels from the uploaded texture atlas.
+    return false;
+}
+
 type SceneManifestGeometry = {
     pointX: ArrayLike<number> | null;
     pointY: ArrayLike<number> | null;

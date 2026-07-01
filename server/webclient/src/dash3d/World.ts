@@ -19,6 +19,7 @@ import {
     SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
     SCENE_DRAW_SOURCE_TERRAIN_QUICK,
     beginSceneCpuDrawInstance,
+    beginSceneGpuDrawInstance,
     beginSceneDrawsetFrame,
     gpuRenderPackets,
     isSceneGeometryUploaded,
@@ -26,8 +27,10 @@ import {
     recordQuickGroundRegionGeometryUpload,
     recordSceneCamera,
     recordSceneCpuDrawRecord,
+    recordSceneGpuDrawRecord,
     recordSceneInstance,
     sceneDrawFaceKind,
+    shouldEmitSceneNativeTextures,
     shouldRecordSceneCpuDrawset,
     type SceneDrawInstanceIdentity,
     type SceneDrawSource
@@ -160,6 +163,11 @@ export default class World {
     private readonly sceneQuickGroundCpuIdentityCycle: Int32Array;
     private readonly sceneQuickGroundCpuDrawIds: Int32Array;
     private readonly sceneQuickGroundCpuInstanceIds: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackIdentityCycle: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackDrawIds: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackInstanceIds: Int32Array;
+    private readonly sceneQuickGroundTextureFallbackCycle: Int32Array;
+    private readonly sceneQuickGroundTextureFallback: Int8Array;
     private sceneNextQuickGroundGeomId: number = 1;
 
     private dynamicCount: number = 0;
@@ -181,7 +189,14 @@ export default class World {
         this.sceneQuickGroundCpuIdentityCycle = new Int32Array(maxLevel);
         this.sceneQuickGroundCpuDrawIds = new Int32Array(maxLevel);
         this.sceneQuickGroundCpuInstanceIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackIdentityCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackDrawIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackInstanceIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundTextureFallbackCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundTextureFallback = new Int8Array(maxLevel);
         this.sceneQuickGroundCpuIdentityCycle.fill(-1);
+        this.sceneQuickGroundGpuFallbackIdentityCycle.fill(-1);
+        this.sceneQuickGroundTextureFallbackCycle.fill(-1);
 
         this.resetMap();
     }
@@ -189,6 +204,8 @@ export default class World {
     private invalidateSceneQuickGroundRegions(): void {
         this.sceneQuickGroundGeomIds.fill(0);
         this.sceneQuickGroundCpuIdentityCycle.fill(-1);
+        this.sceneQuickGroundGpuFallbackIdentityCycle.fill(-1);
+        this.sceneQuickGroundTextureFallbackCycle.fill(-1);
     }
 
     resetMap(): void {
@@ -2066,11 +2083,73 @@ export default class World {
         };
     }
 
+    private beginSceneQuickGroundGpuFallbackDrawInstance(level: number): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        if (this.sceneQuickGroundGpuFallbackIdentityCycle[level] !== World.cycleNo) {
+            const identity = beginSceneGpuDrawInstance();
+            if (!identity) {
+                return null;
+            }
+            this.sceneQuickGroundGpuFallbackIdentityCycle[level] = World.cycleNo;
+            this.sceneQuickGroundGpuFallbackDrawIds[level] = identity.drawId;
+            this.sceneQuickGroundGpuFallbackInstanceIds[level] = identity.instanceId;
+        }
+        return {
+            drawId: this.sceneQuickGroundGpuFallbackDrawIds[level],
+            instanceId: this.sceneQuickGroundGpuFallbackInstanceIds[level],
+        };
+    }
+
     private beginSceneGroundCpuDrawInstance(): SceneDrawInstanceIdentity | null {
         if (!shouldRecordSceneCpuDrawset()) {
             return null;
         }
         return beginSceneCpuDrawInstance();
+    }
+
+    private beginSceneGroundGpuFallbackDrawInstance(): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return beginSceneGpuDrawInstance();
+    }
+
+    private quickGroundLevelHasSceneTextureFallback(level: number): boolean {
+        if (!gpuRenderPackets.shouldEmitSceneInstances() || shouldEmitSceneNativeTextures()) {
+            return false;
+        }
+        if (this.sceneQuickGroundTextureFallbackCycle[level] === World.cycleNo) {
+            return this.sceneQuickGroundTextureFallback[level] !== 0;
+        }
+
+        let fallback = false;
+        for (let x = 0; x < this.maxTileX && !fallback; x++) {
+            for (let z = 0; z < this.maxTileZ; z++) {
+                const quick = this.squares[level][x][z]?.quickGround;
+                if (quick && quick.texture !== -1) {
+                    fallback = true;
+                    break;
+                }
+            }
+        }
+
+        this.sceneQuickGroundTextureFallbackCycle[level] = World.cycleNo;
+        this.sceneQuickGroundTextureFallback[level] = fallback ? 1 : 0;
+        return fallback;
+    }
+
+    private groundHasSceneTextureFallback(ground: Ground): boolean {
+        if (!ground.faceTexture || !gpuRenderPackets.shouldEmitSceneInstances() || shouldEmitSceneNativeTextures()) {
+            return false;
+        }
+        for (let i = 0; i < ground.faceTexture.length; i++) {
+            if (ground.faceTexture[i] !== -1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private recordSceneTerrainCpuFace(
@@ -2082,11 +2161,12 @@ export default class World {
         screen: [[number, number], [number, number], [number, number]],
         colours: [number, number, number],
         textureId: number,
+        gpuFallback: boolean = false,
     ): void {
         if (!identity || geomId < 0 || face < 0) {
             return;
         }
-        recordSceneCpuDrawRecord({
+        const record = {
             drawId: identity.drawId,
             instanceId: identity.instanceId,
             geomId,
@@ -2098,7 +2178,12 @@ export default class World {
             textureId,
             alpha: 256,
             nearClipped: false,
-        });
+        };
+        if (gpuFallback) {
+            recordSceneGpuDrawRecord(record);
+        } else {
+            recordSceneCpuDrawRecord(record);
+        }
     }
 
     private lowMemTextureColours(texture: number, colourA: number, colourB: number, colourC: number): [number, number, number] {
@@ -2257,11 +2342,14 @@ export default class World {
         if ((World.cycleNo % 120) === 0 && level === 0) {
             console.log(`[rqg] called L${level} emit=${gpuRenderPackets.shouldEmitSceneInstances()} cycle=${World.cycleNo}`);
         }
-        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+        const textureFallback = this.quickGroundLevelHasSceneTextureFallback(level);
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
             this.emitQuickGroundRegion(level);
             return;
         }
-        const sceneIdentity = this.beginSceneQuickGroundCpuDrawInstance(level);
+        const sceneIdentity = textureFallback
+            ? this.beginSceneQuickGroundGpuFallbackDrawInstance(level)
+            : this.beginSceneQuickGroundCpuDrawInstance(level);
         const sceneGeomId = sceneIdentity ? this.ensureSceneQuickGroundGeomId(level) : -1;
 
         let x3: number;
@@ -2358,6 +2446,7 @@ export default class World {
                         screen,
                         [ground.colourNE, ground.colourNW, ground.colourSE],
                         ground.texture,
+                        textureFallback,
                     );
                     if (ground.flat) {
                         Pix3D.textureTriangle(
@@ -2393,6 +2482,7 @@ export default class World {
                         screen,
                         colours,
                         -1,
+                        textureFallback,
                     );
                     Pix3D.gouraudTriangle(
                         py1, px3, pz0,
@@ -2411,6 +2501,7 @@ export default class World {
                         screen,
                         [ground.colourNE, ground.colourNW, ground.colourSE],
                         -1,
+                        textureFallback,
                     );
                     Pix3D.gouraudTriangle(
                         py1, px3, pz0,
@@ -2442,6 +2533,7 @@ export default class World {
                         screen,
                         [ground.colourSW, ground.colourSE, ground.colourNW],
                         ground.texture,
+                        textureFallback,
                     );
                     Pix3D.textureTriangle(
                         px0, pz0, px3,
@@ -2464,6 +2556,7 @@ export default class World {
                         screen,
                         colours,
                         -1,
+                        textureFallback,
                     );
                     Pix3D.gouraudTriangle(
                         px0, pz0, px3,
@@ -2482,6 +2575,7 @@ export default class World {
                         screen,
                         [ground.colourSW, ground.colourSE, ground.colourNW],
                         -1,
+                        textureFallback,
                     );
                     Pix3D.gouraudTriangle(
                         px0, pz0, px3,
@@ -2494,7 +2588,8 @@ export default class World {
     }
 
     private renderGround(tileX: number, tileZ: number, ground: Ground, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
-        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+        const textureFallback = this.groundHasSceneTextureFallback(ground);
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
             // NYM-210 Slice 2: terrain on GPU. Ground verts are WORLD-space; the
             // GPU projects them with yaw=0 + rel=-camera (world → camera-relative),
             // identical to the CPU path below. Geometry cached per Ground object.
@@ -2510,7 +2605,9 @@ export default class World {
             recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_COMPLEX);
             return;
         }
-        const sceneIdentity = this.beginSceneGroundCpuDrawInstance();
+        const sceneIdentity = textureFallback
+            ? this.beginSceneGroundGpuFallbackDrawInstance()
+            : this.beginSceneGroundCpuDrawInstance();
         const sceneGeomId = sceneIdentity ? this.ensureSceneGroundGeomId(ground) : -1;
 
         let vertexCount: number = ground.vertexX.length;
@@ -2579,6 +2676,7 @@ export default class World {
                             screen,
                             [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
                             ground.faceTexture[v],
+                            textureFallback,
                         );
                         if (ground.flat) {
                             Pix3D.textureTriangle(
@@ -2614,6 +2712,7 @@ export default class World {
                             screen,
                             colours,
                             -1,
+                            textureFallback,
                         );
                         Pix3D.gouraudTriangle(
                             x0, x1, x2,
@@ -2632,6 +2731,7 @@ export default class World {
                             screen,
                             [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
                             -1,
+                            textureFallback,
                         );
                         Pix3D.gouraudTriangle(
                             x0, x1, x2,
