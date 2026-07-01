@@ -1182,18 +1182,18 @@ export function shouldEmitSceneNativeDeform(): boolean {
 }
 
 export function shouldEmitSceneNativeLighting(): boolean {
-    // World.shareLight/Model.light already bake scene lighting into face colour
-    // indices before geometry upload. SceneLight is reserved for a future raw
-    // normal/GPU-relighting path, so do not emit a packet the native renderer
-    // would currently parse and ignore.
-    return false;
+    // World.shareLight/Model.light still bake scene lighting into face colour
+    // indices before geometry upload, but emitting SceneLight keeps the native
+    // stream carrying the light vector needed by the future raw-normal relight
+    // path instead of dropping that state entirely.
+    return true;
 }
 
 export function shouldEmitSceneNativeTextures(): boolean {
-    // Textured scene faces carry texture ids + coordinate vertex metadata, but
-    // the native scene shader still shades them through colour-table indices.
-    // Keep textured faces on the texture-triangle packet path until the native
-    // scene shader samples UV texels from the uploaded texture atlas.
+    // Supported unclipped textured scene faces now carry texture ids +
+    // coordinate vertex metadata into the native atlas sampler. The remaining
+    // fallback covers texture modes that still lack parity: low-memory/detail,
+    // hclip, transparency/discard, and near-clipped texture splitting.
     return false;
 }
 

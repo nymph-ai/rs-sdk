@@ -29,6 +29,7 @@ import {
     recordSceneCpuDrawRecord,
     recordSceneGpuDrawRecord,
     recordSceneInstance,
+    recordSceneLight,
     sceneDrawFaceKind,
     shouldEmitSceneNativeTextures,
     shouldRecordSceneCpuDrawset,
@@ -643,6 +644,7 @@ export default class World {
     shareLight(ambient: number, contrast: number, lightSrcX: number, lightSrcY: number, lightSrcZ: number): void {
         const lightMagnitude: number = Math.sqrt(lightSrcX * lightSrcX + lightSrcY * lightSrcY + lightSrcZ * lightSrcZ) | 0;
         const attenuation: number = (contrast * lightMagnitude) >> 8;
+        recordSceneLight(ambient, attenuation, lightSrcX, lightSrcY, lightSrcZ);
 
         for (let level: number = 0; level < this.maxTileLevel; level++) {
             for (let tileX: number = 0; tileX < this.maxTileX; tileX++) {
