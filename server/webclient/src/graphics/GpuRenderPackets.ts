@@ -1090,6 +1090,12 @@ function readInitialSceneInstanceMode(): boolean {
 }
 
 type SceneManifestGeometry = {
+    pointX: ArrayLike<number> | null;
+    pointY: ArrayLike<number> | null;
+    pointZ: ArrayLike<number> | null;
+    faceA: ArrayLike<number> | null;
+    faceB: ArrayLike<number> | null;
+    faceC: ArrayLike<number> | null;
     numFaces: number;
     faceColourA: ArrayLike<number> | null;
     faceColourB: ArrayLike<number> | null;
@@ -1097,6 +1103,21 @@ type SceneManifestGeometry = {
     faceType: ArrayLike<number> | null;
     faceAlpha: ArrayLike<number> | null;
     faceTexture: ArrayLike<number> | null;
+};
+
+type SceneManifestCamera = {
+    sinEyePitch: number;
+    cosEyePitch: number;
+    sinEyeYaw: number;
+    cosEyeYaw: number;
+    originX: number;
+    originY: number;
+};
+
+type SceneManifestProjectedVertex = {
+    screen: [number, number];
+    z: number;
+    valid: boolean;
 };
 
 const SCENE_FACE_KIND_GOURAUD = 0;
@@ -1114,6 +1135,7 @@ const sceneManifestGeometry = new Map<number, SceneManifestGeometry>();
 const sceneCpuDrawRecords: SceneDrawRecord[] = [];
 const sceneGpuDrawRecords: SceneDrawRecord[] = [];
 let sceneFrameId = -1;
+let sceneManifestCamera: SceneManifestCamera | null = null;
 let sceneNextCpuDrawId = 0;
 let sceneNextCpuInstanceId = 0;
 let sceneNextGpuDrawId = 0;
@@ -1170,6 +1192,7 @@ export function beginSceneDrawsetFrame(): void {
         return;
     }
     sceneFrameId++;
+    sceneManifestCamera = null;
     sceneNextCpuDrawId = 0;
     sceneNextCpuInstanceId = 0;
     sceneNextGpuDrawId = 0;
@@ -1200,6 +1223,12 @@ export function recordSceneCpuDrawRecord(record: Omit<SceneDrawRecord, 'frameId'
 
 function rememberSceneManifestGeometry(
     geomId: number,
+    pointX: ArrayLike<number> | null,
+    pointY: ArrayLike<number> | null,
+    pointZ: ArrayLike<number> | null,
+    faceA: ArrayLike<number> | null,
+    faceB: ArrayLike<number> | null,
+    faceC: ArrayLike<number> | null,
     numFaces: number,
     faceColourA: ArrayLike<number> | null,
     faceColourB: ArrayLike<number> | null,
@@ -1212,6 +1241,12 @@ function rememberSceneManifestGeometry(
         return;
     }
     sceneManifestGeometry.set(geomId, {
+        pointX,
+        pointY,
+        pointZ,
+        faceA,
+        faceB,
+        faceC,
         numFaces,
         faceColourA,
         faceColourB,
@@ -1222,7 +1257,137 @@ function rememberSceneManifestGeometry(
     });
 }
 
-function emitSceneGpuDrawRecords(geomId: number, instanceAlpha: number, source: SceneDrawSource): void {
+function i32(value: number): number {
+    return value | 0;
+}
+
+function wadd32(a: number, b: number): number {
+    return (a + b) | 0;
+}
+
+function wmulAddShr16(a: number, b: number, c: number, d: number): number {
+    return (Math.imul(a | 0, b | 0) + Math.imul(c | 0, d | 0) | 0) >> 16;
+}
+
+function wmulSubShr16(a: number, b: number, c: number, d: number): number {
+    return (Math.imul(a | 0, b | 0) - Math.imul(c | 0, d | 0) | 0) >> 16;
+}
+
+function wshl32(value: number, shift: number): number {
+    return (value << shift) | 0;
+}
+
+function sceneProjectManifestVertex(
+    localX: number,
+    localY: number,
+    localZ: number,
+    sinYaw: number,
+    cosYaw: number,
+    relativeX: number,
+    relativeY: number,
+    relativeZ: number,
+): SceneManifestProjectedVertex {
+    const cam = sceneManifestCamera;
+    if (!cam) {
+        return { screen: [0, 0], z: 0, valid: false };
+    }
+
+    let x = i32(localX);
+    let y = i32(localY);
+    let z = i32(localZ);
+    let tmp = wmulAddShr16(z, sinYaw, x, cosYaw);
+    z = wmulSubShr16(z, cosYaw, x, sinYaw);
+    x = tmp;
+
+    x = wadd32(x, relativeX);
+    y = wadd32(y, relativeY);
+    z = wadd32(z, relativeZ);
+
+    tmp = wmulAddShr16(z, cam.sinEyeYaw, x, cam.cosEyeYaw);
+    z = wmulSubShr16(z, cam.cosEyeYaw, x, cam.sinEyeYaw);
+    x = tmp;
+
+    tmp = wmulSubShr16(y, cam.cosEyePitch, z, cam.sinEyePitch);
+    z = wmulAddShr16(y, cam.sinEyePitch, z, cam.cosEyePitch);
+    y = tmp;
+
+    if (z < 50) {
+        return { screen: [0, 0], z, valid: false };
+    }
+
+    return {
+        screen: [
+            wadd32(cam.originX, Math.trunc(wshl32(x, 9) / z)),
+            wadd32(cam.originY, Math.trunc(wshl32(y, 9) / z)),
+        ],
+        z,
+        valid: true,
+    };
+}
+
+function sceneProjectedFace(
+    geom: SceneManifestGeometry,
+    face: number,
+    sinYaw: number,
+    cosYaw: number,
+    relativeX: number,
+    relativeY: number,
+    relativeZ: number,
+): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean } {
+    if (!geom.pointX || !geom.pointY || !geom.pointZ || !geom.faceA || !geom.faceB || !geom.faceC) {
+        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false };
+    }
+
+    const vertexA = geom.faceA[face] | 0;
+    const vertexB = geom.faceB[face] | 0;
+    const vertexC = geom.faceC[face] | 0;
+    const a = sceneProjectManifestVertex(
+        geom.pointX[vertexA] | 0,
+        geom.pointY[vertexA] | 0,
+        geom.pointZ[vertexA] | 0,
+        sinYaw,
+        cosYaw,
+        relativeX,
+        relativeY,
+        relativeZ,
+    );
+    const b = sceneProjectManifestVertex(
+        geom.pointX[vertexB] | 0,
+        geom.pointY[vertexB] | 0,
+        geom.pointZ[vertexB] | 0,
+        sinYaw,
+        cosYaw,
+        relativeX,
+        relativeY,
+        relativeZ,
+    );
+    const c = sceneProjectManifestVertex(
+        geom.pointX[vertexC] | 0,
+        geom.pointY[vertexC] | 0,
+        geom.pointZ[vertexC] | 0,
+        sinYaw,
+        cosYaw,
+        relativeX,
+        relativeY,
+        relativeZ,
+    );
+
+    return {
+        screen: [a.screen, b.screen, c.screen],
+        nearClipped: !a.valid || !b.valid || !c.valid,
+    };
+}
+
+function emitSceneGpuDrawRecords(
+    geomId: number,
+    sinYaw: number,
+    cosYaw: number,
+    relativeX: number,
+    relativeY: number,
+    relativeZ: number,
+    instanceAlpha: number,
+    source: SceneDrawSource,
+): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return;
     }
@@ -1241,6 +1406,7 @@ function emitSceneGpuDrawRecords(geomId: number, instanceAlpha: number, source: 
         const colourA = geom.faceColourA ? geom.faceColourA[face] | 0 : 0;
         const colourB = geom.faceColourB ? geom.faceColourB[face] | 0 : colourA;
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
+        const projected = sceneProjectedFace(geom, face, sinYaw, cosYaw, relativeX, relativeY, relativeZ);
         sceneGpuDrawRecords.push({
             frameId,
             drawId,
@@ -1249,13 +1415,11 @@ function emitSceneGpuDrawRecords(geomId: number, instanceAlpha: number, source: 
             face,
             kind: sceneDrawFaceKind(renderType, textureId),
             source,
-            // NYM-220 first producer: descriptor coverage. The GPU-side
-            // post-projection transcript will fill these once readback lands.
-            screen: [[0, 0], [0, 0], [0, 0]],
+            screen: projected.screen,
             colours: [colourA, colourB, colourC],
             textureId,
             alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
-            nearClipped: false,
+            nearClipped: projected.nearClipped,
         });
     }
 }
@@ -1349,6 +1513,12 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
     const faceColourC = model.faceColourC ?? faceColourA;
     rememberSceneManifestGeometry(
         geomId,
+        model.pointX,
+        model.pointY,
+        model.pointZ,
+        model.faceVertexA,
+        model.faceVertexB,
+        model.faceVertexC,
         model.numFaces,
         faceColourA,
         faceColourB,
@@ -1508,6 +1678,12 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
     }
     rememberSceneManifestGeometry(
         geomId,
+        ground.vertexX,
+        ground.vertexY,
+        ground.vertexZ,
+        faceA,
+        faceB,
+        faceC,
         faceA.length,
         faceColourA,
         faceColourB,
@@ -1566,6 +1742,12 @@ export function recordQuickGroundRegionGeometryUpload(
     sceneGeometryUploaded.add(geomId);
     rememberSceneManifestGeometry(
         geomId,
+        pointX,
+        pointY,
+        pointZ,
+        faceA,
+        faceB,
+        faceC,
         faceA.length,
         faceColourA,
         faceColourB,
@@ -1616,7 +1798,7 @@ export function recordSceneInstance(
     if (!gpuRenderPackets.enabled) {
         return;
     }
-    emitSceneGpuDrawRecords(geomId, alpha, source);
+    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source);
     pushPacket(
         {
             kind: 'sceneInstance',
@@ -1645,6 +1827,16 @@ export function recordSceneCamera(
 ): void {
     if (!gpuRenderPackets.enabled) {
         return;
+    }
+    if (SCENE_DRAWSET_MANIFEST_ENABLED) {
+        sceneManifestCamera = {
+            sinEyePitch,
+            cosEyePitch,
+            sinEyeYaw,
+            cosEyeYaw,
+            originX,
+            originY,
+        };
     }
     // Camera is emitted once per frame at the start of the scene pass, before the
     // per-model geometry/instance emission — so reset the geometry keyframe here so
