@@ -94,6 +94,7 @@ export type SceneDrawRecord = {
     textureId: number;
     alpha: number;
     nearClipped: boolean;
+    animated: boolean;
 };
 
 type PacketBase = {
@@ -1431,6 +1432,7 @@ function emitSceneGpuDrawRecords(
     relativeZ: number,
     instanceAlpha: number,
     source: SceneDrawSource,
+    animated: boolean,
 ): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return;
@@ -1464,6 +1466,7 @@ function emitSceneGpuDrawRecords(
             textureId,
             alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
             nearClipped: projected.nearClipped,
+            animated,
         });
     }
 }
@@ -1838,11 +1841,12 @@ export function recordSceneInstance(
     alpha: number,
     animFrameId: number = 0,
     source: SceneDrawSource = SCENE_DRAW_SOURCE_MODEL,
+    animated: boolean = animFrameId > 0,
 ): void {
     if (!gpuRenderPackets.enabled) {
         return;
     }
-    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source);
+    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source, animated);
     pushPacket(
         {
             kind: 'sceneInstance',

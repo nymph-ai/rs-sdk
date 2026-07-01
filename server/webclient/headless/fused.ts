@@ -1252,6 +1252,7 @@ function sceneDrawRecordLine(r: any): string {
         i(r.textureId, -1),
         i(r.alpha, 256),
         r.nearClipped ? 1 : 0,
+        r.animated ? 1 : 0,
     ].join(' ');
 }
 
@@ -1261,7 +1262,7 @@ function appendSceneDrawsetManifest(path: string, records: any[]): void {
     }
     if (!sceneDrawsetManifestReady.has(path)) {
         mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha nearClipped\n');
+        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha nearClipped animated\n');
         sceneDrawsetManifestReady.add(path);
     }
     appendFileSync(path, records.map(sceneDrawRecordLine).join('\n') + '\n');

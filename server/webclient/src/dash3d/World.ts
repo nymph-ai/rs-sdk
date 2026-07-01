@@ -2178,6 +2178,7 @@ export default class World {
             textureId,
             alpha: 256,
             nearClipped: false,
+            animated: false,
         };
         if (gpuFallback) {
             recordSceneGpuDrawRecord(record);

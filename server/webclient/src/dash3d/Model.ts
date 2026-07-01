@@ -147,11 +147,13 @@ export default class Model extends ModelSource {
     private static sceneCpuDrawContext: {
         geomId: number;
         source: SceneDrawSource;
+        animated: boolean;
         identity: SceneDrawInstanceIdentity;
     } | null = null;
     private static sceneGpuFallbackDrawContext: {
         geomId: number;
         source: SceneDrawSource;
+        animated: boolean;
         identity: SceneDrawInstanceIdentity;
     } | null = null;
 
@@ -223,6 +225,7 @@ export default class Model extends ModelSource {
         return {
             geomId,
             source: volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
+            animated: volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             identity,
         };
     }
@@ -266,6 +269,7 @@ export default class Model extends ModelSource {
                 instanceId: context.identity.instanceId,
                 geomId: context.geomId,
                 source: context.source,
+                animated: context.animated,
                 ...record,
             });
         }
@@ -277,6 +281,7 @@ export default class Model extends ModelSource {
                 instanceId: gpuFallbackContext.identity.instanceId,
                 geomId: gpuFallbackContext.geomId,
                 source: gpuFallbackContext.source,
+                animated: gpuFallbackContext.animated,
                 ...record,
             });
         }
@@ -2143,6 +2148,7 @@ export default class Model extends ModelSource {
                 256,
                 sceneAnimation?.animFrameId ?? 0,
                 volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
+                volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             );
             return;
         }
