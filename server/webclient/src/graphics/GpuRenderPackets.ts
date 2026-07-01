@@ -1175,8 +1175,8 @@ function readInitialSceneInstanceMode(): boolean {
 
 export function shouldEmitSceneNativeDeform(): boolean {
     // Tags 22/23/24 are serialized by fused.ts and consumed by the native blob
-    // parser. The native scene renderer now deforms supported unscaled
-    // origin/translate/rotate/scale animation frames against cached geometry;
+    // parser. The native scene renderer now deforms supported
+    // origin/translate/rotate/scale/resize animation frames against cached geometry;
     // unsupported cases still stay on the CPU-deformed dynamic bridge.
     return true;
 }
@@ -1241,6 +1241,7 @@ const SCENE_ANIM_TRANSLATE = 1;
 const SCENE_ANIM_ROTATE = 2;
 const SCENE_ANIM_SCALE = 3;
 const SCENE_ANIM_TRANSPARENCY = 5;
+const SCENE_ANIM_RESIZE = 6;
 
 // GPU-resident geometry: ids uploaded this session (mirrors the native cache).
 // Not cleared by reset() — geometry persists across frames on the GPU.
@@ -1529,9 +1530,19 @@ function applySceneManifestAnimOp(
     op: SceneAnimOpPacket,
     origin: Int32Array,
 ): void {
+    const type = op.type | 0;
+    if (type === SCENE_ANIM_RESIZE) {
+        for (let v = 0; v < pointX.length; v++) {
+            pointX[v] = ((pointX[v] * op.x) / 128) | 0;
+            pointY[v] = ((pointY[v] * op.y) / 128) | 0;
+            pointZ[v] = ((pointZ[v] * op.z) / 128) | 0;
+        }
+        return;
+    }
+
     const labels = op.labels;
     if (!labels || labels.length === 0) {
-        if ((op.type | 0) === SCENE_ANIM_ORIGIN) {
+        if (type === SCENE_ANIM_ORIGIN) {
             origin[0] = op.x | 0;
             origin[1] = op.y | 0;
             origin[2] = op.z | 0;
@@ -1539,7 +1550,6 @@ function applySceneManifestAnimOp(
         return;
     }
 
-    const type = op.type | 0;
     if (type === SCENE_ANIM_TRANSPARENCY) {
         if (!faceAlpha || !faceLabels) {
             return;
@@ -1645,12 +1655,22 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
     if (cached) {
         return cached;
     }
-    const labels = sceneManifestLabelMaps.get(geomId);
     const faceLabels = sceneManifestFaceLabelMaps.get(geomId) ?? null;
     const ops = sceneManifestAnimFrames.get(animFrameId);
-    if (!labels || !ops) {
+    if (!ops) {
         return geom;
     }
+    const labels = sceneManifestLabelMaps.get(geomId) ?? null;
+    const needsVertexLabels = ops.some(op =>
+        op.type === SCENE_ANIM_ORIGIN ||
+        op.type === SCENE_ANIM_TRANSLATE ||
+        op.type === SCENE_ANIM_ROTATE ||
+        op.type === SCENE_ANIM_SCALE
+    );
+    if (needsVertexLabels && !labels) {
+        return geom;
+    }
+    const vertexLabels = labels ?? new Int32Array(0);
 
     const pointCount = geom.pointX.length;
     const pointX = new Int32Array(pointCount);
@@ -1670,7 +1690,7 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
     }
     const origin = new Int32Array(3);
     for (const op of ops) {
-        applySceneManifestAnimOp(pointX, pointY, pointZ, labels, faceAlpha, faceLabels, op, origin);
+        applySceneManifestAnimOp(pointX, pointY, pointZ, vertexLabels, faceAlpha, faceLabels, op, origin);
     }
 
     const deformed = {
@@ -1948,15 +1968,19 @@ export function recordModelLabelMapUpload(geomId: number, model: any, force: boo
         return;
     }
     const labels = buildModelSceneVertexLabels(model);
-    if (!labels) {
+    const faceLabels = buildModelSceneFaceLabels(model);
+    if (!labels && !faceLabels) {
         return;
     }
-    const faceLabels = buildModelSceneFaceLabels(model);
     if (!force) {
         sceneLabelMapUploaded.add(geomId);
     }
     if (SCENE_DRAWSET_MANIFEST_ENABLED) {
-        sceneManifestLabelMaps.set(geomId, sceneGeometryField(labels, model.numPoints, force));
+        if (labels) {
+            sceneManifestLabelMaps.set(geomId, sceneGeometryField(labels, model.numPoints, force));
+        } else {
+            sceneManifestLabelMaps.delete(geomId);
+        }
         if (faceLabels) {
             sceneManifestFaceLabelMaps.set(geomId, sceneGeometryField(faceLabels, model.numFaces, force));
         } else {

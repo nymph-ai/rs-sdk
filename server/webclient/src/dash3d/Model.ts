@@ -140,6 +140,7 @@ export default class Model extends ModelSource {
     // cache (object identity is stable for static scenery built once per region).
     static nextSceneGeomId: number = 1;
     private static readonly SCENE_DYNAMIC_GEOM_BIT: number = 0x80000000;
+    private static readonly SCENE_RESIZE_TRANSFORM: number = 6;
     private static nextSceneSkeletonId: number = 1;
     private static nextSceneAnimFrameId: number = 1;
     private static readonly sceneSkeletonIds: WeakMap<AnimBase, number> = new WeakMap();
@@ -1229,16 +1230,6 @@ export default class Model extends ModelSource {
             return;
         }
 
-        if (!baseModel.labelVertices) {
-            return;
-        }
-
-        if (resizeX !== 128 || resizeY !== 128 || resizeZ !== 128) {
-            // Resized NPCs need a scale stage outside skeletal animation. Keep
-            // them on the existing dynamic bridge until that path is explicit.
-            return;
-        }
-
         const primary = primaryId === -1 ? null : AnimFrame.get(primaryId);
         const secondary = secondaryId === -1 ? null : AnimFrame.get(secondaryId);
         const skeleton: AnimBase | null = primary?.base ?? secondary?.base ?? null;
@@ -1248,6 +1239,24 @@ export default class Model extends ModelSource {
             Model.appendMaskedSceneOps(ops, primary, secondary, mask, skeleton);
         } else {
             Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
+        }
+        if (resizeX !== 128 || resizeY !== 128 || resizeZ !== 128) {
+            ops.push({
+                type: Model.SCENE_RESIZE_TRANSFORM,
+                x: resizeX | 0,
+                y: resizeY | 0,
+                z: resizeZ | 0,
+                labels: null
+            });
+        }
+        const hasVertexDeform = ops.some(op =>
+            op.type === AnimTransform.ORIGIN ||
+            op.type === AnimTransform.TRANSLATE ||
+            op.type === AnimTransform.ROTATE ||
+            op.type === AnimTransform.SCALE
+        );
+        if (hasVertexDeform && !baseModel.labelVertices) {
+            return;
         }
         const hasTransparency = ops.some(op => op.type === AnimTransform.TRANSPARENCY);
         if (hasTransparency && (!baseModel.labelFaces || !baseModel.faceAlpha)) {
@@ -1260,7 +1269,7 @@ export default class Model extends ModelSource {
         const skeletonId = ops.length > 0 ? Model.sceneSkeletonId(skeleton) : 0;
         let animFrameId = 0;
         if (ops.length > 0) {
-            const key = `${primaryId}:${secondaryId}:${Model.maskHash(mask)}:${skeletonId}`;
+            const key = `${primaryId}:${secondaryId}:${Model.maskHash(mask)}:${skeletonId}:${resizeX}:${resizeY}:${resizeZ}`;
             animFrameId = Model.sceneAnimFrameIds.get(key) ?? 0;
             if (!animFrameId) {
                 animFrameId = Model.nextSceneAnimFrameId++;
@@ -2119,7 +2128,7 @@ export default class Model extends ModelSource {
                     (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
                 }
             } else if (volatileEntityGeometry) {
-                // Unsupported NYM-217 fallback: resized, transparent, or unlabeled
+                // Unsupported NYM-217 fallback: unlabeled or otherwise unsupported
                 // entity models are already CPU-animated into Model.tempModel before
                 // worldRender(). Re-upload that final geometry each frame under a
                 // stable entity geom id until their native deform path is explicit.
