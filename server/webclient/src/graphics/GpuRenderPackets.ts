@@ -1197,8 +1197,8 @@ export function shouldEmitSceneNativeLighting(): boolean {
 export function shouldEmitSceneNativeTextures(): boolean {
     // Supported unclipped textured scene faces now carry texture ids,
     // coordinate vertex metadata, and low-memory/opaque sampling flags into the
-    // native atlas sampler. The remaining fallback covers texture modes that
-    // still lack parity: hclip and near-clipped texture splitting.
+    // native atlas sampler. Hclip span clipping is wired into the native texture
+    // adapter; the remaining fallback covers near-clipped texture splitting.
     return true;
 }
 
