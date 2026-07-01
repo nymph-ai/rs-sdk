@@ -103,6 +103,10 @@ type PacketBase = {
     retainedKey?: string;
 };
 
+type ScenePacketBase = {
+    retainedKey?: string;
+};
+
 export type GpuRenderPacket =
     | (PacketBase & { kind: 'surface'; width: number; height: number })
     | (PacketBase & { kind: 'presentSurface'; x: number; y: number; width: number; height: number })
@@ -297,6 +301,77 @@ export type GpuRenderPacket =
           lowDetail: boolean;
           hclip: boolean;
           clip: ClipBounds;
+      })
+    | (ScenePacketBase & {
+          kind: 'modelGeometryUpload';
+          geomId: number;
+          numPoints: number;
+          pointX: ArrayLike<number> | null;
+          pointY: ArrayLike<number> | null;
+          pointZ: ArrayLike<number> | null;
+          numFaces: number;
+          faceA: ArrayLike<number> | null;
+          faceB: ArrayLike<number> | null;
+          faceC: ArrayLike<number> | null;
+          faceColourA: ArrayLike<number> | null;
+          faceColourB: ArrayLike<number> | null;
+          faceColourC: ArrayLike<number> | null;
+          faceType: ArrayLike<number> | null;
+          faceAlpha: ArrayLike<number> | null;
+          facePriority: ArrayLike<number> | null;
+          defaultPriority: number;
+          faceTexture: ArrayLike<number> | null;
+          faceTextureA: ArrayLike<number> | null;
+          faceTextureB: ArrayLike<number> | null;
+          faceTextureC: ArrayLike<number> | null;
+      })
+    | (ScenePacketBase & {
+          kind: 'modelSkeletonUpload';
+          skeletonId: number;
+          types: ArrayLike<number> | null;
+          labels: (ArrayLike<number> | null)[] | null;
+      })
+    | (ScenePacketBase & {
+          kind: 'modelLabelMapUpload';
+          geomId: number;
+          labels: ArrayLike<number> | null;
+      })
+    | (ScenePacketBase & {
+          kind: 'modelAnimFrameUpload';
+          animFrameId: number;
+          skeletonId: number;
+          ops: SceneAnimOpPacket[];
+      })
+    | (ScenePacketBase & {
+          kind: 'sceneInstance';
+          geomId: number;
+          sinYaw: number;
+          cosYaw: number;
+          relativeX: number;
+          relativeY: number;
+          relativeZ: number;
+          alpha: number;
+          flags: number;
+          animFrameId: number;
+      })
+    | (ScenePacketBase & {
+          kind: 'sceneCamera';
+          sinEyePitch: number;
+          cosEyePitch: number;
+          sinEyeYaw: number;
+          cosEyeYaw: number;
+          originX: number;
+          originY: number;
+          viewportWidth: number;
+          viewportHeight: number;
+      })
+    | (ScenePacketBase & {
+          kind: 'sceneLight';
+          ambient: number;
+          contrast: number;
+          lightX: number;
+          lightY: number;
+          lightZ: number;
       });
 
 export type GpuRenderPacketSnapshot = {
@@ -726,8 +801,14 @@ function invalidateNativeRetainedReadySurfaces(): void {
     nativeRetainedWarmupSurfaces.clear();
 }
 
-function isRetainedSurfacePacket(packet: GpuRenderPacket): boolean {
-    return packet.kind !== 'presentSurface' && packet.kind !== 'unsupported';
+type SurfaceGpuRenderPacket = Extract<GpuRenderPacket, { surface: number }>;
+
+function isSurfacePacket(packet: GpuRenderPacket): packet is SurfaceGpuRenderPacket {
+    return 'surface' in packet;
+}
+
+function isRetainedSurfacePacket(packet: GpuRenderPacket): packet is SurfaceGpuRenderPacket {
+    return isSurfacePacket(packet) && packet.kind !== 'presentSurface' && packet.kind !== 'unsupported';
 }
 
 function noteFrameSurfacePacket(packet: GpuRenderPacket): void {
@@ -1092,10 +1173,11 @@ function readInitialSceneInstanceMode(): boolean {
 }
 
 export function shouldEmitSceneNativeDeform(): boolean {
-    // Tags 22/23/24 are reserved in fused.ts, but the native blob parser and
-    // renderer do not consume skeleton/label/anim-frame packets yet. Keep
-    // animated entities on the CPU-deformed dynamic geometry bridge until that
-    // renderer path exists.
+    // Tags 22/23/24 are serialized by fused.ts and consumed by the native blob
+    // parser, but the native scene renderer does not yet deform cached geometry
+    // with the parsed skeleton/label/anim-frame packets. Keep animated entities
+    // on the CPU-deformed dynamic geometry bridge until that renderer path
+    // exists.
     return false;
 }
 
@@ -1613,7 +1695,7 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceTextureA: textureMetadata?.faceTextureA ?? null,
             faceTextureB: textureMetadata?.faceTextureB ?? null,
             faceTextureC: textureMetadata?.faceTextureC ?? null,
-        } as any,
+        },
         false,
     );
 }
@@ -1634,7 +1716,7 @@ export function recordModelLabelMapUpload(geomId: number, model: any, force: boo
             kind: 'modelLabelMapUpload',
             geomId,
             labels: sceneGeometryField(labels, model.numPoints, force),
-        } as any,
+        },
         false,
     );
 }
@@ -1655,7 +1737,7 @@ export function recordModelSkeletonUpload(skeletonId: number, skeleton: any, for
             skeletonId,
             types: skeleton.type,
             labels: skeleton.labels,
-        } as any,
+        },
         false,
     );
 }
@@ -1686,7 +1768,7 @@ export function recordModelAnimFrameUpload(
             animFrameId,
             skeletonId,
             ops,
-        } as any,
+        },
         false,
     );
 }
@@ -1781,7 +1863,7 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceTextureA,
             faceTextureB,
             faceTextureC,
-        } as any,
+        },
         false,
     );
 }
@@ -1848,7 +1930,7 @@ export function recordQuickGroundRegionGeometryUpload(
             faceTextureA: faceTextureA ?? null,
             faceTextureB: faceTextureB ?? null,
             faceTextureC: faceTextureC ?? null,
-        } as any,
+        },
         false,
     );
 }
@@ -1882,7 +1964,7 @@ export function recordSceneInstance(
             alpha,
             flags: animFrameId > 0 ? 1 : 0,
             animFrameId,
-        } as any,
+        },
         false,
     );
 }
@@ -1928,7 +2010,7 @@ export function recordSceneCamera(
             originY,
             viewportWidth,
             viewportHeight,
-        } as any,
+        },
         false,
     );
 }
@@ -1947,7 +2029,7 @@ export function recordSceneLight(
     if (!shouldEmitSceneNativeLighting()) {
         return;
     }
-    pushPacket({ kind: 'sceneLight', ambient, contrast, lightX, lightY, lightZ } as any, false);
+    pushPacket({ kind: 'sceneLight', ambient, contrast, lightX, lightY, lightZ }, false);
 }
 
 export const gpuRenderPackets: GpuRenderPacketState = {
@@ -1998,7 +2080,7 @@ export const gpuRenderPackets: GpuRenderPacketState = {
     },
     discardSurface(surface: number): void {
         for (let i = packets.length - 1; i >= 0; i--) {
-            if (packets[i].surface === surface) {
+            if (isSurfacePacket(packets[i]) && packets[i].surface === surface) {
                 packets.splice(i, 1);
             }
         }

@@ -473,6 +473,21 @@ function retainedPacketKindTag(kind: string): number {
     }
 }
 
+function isScenePacketKind(kind: string): boolean {
+    switch (kind) {
+        case 'modelGeometryUpload':
+        case 'modelSkeletonUpload':
+        case 'modelLabelMapUpload':
+        case 'modelAnimFrameUpload':
+        case 'sceneInstance':
+        case 'sceneCamera':
+        case 'sceneLight':
+            return true;
+        default:
+            return false;
+    }
+}
+
 function hashRetainedPacket(sig: RetainedSurfaceSignature, p: any): boolean {
     const tag = retainedPacketKindTag(p.kind);
     if (tag < 0) return false;
@@ -589,7 +604,7 @@ type RetainedSurfaceSignatureResult = {
 function collectRetainedSurfaceSignatures(packets: any[]): RetainedSurfaceSignatureResult {
     const packetCounts = new Map<number, number>();
     for (const p of packets) {
-        if (p.kind === 'presentSurface') continue;
+        if (p.kind === 'presentSurface' || isScenePacketKind(p.kind)) continue;
         const surface = p.surface | 0;
         packetCounts.set(surface, (packetCounts.get(surface) ?? 0) + 1);
     }
@@ -599,6 +614,7 @@ function collectRetainedSurfaceSignatures(packets: any[]): RetainedSurfaceSignat
     let hashSkippedSurfaces = 0;
     let hashSkippedPackets = 0;
     for (const p of packets) {
+        if (isScenePacketKind(p.kind)) continue;
         const surface = p.surface | 0;
         let sig = signatures.get(surface);
         if (!sig) {
@@ -695,6 +711,10 @@ function retainedSurfaceDeltaPackets(input: any[], resourcesChanged: boolean): R
     const packets: any[] = [];
     let packetsSkipped = 0;
     for (const p of input) {
+        if (isScenePacketKind(p.kind)) {
+            packets.push(p);
+            continue;
+        }
         if (deltaSurfaces.has(p.surface | 0) && p.kind !== 'presentSurface') {
             packetsSkipped++;
             continue;
