@@ -1240,6 +1240,20 @@ export default class Model extends ModelSource {
         } else {
             Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
         }
+        if (!baseModel.labelVertices) {
+            // CPU animate()/maskAnimate() returns before applying any frame op
+            // when the model has no vertex labels. Keep the post-animation
+            // resize op below, but drop all skeleton frame ops for parity.
+            ops.length = 0;
+        } else if (!baseModel.labelFaces || !baseModel.faceAlpha) {
+            // CPU animate2 skips transparency when face labels/alpha storage are
+            // missing, while still applying vertex transforms.
+            for (let i = ops.length - 1; i >= 0; i--) {
+                if (ops[i].type === AnimTransform.TRANSPARENCY) {
+                    ops.splice(i, 1);
+                }
+            }
+        }
         if (resizeX !== 128 || resizeY !== 128 || resizeZ !== 128) {
             ops.push({
                 type: Model.SCENE_RESIZE_TRANSFORM,
@@ -1248,22 +1262,6 @@ export default class Model extends ModelSource {
                 z: resizeZ | 0,
                 labels: null
             });
-        }
-        const hasVertexDeform = ops.some(op =>
-            op.type === AnimTransform.ORIGIN ||
-            op.type === AnimTransform.TRANSLATE ||
-            op.type === AnimTransform.ROTATE ||
-            op.type === AnimTransform.SCALE
-        );
-        if (hasVertexDeform && !baseModel.labelVertices) {
-            return;
-        }
-        const hasTransparency = ops.some(op => op.type === AnimTransform.TRANSPARENCY);
-        if (hasTransparency && (!baseModel.labelFaces || !baseModel.faceAlpha)) {
-            // Native transparency deform needs the same face labels and mutable
-            // face-alpha source that CPU animate2 uses. Keep unsupported cases
-            // on the dynamic bridge.
-            return;
         }
 
         const skeletonId = ops.length > 0 ? Model.sceneSkeletonId(skeleton) : 0;
@@ -2128,10 +2126,9 @@ export default class Model extends ModelSource {
                     (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
                 }
             } else if (volatileEntityGeometry) {
-                // Unsupported NYM-217 fallback: unlabeled or otherwise unsupported
-                // entity models are already CPU-animated into Model.tempModel before
-                // worldRender(). Re-upload that final geometry each frame under a
-                // stable entity geom id until their native deform path is explicit.
+                // Fallback for entities without a scene animation descriptor:
+                // re-upload the final CPU geometry each frame under a stable
+                // entity geom id until that path is explicit.
                 geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
             } else {
                 geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;

@@ -1661,15 +1661,6 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
         return geom;
     }
     const labels = sceneManifestLabelMaps.get(geomId) ?? null;
-    const needsVertexLabels = ops.some(op =>
-        op.type === SCENE_ANIM_ORIGIN ||
-        op.type === SCENE_ANIM_TRANSLATE ||
-        op.type === SCENE_ANIM_ROTATE ||
-        op.type === SCENE_ANIM_SCALE
-    );
-    if (needsVertexLabels && !labels) {
-        return geom;
-    }
     const vertexLabels = labels ?? new Int32Array(0);
 
     const pointCount = geom.pointX.length;
