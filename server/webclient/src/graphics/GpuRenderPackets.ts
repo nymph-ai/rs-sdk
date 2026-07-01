@@ -1211,11 +1211,31 @@ export function beginSceneCpuDrawInstance(): SceneDrawInstanceIdentity | null {
     };
 }
 
+export function beginSceneGpuDrawInstance(): SceneDrawInstanceIdentity | null {
+    if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
+        return null;
+    }
+    return {
+        drawId: sceneNextGpuDrawId++,
+        instanceId: sceneNextGpuInstanceId++,
+    };
+}
+
 export function recordSceneCpuDrawRecord(record: Omit<SceneDrawRecord, 'frameId'>): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return;
     }
     sceneCpuDrawRecords.push({
+        frameId: sceneFrameId >= 0 ? sceneFrameId : 0,
+        ...record,
+    });
+}
+
+export function recordSceneGpuDrawRecord(record: Omit<SceneDrawRecord, 'frameId'>): void {
+    if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
+        return;
+    }
+    sceneGpuDrawRecords.push({
         frameId: sceneFrameId >= 0 ? sceneFrameId : 0,
         ...record,
     });
@@ -1397,9 +1417,10 @@ function emitSceneGpuDrawRecords(
         return;
     }
 
-    const drawId = sceneNextGpuDrawId++;
-    const instanceId = sceneNextGpuInstanceId++;
-    const frameId = sceneFrameId >= 0 ? sceneFrameId : 0;
+    const identity = beginSceneGpuDrawInstance();
+    if (!identity) {
+        return;
+    }
     for (let face = 0; face < geom.numFaces; face++) {
         const textureId = geom.faceTexture ? geom.faceTexture[face] | 0 : -1;
         const renderType = geom.faceType ? geom.faceType[face] | 0 : 0;
@@ -1407,10 +1428,9 @@ function emitSceneGpuDrawRecords(
         const colourB = geom.faceColourB ? geom.faceColourB[face] | 0 : colourA;
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
         const projected = sceneProjectedFace(geom, face, sinYaw, cosYaw, relativeX, relativeY, relativeZ);
-        sceneGpuDrawRecords.push({
-            frameId,
-            drawId,
-            instanceId,
+        recordSceneGpuDrawRecord({
+            drawId: identity.drawId,
+            instanceId: identity.instanceId,
             geomId,
             face,
             kind: sceneDrawFaceKind(renderType, textureId),

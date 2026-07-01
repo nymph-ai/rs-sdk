@@ -6,6 +6,7 @@ import {
     SCENE_DRAW_SOURCE_ENTITY,
     SCENE_DRAW_SOURCE_MODEL,
     beginSceneCpuDrawInstance,
+    beginSceneGpuDrawInstance,
     gpuRenderPackets,
     recordModelAnimFrameUpload,
     recordModelFlatTriangle,
@@ -14,6 +15,7 @@ import {
     recordModelLabelMapUpload,
     recordModelSkeletonUpload,
     recordSceneCpuDrawRecord,
+    recordSceneGpuDrawRecord,
     recordSceneInstance,
     sceneDrawFaceKind,
     shouldRecordSceneCpuDrawset,
@@ -145,6 +147,11 @@ export default class Model extends ModelSource {
         source: SceneDrawSource;
         identity: SceneDrawInstanceIdentity;
     } | null = null;
+    private static sceneGpuFallbackDrawContext: {
+        geomId: number;
+        source: SceneDrawSource;
+        identity: SceneDrawInstanceIdentity;
+    } | null = null;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -182,12 +189,10 @@ export default class Model extends ModelSource {
     private static gpuModelRelativeY: number = 0;
     private static gpuModelRelativeZ: number = 0;
 
-    private beginSceneCpuDrawContext(typecode: number): typeof Model.sceneCpuDrawContext {
-        if (!shouldRecordSceneCpuDrawset()) {
-            return null;
-        }
-
-        const identity = beginSceneCpuDrawInstance();
+    private beginSceneDrawContext(
+        typecode: number,
+        identity: SceneDrawInstanceIdentity | null,
+    ): typeof Model.sceneCpuDrawContext {
         if (!identity) {
             return null;
         }
@@ -220,6 +225,20 @@ export default class Model extends ModelSource {
         };
     }
 
+    private beginSceneCpuDrawContext(typecode: number): typeof Model.sceneCpuDrawContext {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return this.beginSceneDrawContext(typecode, beginSceneCpuDrawInstance());
+    }
+
+    private beginSceneGpuFallbackDrawContext(typecode: number): typeof Model.sceneGpuFallbackDrawContext {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return this.beginSceneDrawContext(typecode, beginSceneGpuDrawInstance());
+    }
+
     private recordSceneCpuFace(
         face: number,
         renderType: number,
@@ -229,23 +248,36 @@ export default class Model extends ModelSource {
         nearClipped: boolean,
     ): void {
         const context = Model.sceneCpuDrawContext;
-        if (!context) {
-            return;
-        }
         const rawAlpha = this.faceAlpha ? this.faceAlpha[face] | 0 : 0;
-        recordSceneCpuDrawRecord({
-            drawId: context.identity.drawId,
-            instanceId: context.identity.instanceId,
-            geomId: context.geomId,
+        const record = {
             face,
             kind: sceneDrawFaceKind(renderType, textureId),
-            source: context.source,
             screen,
             colours,
             textureId,
             alpha: rawAlpha > 0 ? 256 - rawAlpha : 256,
             nearClipped,
-        });
+        };
+        if (context) {
+            recordSceneCpuDrawRecord({
+                drawId: context.identity.drawId,
+                instanceId: context.identity.instanceId,
+                geomId: context.geomId,
+                source: context.source,
+                ...record,
+            });
+        }
+
+        const gpuFallbackContext = Model.sceneGpuFallbackDrawContext;
+        if (gpuFallbackContext) {
+            recordSceneGpuDrawRecord({
+                drawId: gpuFallbackContext.identity.drawId,
+                instanceId: gpuFallbackContext.identity.instanceId,
+                geomId: gpuFallbackContext.geomId,
+                source: gpuFallbackContext.source,
+                ...record,
+            });
+        }
     }
 
     private recordSceneCpuProjectedFace(
@@ -2030,7 +2062,10 @@ export default class Model extends ModelSource {
             return;
         }
 
-        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+        const radiusZ: number = radiusCosEyePitch + ((this.minY * sinEyePitch) >> 16);
+        const nearClipFallback: boolean = midZ - radiusZ <= 50;
+
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !nearClipFallback) {
             // NYM-210: the model passed bounding-cylinder culling (cheap, game
             // logic). Emit its geometry once (cached by id) + a per-frame
             // instance, then bail BEFORE the per-vertex CPU projection loop —
@@ -2089,9 +2124,7 @@ export default class Model extends ModelSource {
             return;
         }
 
-        const radiusZ: number = radiusCosEyePitch + ((this.minY * sinEyePitch) >> 16);
-
-        let clipped: boolean = midZ - radiusZ <= 50;
+        let clipped: boolean = nearClipFallback;
         let picking: boolean = false;
 
         if (typecode > 0 && Model.mouseCheck) {
@@ -2189,7 +2222,13 @@ export default class Model extends ModelSource {
         }
 
         const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
-        Model.sceneCpuDrawContext = this.beginSceneCpuDrawContext(typecode);
+        const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
+        Model.sceneCpuDrawContext = nearClipFallback && gpuRenderPackets.shouldEmitSceneInstances()
+            ? null
+            : this.beginSceneCpuDrawContext(typecode);
+        Model.sceneGpuFallbackDrawContext = nearClipFallback && gpuRenderPackets.shouldEmitSceneInstances()
+            ? this.beginSceneGpuFallbackDrawContext(typecode)
+            : null;
         try {
             try {
                 // try catch for example a model being drawn from 3d can crash like at baxtorian falls
@@ -2199,6 +2238,7 @@ export default class Model extends ModelSource {
             }
         } finally {
             Model.sceneCpuDrawContext = previousSceneCpuDrawContext;
+            Model.sceneGpuFallbackDrawContext = previousSceneGpuFallbackDrawContext;
         }
     }
 
@@ -2464,7 +2504,7 @@ export default class Model extends ModelSource {
             type = this.faceRenderType[face] & 0x3;
         }
 
-        if (Model.sceneCpuDrawContext) {
+        if (Model.sceneCpuDrawContext || Model.sceneGpuFallbackDrawContext) {
             this.recordSceneCpuProjectedFace(
                 face,
                 type,
@@ -2687,7 +2727,7 @@ export default class Model extends ModelSource {
             type = this.faceRenderType[face] & 0x3;
         }
 
-        if (Model.sceneCpuDrawContext && (elements === 3 || elements === 4)) {
+        if ((Model.sceneCpuDrawContext || Model.sceneGpuFallbackDrawContext) && (elements === 3 || elements === 4)) {
             this.recordSceneCpuProjectedFace(
                 face,
                 type,
