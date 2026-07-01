@@ -261,6 +261,7 @@ export default class Model extends ModelSource {
             colours,
             textureId,
             alpha: rawAlpha > 0 ? 256 - rawAlpha : 256,
+            priority: this.facePriority ? this.facePriority[face] | 0 : this.priority | 0,
             nearClipped,
         };
         if (context) {

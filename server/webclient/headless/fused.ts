@@ -1125,7 +1125,7 @@ function packSnapshot(snap: any): PackResult {
                     w.u32(ca >>> 0); w.u32(cb >>> 0); w.u32(cc >>> 0);
                     w.i32(p.faceType ? (p.faceType[i] | 0) : 0);
                     w.i32(p.faceAlpha ? (p.faceAlpha[i] | 0) : 0);
-                    w.i32(p.facePriority ? (p.facePriority[i] | 0) : 0);
+                    w.i32(p.facePriority ? (p.facePriority[i] | 0) : (p.defaultPriority | 0));
                     w.i32(p.faceTexture ? (p.faceTexture[i] | 0) : -1);
                     w.u32(p.faceTextureA ? (p.faceTextureA[i] >>> 0) : 0);
                     w.u32(p.faceTextureB ? (p.faceTextureB[i] >>> 0) : 0);
@@ -1251,6 +1251,7 @@ function sceneDrawRecordLine(r: any): string {
         i(colours[2]),
         i(r.textureId, -1),
         i(r.alpha, 256),
+        i(r.priority),
         r.nearClipped ? 1 : 0,
         r.animated ? 1 : 0,
     ].join(' ');
@@ -1262,7 +1263,7 @@ function appendSceneDrawsetManifest(path: string, records: any[]): void {
     }
     if (!sceneDrawsetManifestReady.has(path)) {
         mkdirSync(dirname(path), { recursive: true });
-        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha nearClipped animated\n');
+        writeFileSync(path, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha priority nearClipped animated\n');
         sceneDrawsetManifestReady.add(path);
     }
     appendFileSync(path, records.map(sceneDrawRecordLine).join('\n') + '\n');

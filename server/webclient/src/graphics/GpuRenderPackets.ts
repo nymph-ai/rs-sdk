@@ -93,6 +93,7 @@ export type SceneDrawRecord = {
     colours: [number, number, number];
     textureId: number;
     alpha: number;
+    priority: number;
     nearClipped: boolean;
     animated: boolean;
 };
@@ -1127,6 +1128,8 @@ type SceneManifestGeometry = {
     faceColourC: ArrayLike<number> | null;
     faceType: ArrayLike<number> | null;
     faceAlpha: ArrayLike<number> | null;
+    facePriority: ArrayLike<number> | null;
+    defaultPriority: number;
     faceTexture: ArrayLike<number> | null;
 };
 
@@ -1201,6 +1204,10 @@ function sceneDrawAlpha(faceAlpha: ArrayLike<number> | null, face: number, insta
     const rawFaceAlpha = faceAlpha ? faceAlpha[face] | 0 : 0;
     const faceEffectiveAlpha = rawFaceAlpha > 0 ? 256 - rawFaceAlpha : 256;
     return Math.max(0, Math.min(256, Math.min(instanceAlpha | 0, faceEffectiveAlpha)));
+}
+
+function sceneDrawPriority(facePriority: ArrayLike<number> | null, defaultPriority: number, face: number): number {
+    return facePriority ? facePriority[face] | 0 : defaultPriority | 0;
 }
 
 export type SceneDrawInstanceIdentity = {
@@ -1280,6 +1287,8 @@ function rememberSceneManifestGeometry(
     faceColourC: ArrayLike<number> | null,
     faceType: ArrayLike<number> | null,
     faceAlpha: ArrayLike<number> | null,
+    facePriority: ArrayLike<number> | null,
+    defaultPriority: number,
     faceTexture: ArrayLike<number> | null,
 ): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
@@ -1298,6 +1307,8 @@ function rememberSceneManifestGeometry(
         faceColourC,
         faceType,
         faceAlpha,
+        facePriority,
+        defaultPriority,
         faceTexture,
     });
 }
@@ -1465,6 +1476,7 @@ function emitSceneGpuDrawRecords(
             colours: [colourA, colourB, colourC],
             textureId,
             alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
+            priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),
             nearClipped: projected.nearClipped,
             animated,
         });
@@ -1572,6 +1584,8 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
         faceColourC,
         model.faceRenderType,
         model.faceAlpha,
+        model.facePriority,
+        model.priority ?? 0,
         textureMetadata?.faceTexture ?? null,
     );
     pushPacket(
@@ -1592,6 +1606,7 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceType: sceneGeometryField(model.faceRenderType, model.numFaces, force),
             faceAlpha: sceneGeometryField(model.faceAlpha, model.numFaces, force),
             facePriority: sceneGeometryField(model.facePriority, model.numFaces, force),
+            defaultPriority: model.priority ?? 0,
             faceTexture: textureMetadata?.faceTexture ?? null,
             faceTextureA: textureMetadata?.faceTextureA ?? null,
             faceTextureB: textureMetadata?.faceTextureB ?? null,
@@ -1737,6 +1752,8 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
         faceColourC,
         faceType,
         null,
+        null,
+        0,
         faceTexture,
     );
     pushPacket(
@@ -1757,6 +1774,7 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceType,
             faceAlpha: null,
             facePriority: null,
+            defaultPriority: 0,
             faceTexture,
             faceTextureA,
             faceTextureB,
@@ -1801,6 +1819,8 @@ export function recordQuickGroundRegionGeometryUpload(
         faceColourC,
         faceType ?? null,
         null,
+        null,
+        0,
         faceTexture ?? null,
     );
     pushPacket(
@@ -1821,6 +1841,7 @@ export function recordQuickGroundRegionGeometryUpload(
             faceType: faceType ?? null,
             faceAlpha: null,
             facePriority: null,
+            defaultPriority: 0,
             faceTexture: faceTexture ?? null,
             faceTextureA: faceTextureA ?? null,
             faceTextureB: faceTextureB ?? null,

@@ -2177,6 +2177,7 @@ export default class World {
             colours,
             textureId,
             alpha: 256,
+            priority: 0,
             nearClipped: false,
             animated: false,
         };
