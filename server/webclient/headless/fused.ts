@@ -265,7 +265,7 @@ const T_SURFACE = 0, T_CLIP = 1, T_CLEAR = 2, T_FILLRECT = 3, T_LINE = 4,
     // NYM-210 GPU-native scene renderer
     T_MODEL_GEOMETRY_UPLOAD = 21, T_MODEL_SKELETON_UPLOAD = 22, T_MODEL_LABELMAP_UPLOAD = 23,
     T_MODEL_ANIM_FRAME_UPLOAD = 24, T_SCENE_INSTANCE = 25, T_SCENE_CAMERA = 26, T_SCENE_LIGHT = 27,
-    T_MODEL_GEOMETRY_UPLOAD_TEXTURED = 30;
+    T_MODEL_GEOMETRY_UPLOAD_TEXTURED = 30, T_MODEL_GEOMETRY_UPLOAD_RELIGHT = 31;
 
 function alphaI32(a: number | null | undefined): number {
     return (a === null || a === undefined) ? -1 : (a | 0);
@@ -1131,7 +1131,10 @@ function packSnapshot(snap: any): PackResult {
                 nPackets++; nModelGouraud++; break;
             // ----- NYM-210 GPU-native scene description -----
             case 'modelGeometryUpload': {
-                writePacketTag(T_MODEL_GEOMETRY_UPLOAD_TEXTURED);
+                const hasFaceBaseColour = !!p.faceBaseColour;
+                const hasVertexNormals = !!p.vertexNormalX && !!p.vertexNormalY && !!p.vertexNormalZ && !!p.vertexNormalW;
+                const hasRelight = hasFaceBaseColour || hasVertexNormals;
+                writePacketTag(hasRelight ? T_MODEL_GEOMETRY_UPLOAD_RELIGHT : T_MODEL_GEOMETRY_UPLOAD_TEXTURED);
                 w.u32(p.geomId >>> 0);
                 const np = p.numPoints | 0;
                 w.u32(np >>> 0);
@@ -1151,6 +1154,20 @@ function packSnapshot(snap: any): PackResult {
                     w.u32(p.faceTextureA ? (p.faceTextureA[i] >>> 0) : 0);
                     w.u32(p.faceTextureB ? (p.faceTextureB[i] >>> 0) : 0);
                     w.u32(p.faceTextureC ? (p.faceTextureC[i] >>> 0) : 0);
+                }
+                if (hasRelight) {
+                    w.u32((hasFaceBaseColour ? 1 : 0) | (hasVertexNormals ? 2 : 0));
+                    if (hasFaceBaseColour) {
+                        for (let i = 0; i < nf; i++) w.i32(p.faceBaseColour[i] | 0);
+                    }
+                    if (hasVertexNormals) {
+                        for (let i = 0; i < np; i++) {
+                            w.i32(p.vertexNormalX[i] | 0);
+                            w.i32(p.vertexNormalY[i] | 0);
+                            w.i32(p.vertexNormalZ[i] | 0);
+                            w.i32(p.vertexNormalW[i] | 0);
+                        }
+                    }
                 }
                 nPackets++; nSceneGeometryUploads++; break;
             }

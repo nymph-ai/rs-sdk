@@ -321,6 +321,11 @@ export type GpuRenderPacket =
           faceColourA: ArrayLike<number> | null;
           faceColourB: ArrayLike<number> | null;
           faceColourC: ArrayLike<number> | null;
+          faceBaseColour: ArrayLike<number> | null;
+          vertexNormalX: ArrayLike<number> | null;
+          vertexNormalY: ArrayLike<number> | null;
+          vertexNormalZ: ArrayLike<number> | null;
+          vertexNormalW: ArrayLike<number> | null;
           faceType: ArrayLike<number> | null;
           faceAlpha: ArrayLike<number> | null;
           facePriority: ArrayLike<number> | null;
@@ -1188,9 +1193,8 @@ export function shouldEmitSceneNativeDeform(): boolean {
 
 export function shouldEmitSceneNativeLighting(): boolean {
     // World.shareLight/Model.light still bake scene lighting into face colour
-    // indices before geometry upload, but emitting SceneLight keeps the native
-    // stream carrying the light vector needed by the future raw-normal relight
-    // path instead of dropping that state entirely.
+    // indices for the shader today, but SceneLight plus model base-HSL/normal
+    // metadata now keep the raw relight inputs in the native stream.
     return true;
 }
 
@@ -2046,6 +2050,11 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
             faceColourA: sceneGeometryField(faceColourA, model.numFaces, force),
             faceColourB: sceneGeometryField(faceColourB, model.numFaces, force),
             faceColourC: sceneGeometryField(faceColourC, model.numFaces, force),
+            faceBaseColour: sceneGeometryField(model.sceneBaseFaceColour, model.numFaces, force),
+            vertexNormalX: sceneGeometryField(model.sceneVertexNormalX, model.numPoints, force),
+            vertexNormalY: sceneGeometryField(model.sceneVertexNormalY, model.numPoints, force),
+            vertexNormalZ: sceneGeometryField(model.sceneVertexNormalZ, model.numPoints, force),
+            vertexNormalW: sceneGeometryField(model.sceneVertexNormalW, model.numPoints, force),
             faceType: sceneGeometryField(model.faceRenderType, model.numFaces, force),
             faceAlpha: sceneGeometryField(model.faceAlpha, model.numFaces, force),
             facePriority: sceneGeometryField(model.facePriority, model.numFaces, force),
@@ -2233,6 +2242,11 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
             faceColourA,
             faceColourB,
             faceColourC,
+            faceBaseColour: null,
+            vertexNormalX: null,
+            vertexNormalY: null,
+            vertexNormalZ: null,
+            vertexNormalW: null,
             faceType,
             faceAlpha: null,
             facePriority: null,
@@ -2300,6 +2314,11 @@ export function recordQuickGroundRegionGeometryUpload(
             faceColourA,
             faceColourB,
             faceColourC,
+            faceBaseColour: null,
+            vertexNormalX: null,
+            vertexNormalY: null,
+            vertexNormalZ: null,
+            vertexNormalW: null,
             faceType: faceType ?? null,
             faceAlpha: null,
             facePriority: null,

@@ -4,6 +4,7 @@ import { describe, expect, test } from 'bun:test';
 
 import {
     gpuRenderPackets,
+    recordModelGeometryUpload,
     recordModelLabelMapUpload,
     recordSceneInstance,
     shouldEmitSceneNativeDeform
@@ -58,6 +59,50 @@ describe('GpuRenderPackets scene packets', () => {
             geomId: 7,
             labels: new Int32Array([0, 1, 0]),
             faceLabels: new Int32Array([1, 0]),
+        });
+    });
+
+    test('model geometry uploads retain raw relight metadata', () => {
+        gpuRenderPackets.reset();
+        gpuRenderPackets.setEnabled(true);
+
+        recordModelGeometryUpload(
+            9,
+            {
+                numPoints: 2,
+                numFaces: 1,
+                pointX: new Int32Array([10, 20]),
+                pointY: new Int32Array([30, 40]),
+                pointZ: new Int32Array([50, 60]),
+                faceVertexA: new Int32Array([0]),
+                faceVertexB: new Int32Array([1]),
+                faceVertexC: new Int32Array([0]),
+                faceColourA: new Int32Array([0x1111]),
+                faceColourB: new Int32Array([0x2222]),
+                faceColourC: new Int32Array([0x3333]),
+                faceRenderType: new Int32Array([0]),
+                faceAlpha: null,
+                facePriority: null,
+                priority: 0,
+                sceneBaseFaceColour: new Int32Array([0x4444]),
+                sceneVertexNormalX: new Int32Array([1, 5]),
+                sceneVertexNormalY: new Int32Array([2, 6]),
+                sceneVertexNormalZ: new Int32Array([3, 7]),
+                sceneVertexNormalW: new Int32Array([4, 8]),
+            },
+            true,
+        );
+
+        const snapshot = gpuRenderPackets.snapshot();
+        expect(snapshot.packets).toHaveLength(1);
+        expect(snapshot.packets[0]).toMatchObject({
+            kind: 'modelGeometryUpload',
+            geomId: 9,
+            faceBaseColour: new Int32Array([0x4444]),
+            vertexNormalX: new Int32Array([1, 5]),
+            vertexNormalY: new Int32Array([2, 6]),
+            vertexNormalZ: new Int32Array([3, 7]),
+            vertexNormalW: new Int32Array([4, 8]),
         });
     });
 });

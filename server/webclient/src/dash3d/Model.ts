@@ -19,6 +19,7 @@ import {
     recordSceneInstance,
     sceneDrawFaceKind,
     shouldEmitSceneNativeDeform,
+    shouldEmitSceneNativeLighting,
     shouldEmitSceneNativeTextures,
     shouldRecordSceneCpuDrawset,
     type SceneDrawInstanceIdentity,
@@ -122,6 +123,11 @@ export default class Model extends ModelSource {
     faceColourA: Int32Array | null = null;
     faceColourB: Int32Array | null = null;
     faceColourC: Int32Array | null = null;
+    sceneBaseFaceColour: Int32Array | null = null;
+    sceneVertexNormalX: Int32Array | null = null;
+    sceneVertexNormalY: Int32Array | null = null;
+    sceneVertexNormalZ: Int32Array | null = null;
+    sceneVertexNormalW: Int32Array | null = null;
 
     useAABBMouseCheck: boolean = false;
     private sceneAnimation: SceneAnimationDescriptor | null = null;
@@ -1967,6 +1973,7 @@ export default class Model extends ModelSource {
             }
         }
 
+        this.retainSceneRelightMetadata();
         this.pointNormal = null;
         this.sharedPointNormal = null;
         this.vertexLabel = null;
@@ -1981,6 +1988,43 @@ export default class Model extends ModelSource {
         }
 
         this.faceColour = null;
+    }
+
+    private retainSceneRelightMetadata(): void {
+        this.sceneBaseFaceColour = null;
+        this.sceneVertexNormalX = null;
+        this.sceneVertexNormalY = null;
+        this.sceneVertexNormalZ = null;
+        this.sceneVertexNormalW = null;
+
+        if (!shouldEmitSceneNativeLighting()) {
+            return;
+        }
+        if (this.faceColour) {
+            this.sceneBaseFaceColour = new Int32Array(this.faceColour);
+        }
+        if (!this.pointNormal) {
+            return;
+        }
+
+        const normalX = new Int32Array(this.numPoints);
+        const normalY = new Int32Array(this.numPoints);
+        const normalZ = new Int32Array(this.numPoints);
+        const normalW = new Int32Array(this.numPoints);
+        for (let v: number = 0; v < this.numPoints; v++) {
+            const normal: PointNormal | null = this.pointNormal[v];
+            if (!normal) {
+                continue;
+            }
+            normalX[v] = normal.x;
+            normalY[v] = normal.y;
+            normalZ[v] = normal.z;
+            normalW[v] = normal.w;
+        }
+        this.sceneVertexNormalX = normalX;
+        this.sceneVertexNormalY = normalY;
+        this.sceneVertexNormalZ = normalZ;
+        this.sceneVertexNormalW = normalW;
     }
 
     static getColour(hsl: number, scalar: number, faceRenderType: number): number {
