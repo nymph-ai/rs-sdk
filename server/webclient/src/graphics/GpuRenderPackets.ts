@@ -1202,10 +1202,15 @@ export function shouldEmitSceneNativeLighting(): boolean {
 }
 
 export function shouldEmitSceneNativeTextures(): boolean {
-    // Supported unclipped textured scene faces now carry texture ids,
-    // coordinate vertex metadata, and low-memory/opaque sampling flags into the
-    // native atlas sampler. Hclip span clipping is wired into the native texture
-    // adapter; the remaining fallback covers near-clipped texture splitting.
+    // Supported textured scene faces now carry texture ids, coordinate vertex
+    // metadata, low-memory/opaque sampling flags, and clipped screen/colour
+    // metadata for native near-plane splits into the native atlas sampler.
+    return true;
+}
+
+export function shouldEmitSceneNativeNearClip(): boolean {
+    // The native scene vertex shader now performs the same z=50 polygon split as
+    // Model.render3ZClip and emits the second triangle for clipped quads.
     return true;
 }
 
@@ -1240,8 +1245,18 @@ type SceneManifestCamera = {
 
 type SceneManifestProjectedVertex = {
     screen: [number, number];
+    x: number;
+    y: number;
     z: number;
     valid: boolean;
+};
+
+type SceneManifestProjectedFace = {
+    screen: [[number, number], [number, number], [number, number]];
+    colours: [number, number, number];
+    nearClipped: boolean;
+    hclip: boolean;
+    depth: number;
 };
 
 const SCENE_FACE_KIND_GOURAUD = 0;
@@ -1560,7 +1575,7 @@ function sceneProjectManifestVertex(
 ): SceneManifestProjectedVertex {
     const cam = sceneManifestCamera;
     if (!cam) {
-        return { screen: [0, 0], z: 0, valid: false };
+        return { screen: [0, 0], x: 0, y: 0, z: 0, valid: false };
     }
 
     let x = i32(localX);
@@ -1583,7 +1598,7 @@ function sceneProjectManifestVertex(
     y = tmp;
 
     if (z < 50) {
-        return { screen: [0, 0], z, valid: false };
+        return { screen: [0, 0], x, y, z, valid: false };
     }
 
     return {
@@ -1591,9 +1606,75 @@ function sceneProjectManifestVertex(
             wadd32(cam.originX, Math.trunc(wshl32(x, 9) / z)),
             wadd32(cam.originY, Math.trunc(wshl32(y, 9) / z)),
         ],
+        x,
+        y,
         z,
         valid: true,
     };
+}
+
+function sceneManifestClipIntersection(
+    clipped: SceneManifestProjectedVertex,
+    visible: SceneManifestProjectedVertex,
+    clippedColour: number,
+    visibleColour: number,
+): { screen: [number, number]; colour: number } | null {
+    const cam = sceneManifestCamera;
+    if (!cam || !visible.valid) {
+        return null;
+    }
+    const dz = visible.z - clipped.z;
+    if (dz === 0) {
+        return null;
+    }
+    const scalar = (50 - clipped.z) * ((65536 / dz) | 0);
+    const x = clipped.x + (((visible.x - clipped.x) * scalar) >> 16);
+    const y = clipped.y + (((visible.y - clipped.y) * scalar) >> 16);
+    return {
+        screen: [
+            cam.originX + ((wshl32(x, 9) / 50) | 0),
+            cam.originY + ((wshl32(y, 9) / 50) | 0),
+        ],
+        colour: clippedColour + (((visibleColour - clippedColour) * scalar) >> 16),
+    };
+}
+
+function appendSceneManifestClipVertex(
+    vertices: SceneManifestProjectedVertex[],
+    colours: [number, number, number],
+    index: number,
+    firstNeighbor: number,
+    secondNeighbor: number,
+    screen: [number, number][],
+    clippedColours: number[],
+): void {
+    const vertex = vertices[index]!;
+    if (vertex.valid) {
+        screen.push(vertex.screen);
+        clippedColours.push(colours[index]! | 0);
+        return;
+    }
+
+    const first = sceneManifestClipIntersection(vertex, vertices[firstNeighbor]!, colours[index]! | 0, colours[firstNeighbor]! | 0);
+    if (first) {
+        screen.push(first.screen);
+        clippedColours.push(first.colour);
+    }
+    const second = sceneManifestClipIntersection(vertex, vertices[secondNeighbor]!, colours[index]! | 0, colours[secondNeighbor]! | 0);
+    if (second) {
+        screen.push(second.screen);
+        clippedColours.push(second.colour);
+    }
+}
+
+function sceneManifestTriangleArea(screen: [number, number][]): number {
+    const x0 = screen[0]![0];
+    const y0 = screen[0]![1];
+    const x1 = screen[1]![0];
+    const y1 = screen[1]![1];
+    const x2 = screen[2]![0];
+    const y2 = screen[2]![1];
+    return (x0 - x1) * (y2 - y1) - (y0 - y1) * (x2 - x1);
 }
 
 function sceneTrig(angle: number, fn: 'sin' | 'cos'): number {
@@ -1800,14 +1881,15 @@ function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometr
 function sceneProjectedFace(
     geom: SceneManifestGeometry,
     face: number,
+    colours: [number, number, number],
     sinYaw: number,
     cosYaw: number,
     relativeX: number,
     relativeY: number,
     relativeZ: number,
-): { screen: [[number, number], [number, number], [number, number]]; nearClipped: boolean; hclip: boolean; depth: number } {
+): SceneManifestProjectedFace {
     if (!geom.pointX || !geom.pointY || !geom.pointZ || !geom.faceA || !geom.faceB || !geom.faceC) {
-        return { screen: [[0, 0], [0, 0], [0, 0]], nearClipped: false, hclip: false, depth: 0 };
+        return { screen: [[0, 0], [0, 0], [0, 0]], colours, nearClipped: false, hclip: false, depth: 0 };
     }
 
     const vertexA = geom.faceA[face] | 0;
@@ -1844,11 +1926,30 @@ function sceneProjectedFace(
         relativeZ,
     );
 
-    const screen: [[number, number], [number, number], [number, number]] = [a.screen, b.screen, c.screen];
+    let screen: [[number, number], [number, number], [number, number]] = [a.screen, b.screen, c.screen];
+    let projectedColours = colours;
     const sizeX = Math.max(0, (sceneManifestCamera?.viewportWidth ?? 0) - 1);
+    const nearClipped = !a.valid || !b.valid || !c.valid;
+    if (nearClipped) {
+        const clippedScreen: [number, number][] = [];
+        const clippedColours: number[] = [];
+        const vertices = [a, b, c];
+        appendSceneManifestClipVertex(vertices, colours, 0, 2, 1, clippedScreen, clippedColours);
+        appendSceneManifestClipVertex(vertices, colours, 1, 0, 2, clippedScreen, clippedColours);
+        appendSceneManifestClipVertex(vertices, colours, 2, 1, 0, clippedScreen, clippedColours);
+        if (
+            (clippedScreen.length === 3 || clippedScreen.length === 4)
+            && sceneManifestTriangleArea(clippedScreen) > 0
+            && clippedColours.length >= 3
+        ) {
+            screen = [clippedScreen[0]!, clippedScreen[1]!, clippedScreen[2]!];
+            projectedColours = [clippedColours[0]! | 0, clippedColours[1]! | 0, clippedColours[2]! | 0];
+        }
+    }
     return {
         screen,
-        nearClipped: !a.valid || !b.valid || !c.valid,
+        colours: projectedColours,
+        nearClipped,
         hclip: screen.some(([x]) => x < 0 || x > sizeX),
         depth: Math.trunc((a.z + b.z + c.z) / 3),
     };
@@ -1886,10 +1987,16 @@ function emitSceneGpuDrawRecords(
         const colourA = geom.faceColourA ? geom.faceColourA[face] | 0 : 0;
         const colourB = geom.faceColourB ? geom.faceColourB[face] | 0 : colourA;
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
-        const projected = sceneProjectedFace(geom, face, sinYaw, cosYaw, relativeX, relativeY, relativeZ);
-        if (projected.nearClipped) {
-            continue;
-        }
+        const projected = sceneProjectedFace(
+            geom,
+            face,
+            [colourA, colourB, colourC],
+            sinYaw,
+            cosYaw,
+            relativeX,
+            relativeY,
+            relativeZ,
+        );
         recordSceneGpuDrawRecord({
             drawId: identity.drawId,
             instanceId: identity.instanceId,
@@ -1898,7 +2005,7 @@ function emitSceneGpuDrawRecords(
             kind: sceneDrawFaceKind(renderType, textureId),
             source,
             screen: projected.screen,
-            colours: [colourA, colourB, colourC],
+            colours: projected.colours,
             textureId,
             alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
             priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),

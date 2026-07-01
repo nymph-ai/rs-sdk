@@ -20,6 +20,7 @@ import {
     sceneDrawFaceKind,
     shouldEmitSceneNativeDeform,
     shouldEmitSceneNativeLighting,
+    shouldEmitSceneNativeNearClip,
     shouldEmitSceneNativeTextures,
     shouldRecordSceneCpuDrawset,
     type SceneDrawInstanceIdentity,
@@ -166,7 +167,6 @@ export default class Model extends ModelSource {
         animated: boolean;
         identity: SceneDrawInstanceIdentity;
     } | null = null;
-    private static sceneGpuFallbackNearClippedOnly: boolean = false;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -2183,17 +2183,15 @@ export default class Model extends ModelSource {
         const textureFallback: boolean = gpuRenderPackets.shouldEmitSceneInstances()
             && !shouldEmitSceneNativeTextures()
             && uploadModel.hasSceneTexturedFaces();
-        const nearClipNativeSplit: boolean = gpuRenderPackets.shouldEmitSceneInstances() && nearClipFallback && !textureFallback;
+        const nearClipCpuFallback: boolean = nearClipFallback && !shouldEmitSceneNativeNearClip();
         let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
 
-        if (gpuRenderPackets.shouldEmitSceneInstances() && (!nearClipFallback || nearClipNativeSplit) && !textureFallback) {
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !nearClipCpuFallback && !textureFallback) {
             // NYM-210: the model passed bounding-cylinder culling (cheap, game
             // logic). Emit its geometry once (cached by id) + a per-frame
             // instance, then bail BEFORE the per-vertex CPU projection loop —
-            // the GPU does projection/lighting/raster. This is where the ~65ms
-            // renderAll cost disappears. Near-bound models still emit the
-            // native instance for fully visible faces; only faces that actually
-            // cross the near plane continue into the clipped fallback below.
+            // the GPU does projection/lighting/near-plane clipping/raster. This
+            // is where the ~65ms renderAll cost disappears.
             let geomId: number;
             if (sceneAnimation) {
                 geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
@@ -2239,9 +2237,7 @@ export default class Model extends ModelSource {
                 volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
                 volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             );
-            if (!nearClipFallback) {
-                return;
-            }
+            return;
         }
 
         let clipped: boolean = nearClipFallback;
@@ -2343,13 +2339,11 @@ export default class Model extends ModelSource {
 
         const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
         const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
-        const previousSceneGpuFallbackNearClippedOnly = Model.sceneGpuFallbackNearClippedOnly;
-        const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipFallback || textureFallback);
+        const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipCpuFallback || textureFallback);
         Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode);
         Model.sceneGpuFallbackDrawContext = sceneGpuFallback
             ? this.beginSceneGpuFallbackDrawContext(typecode, nativeSceneIdentity ?? beginSceneGpuDrawInstance())
             : null;
-        Model.sceneGpuFallbackNearClippedOnly = nearClipNativeSplit;
         try {
             try {
                 // try catch for example a model being drawn from 3d can crash like at baxtorian falls
@@ -2360,7 +2354,6 @@ export default class Model extends ModelSource {
         } finally {
             Model.sceneCpuDrawContext = previousSceneCpuDrawContext;
             Model.sceneGpuFallbackDrawContext = previousSceneGpuFallbackDrawContext;
-            Model.sceneGpuFallbackNearClippedOnly = previousSceneGpuFallbackNearClippedOnly;
         }
     }
 
@@ -2602,9 +2595,6 @@ export default class Model extends ModelSource {
     private render3(face: number): void {
         if (Model.faceNearClipped[face]) {
             this.render3ZClip(face);
-            return;
-        }
-        if (Model.sceneGpuFallbackNearClippedOnly && Model.sceneGpuFallbackDrawContext) {
             return;
         }
 
