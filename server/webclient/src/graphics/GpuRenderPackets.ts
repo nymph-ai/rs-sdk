@@ -39,6 +39,8 @@ export type GpuTextureResource = {
     id: number;
     width: number;
     height: number;
+    lowMem: boolean;
+    opaque: boolean;
     indexRgba: Uint8Array;
     paletteRgba: Uint8Array;
     version: number;
@@ -1190,10 +1192,10 @@ export function shouldEmitSceneNativeLighting(): boolean {
 }
 
 export function shouldEmitSceneNativeTextures(): boolean {
-    // Supported unclipped textured scene faces now carry texture ids +
-    // coordinate vertex metadata into the native atlas sampler. The remaining
-    // fallback covers texture modes that still lack parity: low-memory/detail,
-    // hclip, transparency/discard, and near-clipped texture splitting.
+    // Supported unclipped textured scene faces now carry texture ids,
+    // coordinate vertex metadata, and low-memory/opaque sampling flags into the
+    // native atlas sampler. The remaining fallback covers texture modes that
+    // still lack parity: hclip and near-clipped texture splitting.
     return true;
 }
 
@@ -2780,12 +2782,14 @@ export function recordColourTable(colourTable: Int32Array, version: number): voi
     invalidateNativeRetainedReadySurfaces();
 }
 
-export function recordTextureResource(id: number, indices: Int8Array, width: number, height: number, palette: Int32Array, version: number): void {
+export function recordTextureResource(id: number, indices: Int8Array, width: number, height: number, palette: Int32Array, version: number, lowMem: boolean, opaque: boolean): void {
     const existing = textureResources.find(item => item.id === id);
     if (existing) {
-        if (existing.version !== version) {
+        if (existing.version !== version || existing.lowMem !== lowMem || existing.opaque !== opaque) {
             existing.width = width;
             existing.height = height;
+            existing.lowMem = lowMem;
+            existing.opaque = opaque;
             existing.indexRgba = makeTextureIndexRgba(indices, width, height);
             existing.paletteRgba = makePaletteRgba(palette);
             existing.version = version;
@@ -2798,6 +2802,8 @@ export function recordTextureResource(id: number, indices: Int8Array, width: num
         id,
         width,
         height,
+        lowMem,
+        opaque,
         indexRgba: makeTextureIndexRgba(indices, width, height),
         paletteRgba: makePaletteRgba(palette),
         version

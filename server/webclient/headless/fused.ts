@@ -875,7 +875,7 @@ function packSnapshot(snap: any): PackResult {
     const sprites = snap.spriteResources as Array<{ id: number; width: number; height: number; rgba: Uint8Array; version: number }>;
     const glyphs = snap.glyphResources as Array<{ id: number; width: number; height: number; maskRgba: Uint8Array; version: number }>;
     const colourTable = snap.colourTableResource as { width: number; height: number; rgba: Uint8Array; version: number } | null;
-    const textures = snap.textureResources as Array<{ id: number; width: number; height: number; indexRgba: Uint8Array; paletteRgba: Uint8Array; version: number }>;
+    const textures = snap.textureResources as Array<{ id: number; width: number; height: number; lowMem: boolean; opaque: boolean; indexRgba: Uint8Array; paletteRgba: Uint8Array; version: number }>;
     const indexedSprites = snap.indexedSpriteResources as Array<{ id: number; width: number; height: number; intensityRgba: Uint8Array; paletteRgba: Uint8Array; lineOffsetRgba: Uint8Array; version: number }>;
     const inputPackets = snap.packets as any[];
 
@@ -933,6 +933,7 @@ function packSnapshot(snap: any): PackResult {
         }
         for (const t of changedTextures) {
             w.i32(t.id); w.i32(t.width); w.i32(t.height);
+            w.i32(t.lowMem ? 1 : 0); w.i32(t.opaque ? 1 : 0);
             w.bytesWithLen(t.indexRgba);
             w.bytesWithLen(t.paletteRgba);
         }

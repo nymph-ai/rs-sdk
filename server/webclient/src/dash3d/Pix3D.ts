@@ -90,7 +90,7 @@ export default class Pix3D extends Pix2D {
         }
 
         this.texelVersions[texture]++;
-        recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture]);
+        recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture], this.lowMem, !this.textureHasTransparency(sourceTexture));
         return true;
     }
 
@@ -1770,7 +1770,7 @@ export default class Pix3D extends Pix2D {
         if (gpuRasterize && sourceTexture && palette) {
             this.opaque = !this.textureHasTransparency(sourceTexture);
             this.texelVersions[texture]++;
-            recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture]);
+            recordTextureResource(texture, sourceTexture.data, sourceTexture.wi, sourceTexture.hi, palette, this.texelVersions[texture], this.lowMem, this.opaque);
         } else {
             texels = this.getTexels(texture);
             this.opaque = !this.texTrans[texture];
