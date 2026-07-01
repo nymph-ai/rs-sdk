@@ -14,12 +14,15 @@
 //   AURAI_DUMP_BLOB_DIR optional .aur2 packet dump directory (renderer can be disabled)
 //   AURAI_DUMP_BLOB_START first submitted frame index to dump (default 0)
 //   AURAI_DUMP_BLOB_LIMIT max dumped frames (0 = unlimited, default 0)
+//   AURAI_SCENE_GPU_DRAWSET_MANIFEST optional NYM-220 GPU draw-set manifest path
 //   AURAI_PACKET_DUMP_DIR legacy alias for AURAI_DUMP_BLOB_DIR
 //   PW_FPS            PipeWire node nominal fps (default 30)
 //   RS_TIMEOUT_MS     in-game wait timeout (default 90000)
 
 import { dlopen, FFIType, ptr } from 'bun:ffi';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { installDomStubs } from './dom-stubs.js';
 
 installDomStubs();
@@ -72,6 +75,10 @@ const SCENE_INSTANCE_MODE = envEnabled(process.env.AURAI_SCENE_INSTANCE_MODE, fa
 const PACKET_DUMP_DIR = process.env.AURAI_DUMP_BLOB_DIR ?? process.env.AURAI_PACKET_DUMP_DIR ?? '';
 const PACKET_DUMP_START = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_START ?? 0) || 0);
 const PACKET_DUMP_LIMIT = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_LIMIT ?? 0) || 0);
+const SCENE_GPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_GPU_DRAWSET_MANIFEST ?? '';
+if (SCENE_GPU_DRAWSET_MANIFEST) {
+    process.env.AURAI_SCENE_DRAWSET_MANIFEST = process.env.AURAI_SCENE_DRAWSET_MANIFEST ?? 'true';
+}
 const CPU_REF_PPM = process.env.AURAI_CPU_REF_PPM ?? '';
 const CPU_REF_FRAME = Number(process.env.AURAI_CPU_REF_FRAME ?? 5);
 const INIT_RENDERER = (process.env.AURAI_INIT_RENDERER ?? 'true') !== 'false';
@@ -312,6 +319,10 @@ type PackResult = {
     nTextureTris: number;
     nModelFlat: number;
     nModelGouraud: number;
+    nSceneGeometryUploads: number;
+    nSceneInstances: number;
+    nSceneCameras: number;
+    nSceneLights: number;
     nCpuSpanRects: number;
     nSkippedNonGpuTris: number;
     retainedDeltaSurfaces: number;
@@ -1210,6 +1221,50 @@ function packSnapshot(snap: any): PackResult {
     };
 }
 
+let sceneGpuDrawsetManifestReady = false;
+
+function sceneGpuDrawRecordLine(r: any): string {
+    const screen = r.screen ?? [[0, 0], [0, 0], [0, 0]];
+    const colours = r.colours ?? [0, 0, 0];
+    const i = (value: unknown, fallback = 0): number => {
+        const n = Number(value ?? fallback);
+        return Number.isFinite(n) ? Math.trunc(n) : fallback;
+    };
+    return [
+        i(r.frameId),
+        i(r.drawId),
+        i(r.instanceId),
+        i(r.geomId),
+        i(r.face),
+        i(r.kind),
+        i(r.source),
+        i(screen[0]?.[0]),
+        i(screen[0]?.[1]),
+        i(screen[1]?.[0]),
+        i(screen[1]?.[1]),
+        i(screen[2]?.[0]),
+        i(screen[2]?.[1]),
+        i(colours[0]),
+        i(colours[1]),
+        i(colours[2]),
+        i(r.textureId, -1),
+        i(r.alpha, 256),
+        r.nearClipped ? 1 : 0,
+    ].join(' ');
+}
+
+function appendSceneGpuDrawsetManifest(records: any[]): void {
+    if (!SCENE_GPU_DRAWSET_MANIFEST || records.length === 0) {
+        return;
+    }
+    if (!sceneGpuDrawsetManifestReady) {
+        mkdirSync(dirname(SCENE_GPU_DRAWSET_MANIFEST), { recursive: true });
+        writeFileSync(SCENE_GPU_DRAWSET_MANIFEST, '# frame_id draw_id instance_id geom_id face kind source ax ay bx by cx cy colA colB colC tex alpha nearClipped\n');
+        sceneGpuDrawsetManifestReady = true;
+    }
+    appendFileSync(SCENE_GPU_DRAWSET_MANIFEST, records.map(sceneGpuDrawRecordLine).join('\n') + '\n');
+}
+
 async function main() {
     if (PACKET_DUMP_DIR) {
         await mkdir(PACKET_DUMP_DIR, { recursive: true });
@@ -1353,6 +1408,7 @@ async function main() {
             lastSubmitAt = Date.now();
             continue;
         }
+        appendSceneGpuDrawsetManifest(snap.sceneGpuDrawRecords ?? []);
         const {
             blob,
             inputPackets,

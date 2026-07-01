@@ -15,7 +15,16 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
-import { gpuRenderPackets, recordSceneCamera, recordGroundGeometryUpload, recordQuickGroundRegionGeometryUpload, recordSceneInstance, isSceneGeometryUploaded } from '#/graphics/GpuRenderPackets.js';
+import {
+    SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+    SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+    gpuRenderPackets,
+    isSceneGeometryUploaded,
+    recordGroundGeometryUpload,
+    recordQuickGroundRegionGeometryUpload,
+    recordSceneCamera,
+    recordSceneInstance
+} from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -2094,7 +2103,7 @@ export default class World {
         if ((World.cycleNo % 120) === 0) {
             console.log(`[qg] emit L${level} geom=${(geomId >>> 0).toString(16)} uploaded=${isSceneGeometryUploaded(geomId)} cycle=${World.cycleNo}`);
         }
-        recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256);
+        recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_QUICK);
     }
 
     private renderQuickGround(ground: QuickGround, level: number, tileX: number, tileZ: number, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
@@ -2290,7 +2299,7 @@ export default class World {
                 (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
             }
             recordGroundGeometryUpload(geomId, ground);
-            recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256);
+            recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_COMPLEX);
             return;
         }
         let vertexCount: number = ground.vertexX.length;

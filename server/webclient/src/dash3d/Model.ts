@@ -3,6 +3,8 @@ import AnimFrame from '#/dash3d/AnimFrame.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
 import {
+    SCENE_DRAW_SOURCE_ENTITY,
+    SCENE_DRAW_SOURCE_MODEL,
     gpuRenderPackets,
     recordModelAnimFrameUpload,
     recordModelFlatTriangle,
@@ -1987,6 +1989,7 @@ export default class Model extends ModelSource {
                 relativeZ,
                 256,
                 sceneAnimation?.animFrameId ?? 0,
+                volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
             );
             return;
         }
