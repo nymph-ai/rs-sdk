@@ -18,13 +18,19 @@ import Pix3D from '#/dash3d/Pix3D.js';
 import {
     SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
     SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+    beginSceneCpuDrawInstance,
     beginSceneDrawsetFrame,
     gpuRenderPackets,
     isSceneGeometryUploaded,
     recordGroundGeometryUpload,
     recordQuickGroundRegionGeometryUpload,
     recordSceneCamera,
-    recordSceneInstance
+    recordSceneCpuDrawRecord,
+    recordSceneInstance,
+    sceneDrawFaceKind,
+    shouldRecordSceneCpuDrawset,
+    type SceneDrawInstanceIdentity,
+    type SceneDrawSource
 } from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
@@ -151,6 +157,9 @@ export default class World {
     private readonly occlusionCycle: Int32Array[][];
     private readonly sceneQuickGroundGeomIds: Int32Array;
     private readonly sceneQuickGroundEmittedCycle: Int32Array;
+    private readonly sceneQuickGroundCpuIdentityCycle: Int32Array;
+    private readonly sceneQuickGroundCpuDrawIds: Int32Array;
+    private readonly sceneQuickGroundCpuInstanceIds: Int32Array;
     private sceneNextQuickGroundGeomId: number = 1;
 
     private dynamicCount: number = 0;
@@ -169,12 +178,17 @@ export default class World {
         this.groundh = levelHeightmaps;
         this.sceneQuickGroundGeomIds = new Int32Array(maxLevel);
         this.sceneQuickGroundEmittedCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuIdentityCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuDrawIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuInstanceIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuIdentityCycle.fill(-1);
 
         this.resetMap();
     }
 
     private invalidateSceneQuickGroundRegions(): void {
         this.sceneQuickGroundGeomIds.fill(0);
+        this.sceneQuickGroundCpuIdentityCycle.fill(-1);
     }
 
     resetMap(): void {
@@ -1962,19 +1976,149 @@ export default class World {
         }
     }
 
+    private ensureSceneQuickGroundGeomId(level: number): number {
+        let geomId = this.sceneQuickGroundGeomIds[level];
+        if (geomId < 0) {
+            return -1;
+        }
+        if (geomId === 0) {
+            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
+            this.sceneQuickGroundGeomIds[level] = geomId;
+        }
+        return geomId;
+    }
+
+    private ensureSceneGroundGeomId(ground: Ground): number {
+        let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+        if (geomId < 0) {
+            const w = World as unknown as { __nextGroundGeomId?: number };
+            w.__nextGroundGeomId = (w.__nextGroundGeomId ?? 1) + 1;
+            geomId = 0x40000000 | (w.__nextGroundGeomId & 0x3fffffff);
+            (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+        }
+        return geomId;
+    }
+
+    private sceneGroundFaceId(ground: Ground, face: number): number {
+        const slot = ground as unknown as { __sceneDrawFaceIds?: Int32Array };
+        const cached = slot.__sceneDrawFaceIds;
+        if (cached && cached.length === ground.faceVertexA.length) {
+            return cached[face] ?? -1;
+        }
+
+        const faceIds = new Int32Array(ground.faceVertexA.length);
+        faceIds.fill(-1);
+        let nextFace = 0;
+        for (let i = 0; i < ground.faceVertexA.length; i++) {
+            if (ground.faceColourA[i] === 12345678) {
+                continue;
+            }
+            faceIds[i] = nextFace++;
+        }
+        slot.__sceneDrawFaceIds = faceIds;
+        return faceIds[face] ?? -1;
+    }
+
+    private sceneQuickGroundFaceId(level: number, tileX: number, tileZ: number, triangle: 0 | 1): number {
+        let face = 0;
+        for (let x = 0; x < this.maxTileX; x++) {
+            for (let z = 0; z < this.maxTileZ; z++) {
+                const quick = this.squares[level][x][z]?.quickGround;
+                if (!quick) {
+                    continue;
+                }
+
+                const drawNorthEast = quick.texture !== -1 || quick.colourNE !== 12345678;
+                const drawSouthWest = quick.texture !== -1 || quick.colourSW !== 12345678;
+                if (x === tileX && z === tileZ) {
+                    if (triangle === 0) {
+                        return drawNorthEast ? face : -1;
+                    }
+                    return drawSouthWest ? face + (drawNorthEast ? 1 : 0) : -1;
+                }
+                if (drawNorthEast) {
+                    face++;
+                }
+                if (drawSouthWest) {
+                    face++;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private beginSceneQuickGroundCpuDrawInstance(level: number): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        if (this.sceneQuickGroundCpuIdentityCycle[level] !== World.cycleNo) {
+            const identity = beginSceneCpuDrawInstance();
+            if (!identity) {
+                return null;
+            }
+            this.sceneQuickGroundCpuIdentityCycle[level] = World.cycleNo;
+            this.sceneQuickGroundCpuDrawIds[level] = identity.drawId;
+            this.sceneQuickGroundCpuInstanceIds[level] = identity.instanceId;
+        }
+        return {
+            drawId: this.sceneQuickGroundCpuDrawIds[level],
+            instanceId: this.sceneQuickGroundCpuInstanceIds[level],
+        };
+    }
+
+    private beginSceneGroundCpuDrawInstance(): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return beginSceneCpuDrawInstance();
+    }
+
+    private recordSceneTerrainCpuFace(
+        identity: SceneDrawInstanceIdentity | null,
+        geomId: number,
+        face: number,
+        source: SceneDrawSource,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        colours: [number, number, number],
+        textureId: number,
+    ): void {
+        if (!identity || geomId < 0 || face < 0) {
+            return;
+        }
+        recordSceneCpuDrawRecord({
+            drawId: identity.drawId,
+            instanceId: identity.instanceId,
+            geomId,
+            face,
+            kind: sceneDrawFaceKind(renderType, textureId),
+            source,
+            screen,
+            colours,
+            textureId,
+            alpha: 256,
+            nearClipped: false,
+        });
+    }
+
+    private lowMemTextureColours(texture: number, colourA: number, colourB: number, colourC: number): [number, number, number] {
+        const textureAverage: number = TEXTURE_AVERAGE[texture];
+        return [
+            this.getTable(textureAverage, colourA),
+            this.getTable(textureAverage, colourB),
+            this.getTable(textureAverage, colourC),
+        ];
+    }
+
     private emitQuickGroundRegion(level: number): void {
         if (this.sceneQuickGroundEmittedCycle[level] === World.cycleNo) {
             return;
         }
         this.sceneQuickGroundEmittedCycle[level] = World.cycleNo;
 
-        let geomId = this.sceneQuickGroundGeomIds[level];
+        const geomId = this.ensureSceneQuickGroundGeomId(level);
         if (geomId < 0) {
             return;
-        }
-        if (geomId === 0) {
-            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
-            this.sceneQuickGroundGeomIds[level] = geomId;
         }
         // NYM-218: re-build + re-upload the region geometry whenever the native
         // geometry cache was cleared at a keyframe boundary (sceneGeometryUploaded
@@ -2117,6 +2261,9 @@ export default class World {
             this.emitQuickGroundRegion(level);
             return;
         }
+        const sceneIdentity = this.beginSceneQuickGroundCpuDrawInstance(level);
+        const sceneGeomId = sceneIdentity ? this.ensureSceneQuickGroundGeomId(level) : -1;
+
         let x3: number;
         let x0: number = (x3 = (tileX << 7) - World.cx);
         let z1: number;
@@ -2198,8 +2345,20 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
+            const sceneFace = this.sceneQuickGroundFaceId(level, tileX, tileZ, 0);
+            const screen: [[number, number], [number, number], [number, number]] = [[py1, pz1], [px3, py3], [pz0, px1]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        2,
+                        screen,
+                        [ground.colourNE, ground.colourNW, ground.colourSE],
+                        ground.texture,
+                    );
                     if (ground.flat) {
                         Pix3D.textureTriangle(
                             py1, px3, pz0,
@@ -2224,15 +2383,35 @@ export default class World {
                         );
                     }
                 } else {
-                    const textureAverage: number = TEXTURE_AVERAGE[ground.texture];
+                    const colours = this.lowMemTextureColours(ground.texture, ground.colourNE, ground.colourNW, ground.colourSE);
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        colours,
+                        -1,
+                    );
                     Pix3D.gouraudTriangle(
                         py1, px3, pz0,
                         pz1, py3, px1,
-                        this.getTable(textureAverage, ground.colourNE), this.getTable(textureAverage, ground.colourNW), this.getTable(textureAverage, ground.colourSE)
+                        colours[0], colours[1], colours[2]
                     );
                 }
             } else {
                 if (ground.colourNE !== 12345678) {
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        [ground.colourNE, ground.colourNW, ground.colourSE],
+                        -1,
+                    );
                     Pix3D.gouraudTriangle(
                         py1, px3, pz0,
                         pz1, py3, px1,
@@ -2250,8 +2429,20 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
+            const sceneFace = this.sceneQuickGroundFaceId(level, tileX, tileZ, 1);
+            const screen: [[number, number], [number, number], [number, number]] = [[px0, py0], [pz0, px1], [px3, py3]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        2,
+                        screen,
+                        [ground.colourSW, ground.colourSE, ground.colourNW],
+                        ground.texture,
+                    );
                     Pix3D.textureTriangle(
                         px0, pz0, px3,
                         py0, px1, py3,
@@ -2263,15 +2454,35 @@ export default class World {
                         ground.texture
                     );
                 } else {
-                    const textureAverage: number = TEXTURE_AVERAGE[ground.texture];
+                    const colours = this.lowMemTextureColours(ground.texture, ground.colourSW, ground.colourSE, ground.colourNW);
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        colours,
+                        -1,
+                    );
                     Pix3D.gouraudTriangle(
                         px0, pz0, px3,
                         py0, px1, py3,
-                        this.getTable(textureAverage, ground.colourSW), this.getTable(textureAverage, ground.colourSE), this.getTable(textureAverage, ground.colourNW)
+                        colours[0], colours[1], colours[2]
                     );
                 }
             } else {
                 if (ground.colourSW !== 12345678) {
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        [ground.colourSW, ground.colourSE, ground.colourNW],
+                        -1,
+                    );
                     Pix3D.gouraudTriangle(
                         px0, pz0, px3,
                         py0, px1, py3,
@@ -2294,17 +2505,14 @@ export default class World {
                     }
                 }
             }
-            let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
-            if (geomId < 0) {
-                const w = World as unknown as { __nextGroundGeomId?: number };
-                w.__nextGroundGeomId = (w.__nextGroundGeomId ?? 1) + 1;
-                geomId = 0x40000000 | (w.__nextGroundGeomId & 0x3fffffff);
-                (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
-            }
+            const geomId = this.ensureSceneGroundGeomId(ground);
             recordGroundGeometryUpload(geomId, ground);
             recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_COMPLEX);
             return;
         }
+        const sceneIdentity = this.beginSceneGroundCpuDrawInstance();
+        const sceneGeomId = sceneIdentity ? this.ensureSceneGroundGeomId(ground) : -1;
+
         let vertexCount: number = ground.vertexX.length;
 
         for (let i: number = 0; i < vertexCount; i++) {
@@ -2358,8 +2566,20 @@ export default class World {
                     World.groundZ = tileZ;
                 }
 
+                const sceneFace = this.sceneGroundFaceId(ground, v);
+                const screen: [[number, number], [number, number], [number, number]] = [[x0, y0], [x1, y1], [x2, y2]];
                 if (ground.faceTexture && ground.faceTexture[v] !== -1) {
                     if (!World.lowMem) {
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            2,
+                            screen,
+                            [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
+                            ground.faceTexture[v],
+                        );
                         if (ground.flat) {
                             Pix3D.textureTriangle(
                                 x0, x1, x2,
@@ -2384,15 +2604,35 @@ export default class World {
                             );
                         }
                     } else {
-                        const textureAverage: number = TEXTURE_AVERAGE[ground.faceTexture[v]];
+                        const colours = this.lowMemTextureColours(ground.faceTexture[v], ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]);
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            0,
+                            screen,
+                            colours,
+                            -1,
+                        );
                         Pix3D.gouraudTriangle(
                             x0, x1, x2,
                             y0, y1, y2,
-                            this.getTable(textureAverage, ground.faceColourA[v]), this.getTable(textureAverage, ground.faceColourB[v]), this.getTable(textureAverage, ground.faceColourC[v])
+                            colours[0], colours[1], colours[2]
                         );
                     }
                 } else {
                     if (ground.faceColourA[v] !== 12345678) {
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            0,
+                            screen,
+                            [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
+                            -1,
+                        );
                         Pix3D.gouraudTriangle(
                             x0, x1, x2,
                             y0, y1, y2,
