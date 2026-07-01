@@ -2,7 +2,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { gpuRenderPackets, recordSceneInstance } from './GpuRenderPackets.js';
+import { gpuRenderPackets, recordSceneInstance, shouldEmitSceneNativeDeform } from './GpuRenderPackets.js';
 
 describe('GpuRenderPackets scene packets', () => {
     test('scene instances carry animFrameId in the packet payload', () => {
@@ -25,5 +25,9 @@ describe('GpuRenderPackets scene packets', () => {
             flags: 1,
             animFrameId: 77,
         });
+    });
+
+    test('native deform is enabled for supported scene animations', () => {
+        expect(shouldEmitSceneNativeDeform()).toBe(true);
     });
 });

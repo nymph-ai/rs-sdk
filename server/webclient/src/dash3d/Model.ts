@@ -1249,6 +1249,11 @@ export default class Model extends ModelSource {
         } else {
             Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
         }
+        if (ops.some(op => op.type === AnimTransform.TRANSPARENCY)) {
+            // Face-alpha animation needs native face-alpha mutation, not just
+            // vertex deform. Keep those models on the dynamic bridge for now.
+            return;
+        }
 
         const skeletonId = ops.length > 0 ? Model.sceneSkeletonId(skeleton) : 0;
         let animFrameId = 0;
@@ -2112,11 +2117,10 @@ export default class Model extends ModelSource {
                     (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
                 }
             } else if (volatileEntityGeometry) {
-                // Interim NYM-217 bridge: player/NPC models are already CPU-animated
-                // into Model.tempModel before worldRender(). Re-upload that final
-                // geometry each frame under a stable entity geom id so the GPU scene
-                // path at least contains the entities. The full NYM-217 target is
-                // still GPU skeletal deform via raster-kernels.
+                // Unsupported NYM-217 fallback: resized, transparent, or unlabeled
+                // entity models are already CPU-animated into Model.tempModel before
+                // worldRender(). Re-upload that final geometry each frame under a
+                // stable entity geom id until their native deform path is explicit.
                 geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
             } else {
                 geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;

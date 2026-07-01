@@ -1174,11 +1174,10 @@ function readInitialSceneInstanceMode(): boolean {
 
 export function shouldEmitSceneNativeDeform(): boolean {
     // Tags 22/23/24 are serialized by fused.ts and consumed by the native blob
-    // parser, but the native scene renderer does not yet deform cached geometry
-    // with the parsed skeleton/label/anim-frame packets. Keep animated entities
-    // on the CPU-deformed dynamic geometry bridge until that renderer path
-    // exists.
-    return false;
+    // parser. The native scene renderer now deforms supported unscaled
+    // origin/translate/rotate/scale animation frames against cached geometry;
+    // unsupported cases still stay on the CPU-deformed dynamic bridge.
+    return true;
 }
 
 export function shouldEmitSceneNativeLighting(): boolean {
@@ -1236,6 +1235,10 @@ const SCENE_FACE_KIND_GOURAUD = 0;
 const SCENE_FACE_KIND_FLAT = 1;
 const SCENE_FACE_KIND_TEXTURED_GOURAUD = 2;
 const SCENE_FACE_KIND_TEXTURED_FLAT = 3;
+const SCENE_ANIM_ORIGIN = 0;
+const SCENE_ANIM_TRANSLATE = 1;
+const SCENE_ANIM_ROTATE = 2;
+const SCENE_ANIM_SCALE = 3;
 
 // GPU-resident geometry: ids uploaded this session (mirrors the native cache).
 // Not cleared by reset() — geometry persists across frames on the GPU.
@@ -1244,6 +1247,9 @@ const sceneLabelMapUploaded = new Set<number>();
 const sceneSkeletonUploaded = new Set<number>();
 const sceneAnimFrameUploaded = new Set<number>();
 const sceneManifestGeometry = new Map<number, SceneManifestGeometry>();
+const sceneManifestLabelMaps = new Map<number, ArrayLike<number>>();
+const sceneManifestAnimFrames = new Map<number, SceneAnimOpPacket[]>();
+const sceneManifestDeformedGeometry = new Map<string, SceneManifestGeometry>();
 const sceneCpuDrawRecords: SceneDrawRecord[] = [];
 const sceneGpuDrawRecords: SceneDrawRecord[] = [];
 let sceneFrameId = -1;
@@ -1395,6 +1401,25 @@ function rememberSceneManifestGeometry(
         defaultPriority,
         faceTexture,
     });
+    clearSceneManifestDeformedGeometryForGeom(geomId);
+}
+
+function clearSceneManifestDeformedGeometryForGeom(geomId: number): void {
+    const prefix = `${geomId}:`;
+    for (const key of Array.from(sceneManifestDeformedGeometry.keys())) {
+        if (key.startsWith(prefix)) {
+            sceneManifestDeformedGeometry.delete(key);
+        }
+    }
+}
+
+function clearSceneManifestDeformedGeometryForFrame(animFrameId: number): void {
+    const suffix = `:${animFrameId}`;
+    for (const key of Array.from(sceneManifestDeformedGeometry.keys())) {
+        if (key.endsWith(suffix)) {
+            sceneManifestDeformedGeometry.delete(key);
+        }
+    }
 }
 
 function i32(value: number): number {
@@ -1465,6 +1490,163 @@ function sceneProjectManifestVertex(
     };
 }
 
+function sceneTrig(angle: number, fn: 'sin' | 'cos'): number {
+    const radians = ((angle & 0x7ff) * 0.0030679615757712823);
+    const value = fn === 'sin' ? Math.sin(radians) : Math.cos(radians);
+    return (value * 65536.0) | 0;
+}
+
+function sceneVertexLabelMatches(labels: ArrayLike<number>, vertex: number, opLabels: ArrayLike<number>): boolean {
+    const label = labels[vertex] | 0;
+    for (let i = 0; i < opLabels.length; i++) {
+        if ((opLabels[i] | 0) === label) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function applySceneManifestAnimOp(
+    pointX: Int32Array,
+    pointY: Int32Array,
+    pointZ: Int32Array,
+    vertexLabels: ArrayLike<number>,
+    op: SceneAnimOpPacket,
+    origin: Int32Array,
+): void {
+    const labels = op.labels;
+    if (!labels || labels.length === 0) {
+        if ((op.type | 0) === SCENE_ANIM_ORIGIN) {
+            origin[0] = op.x | 0;
+            origin[1] = op.y | 0;
+            origin[2] = op.z | 0;
+        }
+        return;
+    }
+
+    const type = op.type | 0;
+    if (type === SCENE_ANIM_ORIGIN) {
+        let x = 0;
+        let y = 0;
+        let z = 0;
+        let count = 0;
+        for (let v = 0; v < pointX.length; v++) {
+            if (!sceneVertexLabelMatches(vertexLabels, v, labels)) {
+                continue;
+            }
+            x += pointX[v];
+            y += pointY[v];
+            z += pointZ[v];
+            count++;
+        }
+        if (count > 0) {
+            origin[0] = ((x / count) | 0) + (op.x | 0);
+            origin[1] = ((y / count) | 0) + (op.y | 0);
+            origin[2] = ((z / count) | 0) + (op.z | 0);
+        } else {
+            origin[0] = op.x | 0;
+            origin[1] = op.y | 0;
+            origin[2] = op.z | 0;
+        }
+        return;
+    }
+
+    for (let v = 0; v < pointX.length; v++) {
+        if (!sceneVertexLabelMatches(vertexLabels, v, labels)) {
+            continue;
+        }
+        if (type === SCENE_ANIM_TRANSLATE) {
+            pointX[v] = (pointX[v] + op.x) | 0;
+            pointY[v] = (pointY[v] + op.y) | 0;
+            pointZ[v] = (pointZ[v] + op.z) | 0;
+        } else if (type === SCENE_ANIM_ROTATE) {
+            pointX[v] = (pointX[v] - origin[0]) | 0;
+            pointY[v] = (pointY[v] - origin[1]) | 0;
+            pointZ[v] = (pointZ[v] - origin[2]) | 0;
+
+            const pitch = (op.x & 0xff) * 8;
+            const yaw = (op.y & 0xff) * 8;
+            const roll = (op.z & 0xff) * 8;
+            if (roll !== 0) {
+                const sin = sceneTrig(roll, 'sin');
+                const cos = sceneTrig(roll, 'cos');
+                const x = (Math.imul(pointY[v], sin) + Math.imul(pointX[v], cos)) >> 16;
+                pointY[v] = (Math.imul(pointY[v], cos) - Math.imul(pointX[v], sin)) >> 16;
+                pointX[v] = x;
+            }
+            if (pitch !== 0) {
+                const sin = sceneTrig(pitch, 'sin');
+                const cos = sceneTrig(pitch, 'cos');
+                const y = (Math.imul(pointY[v], cos) - Math.imul(pointZ[v], sin)) >> 16;
+                pointZ[v] = (Math.imul(pointY[v], sin) + Math.imul(pointZ[v], cos)) >> 16;
+                pointY[v] = y;
+            }
+            if (yaw !== 0) {
+                const sin = sceneTrig(yaw, 'sin');
+                const cos = sceneTrig(yaw, 'cos');
+                const x = (Math.imul(pointZ[v], sin) + Math.imul(pointX[v], cos)) >> 16;
+                pointZ[v] = (Math.imul(pointZ[v], cos) - Math.imul(pointX[v], sin)) >> 16;
+                pointX[v] = x;
+            }
+
+            pointX[v] = (pointX[v] + origin[0]) | 0;
+            pointY[v] = (pointY[v] + origin[1]) | 0;
+            pointZ[v] = (pointZ[v] + origin[2]) | 0;
+        } else if (type === SCENE_ANIM_SCALE) {
+            pointX[v] = (pointX[v] - origin[0]) | 0;
+            pointY[v] = (pointY[v] - origin[1]) | 0;
+            pointZ[v] = (pointZ[v] - origin[2]) | 0;
+
+            pointX[v] = ((pointX[v] * op.x) / 128) | 0;
+            pointY[v] = ((pointY[v] * op.y) / 128) | 0;
+            pointZ[v] = ((pointZ[v] * op.z) / 128) | 0;
+
+            pointX[v] = (pointX[v] + origin[0]) | 0;
+            pointY[v] = (pointY[v] + origin[1]) | 0;
+            pointZ[v] = (pointZ[v] + origin[2]) | 0;
+        }
+    }
+}
+
+function sceneManifestGeometryForAnim(geomId: number, geom: SceneManifestGeometry, animFrameId: number): SceneManifestGeometry {
+    if (animFrameId <= 0 || !geom.pointX || !geom.pointY || !geom.pointZ) {
+        return geom;
+    }
+    const key = `${geomId}:${animFrameId}`;
+    const cached = sceneManifestDeformedGeometry.get(key);
+    if (cached) {
+        return cached;
+    }
+    const labels = sceneManifestLabelMaps.get(geomId);
+    const ops = sceneManifestAnimFrames.get(animFrameId);
+    if (!labels || !ops) {
+        return geom;
+    }
+
+    const pointCount = geom.pointX.length;
+    const pointX = new Int32Array(pointCount);
+    const pointY = new Int32Array(pointCount);
+    const pointZ = new Int32Array(pointCount);
+    for (let i = 0; i < pointCount; i++) {
+        pointX[i] = geom.pointX[i] | 0;
+        pointY[i] = geom.pointY[i] | 0;
+        pointZ[i] = geom.pointZ[i] | 0;
+    }
+    const origin = new Int32Array(3);
+    for (const op of ops) {
+        applySceneManifestAnimOp(pointX, pointY, pointZ, labels, op, origin);
+    }
+
+    const deformed = {
+        ...geom,
+        pointX,
+        pointY,
+        pointZ,
+    };
+    sceneManifestDeformedGeometry.set(key, deformed);
+    return deformed;
+}
+
 function sceneProjectedFace(
     geom: SceneManifestGeometry,
     face: number,
@@ -1528,15 +1710,17 @@ function emitSceneGpuDrawRecords(
     instanceAlpha: number,
     source: SceneDrawSource,
     animated: boolean,
+    animFrameId: number,
 ): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return;
     }
 
-    const geom = sceneManifestGeometry.get(geomId);
-    if (!geom) {
+    const baseGeom = sceneManifestGeometry.get(geomId);
+    if (!baseGeom) {
         return;
     }
+    const geom = sceneManifestGeometryForAnim(geomId, baseGeom, animFrameId);
 
     const identity = beginSceneGpuDrawInstance();
     if (!identity) {
@@ -1711,6 +1895,10 @@ export function recordModelLabelMapUpload(geomId: number, model: any, force: boo
     if (!force) {
         sceneLabelMapUploaded.add(geomId);
     }
+    if (SCENE_DRAWSET_MANIFEST_ENABLED) {
+        sceneManifestLabelMaps.set(geomId, sceneGeometryField(labels, model.numPoints, force));
+        clearSceneManifestDeformedGeometryForGeom(geomId);
+    }
     pushPacket(
         {
             kind: 'modelLabelMapUpload',
@@ -1761,6 +1949,10 @@ export function recordModelAnimFrameUpload(
     }
     if (!force) {
         sceneAnimFrameUploaded.add(animFrameId);
+    }
+    if (SCENE_DRAWSET_MANIFEST_ENABLED) {
+        sceneManifestAnimFrames.set(animFrameId, ops);
+        clearSceneManifestDeformedGeometryForFrame(animFrameId);
     }
     pushPacket(
         {
@@ -1951,7 +2143,7 @@ export function recordSceneInstance(
     if (!gpuRenderPackets.enabled) {
         return;
     }
-    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source, animated);
+    emitSceneGpuDrawRecords(geomId, sinYaw, cosYaw, relativeX, relativeY, relativeZ, alpha, source, animated, animFrameId);
     pushPacket(
         {
             kind: 'sceneInstance',
