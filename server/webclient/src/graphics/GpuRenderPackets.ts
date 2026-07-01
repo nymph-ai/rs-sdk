@@ -1097,6 +1097,14 @@ export function shouldEmitSceneNativeDeform(): boolean {
     return false;
 }
 
+export function shouldEmitSceneNativeLighting(): boolean {
+    // World.shareLight/Model.light already bake scene lighting into face colour
+    // indices before geometry upload. SceneLight is reserved for a future raw
+    // normal/GPU-relighting path, so do not emit a packet the native renderer
+    // would currently parse and ignore.
+    return false;
+}
+
 type SceneManifestGeometry = {
     pointX: ArrayLike<number> | null;
     pointY: ArrayLike<number> | null;
@@ -1876,7 +1884,7 @@ export function recordSceneCamera(
     );
 }
 
-/// Global light for GPU gouraud lighting (consumed once GPU lighting lands).
+/// Global light for future GPU relighting. Current scene geometry is pre-lit.
 export function recordSceneLight(
     ambient: number,
     contrast: number,
@@ -1885,6 +1893,9 @@ export function recordSceneLight(
     lightZ: number,
 ): void {
     if (!gpuRenderPackets.enabled) {
+        return;
+    }
+    if (!shouldEmitSceneNativeLighting()) {
         return;
     }
     pushPacket({ kind: 'sceneLight', ambient, contrast, lightX, lightY, lightZ } as any, false);
