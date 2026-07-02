@@ -1552,11 +1552,11 @@ function wadd32(a: number, b: number): number {
 }
 
 function wmulAddShr16(a: number, b: number, c: number, d: number): number {
-    return (Math.imul(a | 0, b | 0) + Math.imul(c | 0, d | 0) | 0) >> 16;
+    return ((a | 0) * (b | 0) + (c | 0) * (d | 0)) >> 16;
 }
 
 function wmulSubShr16(a: number, b: number, c: number, d: number): number {
-    return (Math.imul(a | 0, b | 0) - Math.imul(c | 0, d | 0) | 0) >> 16;
+    return ((a | 0) * (b | 0) - (c | 0) * (d | 0)) >> 16;
 }
 
 function wshl32(value: number, shift: number): number {
@@ -1791,22 +1791,22 @@ function applySceneManifestAnimOp(
             if (roll !== 0) {
                 const sin = sceneTrig(roll, 'sin');
                 const cos = sceneTrig(roll, 'cos');
-                const x = (Math.imul(pointY[v], sin) + Math.imul(pointX[v], cos)) >> 16;
-                pointY[v] = (Math.imul(pointY[v], cos) - Math.imul(pointX[v], sin)) >> 16;
+                const x = (pointY[v] * sin + pointX[v] * cos) >> 16;
+                pointY[v] = (pointY[v] * cos - pointX[v] * sin) >> 16;
                 pointX[v] = x;
             }
             if (pitch !== 0) {
                 const sin = sceneTrig(pitch, 'sin');
                 const cos = sceneTrig(pitch, 'cos');
-                const y = (Math.imul(pointY[v], cos) - Math.imul(pointZ[v], sin)) >> 16;
-                pointZ[v] = (Math.imul(pointY[v], sin) + Math.imul(pointZ[v], cos)) >> 16;
+                const y = (pointY[v] * cos - pointZ[v] * sin) >> 16;
+                pointZ[v] = (pointY[v] * sin + pointZ[v] * cos) >> 16;
                 pointY[v] = y;
             }
             if (yaw !== 0) {
                 const sin = sceneTrig(yaw, 'sin');
                 const cos = sceneTrig(yaw, 'cos');
-                const x = (Math.imul(pointZ[v], sin) + Math.imul(pointX[v], cos)) >> 16;
-                pointZ[v] = (Math.imul(pointZ[v], cos) - Math.imul(pointX[v], sin)) >> 16;
+                const x = (pointZ[v] * sin + pointX[v] * cos) >> 16;
+                pointZ[v] = (pointZ[v] * cos - pointX[v] * sin) >> 16;
                 pointX[v] = x;
             }
 
