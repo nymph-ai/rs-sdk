@@ -2033,6 +2033,15 @@ export default class World {
         return geomId;
     }
 
+    private ensureSceneQuickGroundTileGeomId(ground: QuickGround): number {
+        let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+        if (geomId < 0) {
+            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
+            (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+        }
+        return geomId;
+    }
+
     private sceneGroundFaceId(ground: Ground, face: number): number {
         const slot = ground as unknown as { __sceneDrawFaceIds?: Int32Array };
         const cached = slot.__sceneDrawFaceIds;
@@ -2079,6 +2088,15 @@ export default class World {
             }
         }
         return -1;
+    }
+
+    private sceneQuickGroundTileFaceId(ground: QuickGround, triangle: 0 | 1): number {
+        const drawNorthEast = ground.texture !== -1 || ground.colourNE !== 12345678;
+        const drawSouthWest = ground.texture !== -1 || ground.colourSW !== 12345678;
+        if (triangle === 0) {
+            return drawNorthEast ? 0 : -1;
+        }
+        return drawSouthWest ? (drawNorthEast ? 1 : 0) : -1;
     }
 
     private beginSceneQuickGroundCpuDrawInstance(level: number): SceneDrawInstanceIdentity | null {
@@ -2358,14 +2376,98 @@ export default class World {
         recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_QUICK);
     }
 
+    private recordQuickGroundTileGeometryUpload(geomId: number, ground: QuickGround, level: number, tileX: number, tileZ: number): void {
+        if (isSceneGeometryUploaded(geomId)) {
+            return;
+        }
+        if (ground.texture !== -1) {
+            Pix3D.recordGpuTextureResource(ground.texture);
+        }
+
+        const pointX = [tileX << 7, (tileX << 7) + 128, (tileX << 7) + 128, tileX << 7];
+        const pointZ = [tileZ << 7, tileZ << 7, (tileZ << 7) + 128, (tileZ << 7) + 128];
+        const pointY = [
+            this.groundh[level][tileX][tileZ],
+            this.groundh[level][tileX + 1][tileZ],
+            this.groundh[level][tileX + 1][tileZ + 1],
+            this.groundh[level][tileX][tileZ + 1],
+        ];
+        const faceA: number[] = [];
+        const faceB: number[] = [];
+        const faceC: number[] = [];
+        const faceColourA: number[] = [];
+        const faceColourB: number[] = [];
+        const faceColourC: number[] = [];
+        const faceType: number[] = [];
+        const faceTexture: number[] = [];
+        const faceTextureA: number[] = [];
+        const faceTextureB: number[] = [];
+        const faceTextureC: number[] = [];
+        const pushFace = (a: number, b: number, c: number, ca: number, cb: number, cc: number, ta: number, tb: number, tc: number): void => {
+            faceA.push(a);
+            faceB.push(b);
+            faceC.push(c);
+            faceColourA.push(ca);
+            faceColourB.push(cb);
+            faceColourC.push(cc);
+            faceType.push(ground.texture >= 0 ? 2 : 0);
+            faceTexture.push(ground.texture);
+            faceTextureA.push(ground.texture >= 0 ? ta : 0);
+            faceTextureB.push(ground.texture >= 0 ? tb : 0);
+            faceTextureC.push(ground.texture >= 0 ? tc : 0);
+        };
+
+        if (ground.texture !== -1 || ground.colourNE !== 12345678) {
+            pushFace(
+                2,
+                3,
+                1,
+                ground.colourNE,
+                ground.colourNW,
+                ground.colourSE,
+                ground.flat ? 0 : 2,
+                ground.flat ? 1 : 3,
+                ground.flat ? 3 : 1,
+            );
+        }
+        if (ground.texture !== -1 || ground.colourSW !== 12345678) {
+            pushFace(0, 1, 3, ground.colourSW, ground.colourSE, ground.colourNW, 0, 1, 3);
+        }
+        if (faceA.length === 0) {
+            return;
+        }
+
+        recordQuickGroundRegionGeometryUpload(
+            geomId,
+            pointX,
+            pointY,
+            pointZ,
+            faceA,
+            faceB,
+            faceC,
+            faceColourA,
+            faceColourB,
+            faceColourC,
+            faceType,
+            faceTexture,
+            faceTextureA,
+            faceTextureB,
+            faceTextureC,
+        );
+    }
+
     private renderQuickGround(ground: QuickGround, level: number, tileX: number, tileZ: number, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
         if ((World.cycleNo % 120) === 0 && level === 0) {
             console.log(`[rqg] called L${level} emit=${gpuRenderPackets.shouldEmitSceneInstances()} cycle=${World.cycleNo}`);
         }
         const textureFallback = this.quickGroundLevelHasSceneTextureFallback(level);
         let sceneCpuRecordOnly = false;
+        let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
+        let sceneGeomId = -1;
         if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
-            this.emitQuickGroundRegion(level);
+            sceneGeomId = this.ensureSceneQuickGroundTileGeomId(ground);
+            this.recordQuickGroundTileGeometryUpload(sceneGeomId, ground, level, tileX, tileZ);
+            nativeSceneIdentity = recordSceneInstance(sceneGeomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_QUICK);
             if (!shouldRecordSceneCpuDrawset()) {
                 return;
             }
@@ -2373,8 +2475,10 @@ export default class World {
         }
         const sceneIdentity = textureFallback
             ? this.beginSceneQuickGroundGpuFallbackDrawInstance(level)
-            : this.beginSceneQuickGroundCpuDrawInstance(level);
-        const sceneGeomId = sceneIdentity ? this.ensureSceneQuickGroundGeomId(level) : -1;
+            : nativeSceneIdentity ? beginSceneCpuDrawInstance(nativeSceneIdentity) : this.beginSceneQuickGroundCpuDrawInstance(level);
+        if (sceneGeomId < 0) {
+            sceneGeomId = sceneIdentity ? this.ensureSceneQuickGroundGeomId(level) : -1;
+        }
 
         let x3: number;
         let x0: number = (x3 = (tileX << 7) - World.cx);
@@ -2457,7 +2561,9 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
-            const sceneFace = this.sceneQuickGroundFaceId(level, tileX, tileZ, 0);
+            const sceneFace = nativeSceneIdentity
+                ? this.sceneQuickGroundTileFaceId(ground, 0)
+                : this.sceneQuickGroundFaceId(level, tileX, tileZ, 0);
             const screen: [[number, number], [number, number], [number, number]] = [[py1, pz1], [px3, py3], [pz0, px1]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {
@@ -2548,7 +2654,9 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
-            const sceneFace = this.sceneQuickGroundFaceId(level, tileX, tileZ, 1);
+            const sceneFace = nativeSceneIdentity
+                ? this.sceneQuickGroundTileFaceId(ground, 1)
+                : this.sceneQuickGroundFaceId(level, tileX, tileZ, 1);
             const screen: [[number, number], [number, number], [number, number]] = [[px0, py0], [pz0, px1], [px3, py3]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {

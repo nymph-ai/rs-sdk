@@ -170,6 +170,10 @@ function configureCaptureSceneCamera(client: any): void {
     if (CAPTURE_SCENE !== 'near_plane') {
         return;
     }
+    if (!envEnabled(process.env.AURAI_NEAR_PLANE_CAPTURE_CAMERA, false)) {
+        log('near-plane fixed capture camera disabled; using injected drawset probe');
+        return;
+    }
 
     const localTileX = envNumber('AURAI_NEAR_PLANE_CAM_TILE_X', 7) | 0;
     const localTileZ = envNumber('AURAI_NEAR_PLANE_CAM_TILE_Z', 17) | 0;

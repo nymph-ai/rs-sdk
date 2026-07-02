@@ -254,11 +254,14 @@ export default class Model extends ModelSource {
         };
     }
 
-    private beginSceneCpuDrawContext(typecode: number): typeof Model.sceneCpuDrawContext {
+    private beginSceneCpuDrawContext(
+        typecode: number,
+        identity: SceneDrawInstanceIdentity | null = null,
+    ): typeof Model.sceneCpuDrawContext {
         if (!shouldRecordSceneCpuDrawset()) {
             return null;
         }
-        return this.beginSceneDrawContext(typecode, beginSceneCpuDrawInstance());
+        return this.beginSceneDrawContext(typecode, beginSceneCpuDrawInstance(identity));
     }
 
     private beginSceneGpuFallbackDrawContext(
@@ -2360,7 +2363,7 @@ export default class Model extends ModelSource {
         const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
         const previousSceneCpuDrawRecordOnly = Model.sceneCpuDrawRecordOnly;
         const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipCpuFallback || textureFallback);
-        Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode);
+        Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode, nativeSceneIdentity);
         Model.sceneGpuFallbackDrawContext = sceneGpuFallback
             ? this.beginSceneGpuFallbackDrawContext(typecode, nativeSceneIdentity ?? beginSceneGpuDrawInstance())
             : null;

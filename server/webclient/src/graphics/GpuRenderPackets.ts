@@ -99,7 +99,7 @@ export type SceneDrawRecord = {
     nearClipped: boolean;
     hclip: boolean;
     animated: boolean;
-    /** Native-scene projected face depth, used only for order-sensitive drawset transcripts. */
+    /** Native-scene CPU render2 depth bucket, used only for order-sensitive drawset transcripts. */
     sortDepth?: number;
 };
 
@@ -1230,6 +1230,8 @@ type SceneManifestGeometry = {
     facePriority: ArrayLike<number> | null;
     defaultPriority: number;
     faceTexture: ArrayLike<number> | null;
+    minDepth: number | null;
+    maxDepth: number | null;
 };
 
 type SceneManifestCamera = {
@@ -1256,7 +1258,7 @@ type SceneManifestProjectedFace = {
     colours: [number, number, number];
     nearClipped: boolean;
     hclip: boolean;
-    depth: number;
+    depthBucket: number;
 };
 
 const SCENE_FACE_KIND_GOURAUD = 0;
@@ -1354,9 +1356,14 @@ export function beginSceneDrawsetFrame(): void {
     sceneGpuDrawRecords.length = 0;
 }
 
-export function beginSceneCpuDrawInstance(): SceneDrawInstanceIdentity | null {
+export function beginSceneCpuDrawInstance(identity: SceneDrawInstanceIdentity | null = null): SceneDrawInstanceIdentity | null {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return null;
+    }
+    if (identity) {
+        sceneNextCpuDrawId = Math.max(sceneNextCpuDrawId, identity.drawId + 1);
+        sceneNextCpuInstanceId = Math.max(sceneNextCpuInstanceId, identity.instanceId + 1);
+        return identity;
     }
     return {
         drawId: sceneNextCpuDrawId++,
@@ -1398,18 +1405,14 @@ function sceneAlphaPriorityBucket(priority: number): number {
     return Math.max(0, Math.min(11, priority | 0));
 }
 
-function sceneRecordIsNativeAlphaPriority(record: SceneDrawRecord): boolean {
-    return typeof record.sortDepth === 'number' && ((record.alpha | 0) < 256 || (record.priority | 0) !== 0);
-}
-
-type SceneAlphaPriorityRecord = {
-    record: SceneDrawRecord;
+type SceneProjectedDrawRecord = {
+    record: Omit<SceneDrawRecord, 'frameId'>;
     order: number;
     depth: number;
 };
 
 function averageSceneAlphaPriorityDepth(
-    buckets: SceneAlphaPriorityRecord[][],
+    buckets: SceneProjectedDrawRecord[][],
     first: number,
     second: number,
 ): number {
@@ -1427,8 +1430,8 @@ function averageSceneAlphaPriorityDepth(
     return Math.trunc(sum / count);
 }
 
-function sortSceneAlphaPriorityRecords(records: SceneAlphaPriorityRecord[]): SceneDrawRecord[] {
-    const buckets: SceneAlphaPriorityRecord[][] = Array.from({ length: 12 }, () => []);
+function sortSceneAlphaPriorityRecords(records: SceneProjectedDrawRecord[]): Array<Omit<SceneDrawRecord, 'frameId'>> {
+    const buckets: SceneProjectedDrawRecord[][] = Array.from({ length: 12 }, () => []);
     for (const item of records) {
         buckets[sceneAlphaPriorityBucket(item.record.priority)].push(item);
     }
@@ -1441,7 +1444,7 @@ function sortSceneAlphaPriorityRecords(records: SceneAlphaPriorityRecord[]): Sce
     const average6_8 = averageSceneAlphaPriorityDepth(buckets, 6, 8);
     const special = buckets[10].concat(buckets[11]);
     let specialIndex = 0;
-    const ordered: SceneDrawRecord[] = [];
+    const ordered: Array<Omit<SceneDrawRecord, 'frameId'>> = [];
     for (let priority = 0; priority < 10; priority++) {
         let threshold: number | null = null;
         if (priority === 0) {
@@ -1466,22 +1469,33 @@ function sortSceneAlphaPriorityRecords(records: SceneAlphaPriorityRecord[]): Sce
     return ordered;
 }
 
-function sceneGpuDrawRecordsForSnapshot(): SceneDrawRecord[] {
-    const records: SceneDrawRecord[] = [];
-    const alphaPriority: SceneAlphaPriorityRecord[] = [];
-    for (const record of sceneGpuDrawRecords) {
-        if (sceneRecordIsNativeAlphaPriority(record)) {
-            alphaPriority.push({
-                record,
-                order: alphaPriority.length,
-                depth: record.sortDepth ?? 0,
-            });
-        } else {
-            records.push(record);
-        }
+function recordSceneProjectedGpuDrawRecords(geom: SceneManifestGeometry, records: SceneProjectedDrawRecord[]): void {
+    if (records.length === 0) {
+        return;
     }
-    records.push(...sortSceneAlphaPriorityRecords(alphaPriority));
-    return records;
+
+    if (geom.minDepth === null || geom.maxDepth === null) {
+        for (const item of records) {
+            recordSceneGpuDrawRecord(item.record);
+        }
+        return;
+    }
+
+    if (!geom.facePriority) {
+        records.sort((left, right) => (right.depth - left.depth) || (left.order - right.order));
+        for (const item of records) {
+            recordSceneGpuDrawRecord(item.record);
+        }
+        return;
+    }
+
+    for (const record of sortSceneAlphaPriorityRecords(records)) {
+        recordSceneGpuDrawRecord(record);
+    }
+}
+
+function sceneGpuDrawRecordsForSnapshot(): SceneDrawRecord[] {
+    return sceneGpuDrawRecords.slice();
 }
 
 function rememberSceneManifestGeometry(
@@ -1501,6 +1515,8 @@ function rememberSceneManifestGeometry(
     facePriority: ArrayLike<number> | null,
     defaultPriority: number,
     faceTexture: ArrayLike<number> | null,
+    minDepth: number | null = null,
+    maxDepth: number | null = null,
 ): void {
     if (!SCENE_DRAWSET_MANIFEST_ENABLED) {
         return;
@@ -1521,6 +1537,8 @@ function rememberSceneManifestGeometry(
         facePriority,
         defaultPriority,
         faceTexture,
+        minDepth,
+        maxDepth,
     });
     clearSceneManifestDeformedGeometryForGeom(geomId);
 }
@@ -1882,14 +1900,15 @@ function sceneProjectedFace(
     geom: SceneManifestGeometry,
     face: number,
     colours: [number, number, number],
+    midZ: number,
     sinYaw: number,
     cosYaw: number,
     relativeX: number,
     relativeY: number,
     relativeZ: number,
-): SceneManifestProjectedFace {
+): SceneManifestProjectedFace | null {
     if (!geom.pointX || !geom.pointY || !geom.pointZ || !geom.faceA || !geom.faceB || !geom.faceC) {
-        return { screen: [[0, 0], [0, 0], [0, 0]], colours, nearClipped: false, hclip: false, depth: 0 };
+        return null;
     }
 
     const vertexA = geom.faceA[face] | 0;
@@ -1925,6 +1944,14 @@ function sceneProjectedFace(
         relativeY,
         relativeZ,
     );
+    let depthBucket = Math.trunc((a.z + b.z + c.z) / 3);
+    if (geom.minDepth !== null && geom.maxDepth !== null) {
+        const depthIndex = ((((a.z - midZ) + (b.z - midZ) + (c.z - midZ)) / 3) | 0) + geom.minDepth;
+        if (depthIndex < 0 || depthIndex >= geom.maxDepth) {
+            return null;
+        }
+        depthBucket = depthIndex;
+    }
 
     let screen: [[number, number], [number, number], [number, number]] = [a.screen, b.screen, c.screen];
     let projectedColours = colours;
@@ -1944,14 +1971,18 @@ function sceneProjectedFace(
         ) {
             screen = [clippedScreen[0]!, clippedScreen[1]!, clippedScreen[2]!];
             projectedColours = [clippedColours[0]! | 0, clippedColours[1]! | 0, clippedColours[2]! | 0];
+        } else {
+            return null;
         }
+    } else if (sceneManifestTriangleArea(screen) <= 0) {
+        return null;
     }
     return {
         screen,
         colours: projectedColours,
         nearClipped,
         hclip: screen.some(([x]) => x < 0 || x > sizeX),
-        depth: Math.trunc((a.z + b.z + c.z) / 3),
+        depthBucket,
     };
 }
 
@@ -1976,14 +2007,24 @@ function emitSceneGpuDrawRecords(
         return null;
     }
     const geom = sceneManifestGeometryForAnim(geomId, baseGeom, animFrameId);
+    const midZ = sceneManifestCamera
+        ? ((
+            relativeY * sceneManifestCamera.sinEyePitch
+            + (((relativeZ * sceneManifestCamera.cosEyeYaw - relativeX * sceneManifestCamera.sinEyeYaw) >> 16) * sceneManifestCamera.cosEyePitch)
+        ) >> 16)
+        : 0;
 
     const identity = beginSceneGpuDrawInstance();
     if (!identity) {
         return null;
     }
+    const projectedRecords: SceneProjectedDrawRecord[] = [];
     for (let face = 0; face < geom.numFaces; face++) {
-        const textureId = geom.faceTexture ? geom.faceTexture[face] | 0 : -1;
         const renderType = geom.faceType ? geom.faceType[face] | 0 : 0;
+        if (renderType === -1) {
+            continue;
+        }
+        const textureId = geom.faceTexture ? geom.faceTexture[face] | 0 : -1;
         const colourA = geom.faceColourA ? geom.faceColourA[face] | 0 : 0;
         const colourB = geom.faceColourB ? geom.faceColourB[face] | 0 : colourA;
         const colourC = geom.faceColourC ? geom.faceColourC[face] | 0 : colourA;
@@ -1991,30 +2032,39 @@ function emitSceneGpuDrawRecords(
             geom,
             face,
             [colourA, colourB, colourC],
+            midZ,
             sinYaw,
             cosYaw,
             relativeX,
             relativeY,
             relativeZ,
         );
-        recordSceneGpuDrawRecord({
-            drawId: identity.drawId,
-            instanceId: identity.instanceId,
-            geomId,
-            face,
-            kind: sceneDrawFaceKind(renderType, textureId),
-            source,
-            screen: projected.screen,
-            colours: projected.colours,
-            textureId,
-            alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
-            priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),
-            nearClipped: projected.nearClipped,
-            hclip: projected.hclip,
-            animated,
-            sortDepth: projected.depth,
+        if (!projected) {
+            continue;
+        }
+        projectedRecords.push({
+            order: projectedRecords.length,
+            depth: projected.depthBucket,
+            record: {
+                drawId: identity.drawId,
+                instanceId: identity.instanceId,
+                geomId,
+                face,
+                kind: sceneDrawFaceKind(renderType, textureId),
+                source,
+                screen: projected.screen,
+                colours: projected.colours,
+                textureId,
+                alpha: sceneDrawAlpha(geom.faceAlpha, face, instanceAlpha),
+                priority: sceneDrawPriority(geom.facePriority, geom.defaultPriority, face),
+                nearClipped: projected.nearClipped,
+                hclip: projected.hclip,
+                animated,
+                sortDepth: projected.depthBucket,
+            },
         });
     }
+    recordSceneProjectedGpuDrawRecords(geom, projectedRecords);
     return identity;
 }
 
@@ -2080,6 +2130,9 @@ function buildModelSceneTextureMetadata(model: any): {
     let anyTextured = false;
     for (let f = 0; f < model.numFaces; f++) {
         const renderType = model.faceRenderType[f] | 0;
+        if (renderType === -1) {
+            continue;
+        }
         const type = renderType & 0x3;
         if (type !== 2 && type !== 3) {
             continue;
@@ -2144,6 +2197,8 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
         model.facePriority,
         model.priority ?? 0,
         textureMetadata?.faceTexture ?? null,
+        model.minDepth ?? null,
+        model.maxDepth ?? null,
     );
     pushPacket(
         {
