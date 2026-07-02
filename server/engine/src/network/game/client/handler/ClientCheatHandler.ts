@@ -22,6 +22,7 @@ import Loc from '#/engine/entity/Loc.js';
 import { MoveStrategy } from '#/engine/entity/MoveStrategy.js';
 import { isClientConnected } from '#/engine/entity/NetworkPlayer.js';
 import Npc from '#/engine/entity/Npc.js';
+import Obj from '#/engine/entity/Obj.js';
 import Player, { getExpByLevel } from '#/engine/entity/Player.js';
 import { PlayerStat, PlayerStatEnabled, PlayerStatMap } from '#/engine/entity/PlayerStat.js';
 import ScriptProvider from '#/engine/script/ScriptProvider.js';
@@ -513,6 +514,17 @@ export default class ClientCheatHandler extends ClientGameMessageHandler<ClientC
                     return false;
                 }
                 World.addNpc(new Npc(player.level, player.x, player.z, type.size, type.size, EntityLifeCycle.DESPAWN, World.getNextNid(), type.id, type.blockwalk), 500);
+            } else if (cmd === 'objadd' && !Environment.node.production) {
+                if (args.length < 1) {
+                    return false;
+                }
+                const name: string = args[0];
+                const type: ObjType | null = ObjType.getByName(name);
+                if (!type) {
+                    return false;
+                }
+                const count = Math.max(1, tryParseInt(args[1], 1));
+                World.addObj(new Obj(player.level, player.x, player.z, EntityLifeCycle.DESPAWN, type.id, count), Obj.NO_RECEIVER, 500);
             } else if (cmd === 'openmain') {
                 if (args.length < 1) {
                     return false;

@@ -28,6 +28,26 @@ type ParentPort = {
     postMessage: (msg: GenericLoginThreadResponse) => void;
 };
 
+function nonLoginStaffModLevel(username: string): number {
+    if (Environment.node.production) {
+        return 0;
+    }
+
+    const allowed = (process.env.AURAI_DRAWSET_CAPTURE_STAFF_BOTS ?? '')
+        .split(',')
+        .map(name => name.trim().toLowerCase())
+        .filter(Boolean);
+    if (!allowed.includes('*') && !allowed.includes(username.toLowerCase())) {
+        return 0;
+    }
+
+    const level = Number.parseInt(process.env.AURAI_DRAWSET_CAPTURE_STAFF_LEVEL ?? '3', 10);
+    if (!Number.isFinite(level)) {
+        return 0;
+    }
+    return Math.max(0, Math.min(level, 4));
+}
+
 async function handleRequests(parentPort: ParentPort, msg: any) {
     const { type } = msg;
 
@@ -56,8 +76,10 @@ async function handleRequests(parentPort: ParentPort, msg: any) {
                 });
                 stopTimer();
             } else {
-                // rs-sdk: do not auto-grant dev staffmodlevel on non-production worlds (public server)
-                const staffmodlevel = 0;
+                // rs-sdk: do not auto-grant dev staffmodlevel on non-production
+                // worlds. NYM-220 live corpus capture opts named local accounts in
+                // explicitly so the placement hook can drive real ::tele/npcadd.
+                const staffmodlevel = nonLoginStaffModLevel(username);
 
                 const profile = Environment.node.profile;
                 if (!fs.existsSync(`data/players/${profile}`)) {

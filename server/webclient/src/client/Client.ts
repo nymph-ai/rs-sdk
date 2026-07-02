@@ -1993,6 +1993,26 @@ export class Client extends GameShell {
     }
 
     /**
+     * Send a server cheat command through the same packet path as ::chat input.
+     */
+    sendCheat(command: string): boolean {
+        if (!this.ingame || !this.out || !this.localPlayer) {
+            return false;
+        }
+
+        const input = command.startsWith('::') ? command.substring(2) : command;
+        if (input.length <= 0) {
+            return false;
+        }
+        const clipped = input.substring(0, 80);
+
+        this.out.p1Enc(ClientProt.CLIENT_CHEAT);
+        this.out.p1(clipped.length + 1);
+        this.out.pjstr(clipped);
+        return true;
+    }
+
+    /**
      * Use one inventory item on another inventory item (OPHELDU)
      */
     useItemOnItem(sourceSlot: number, targetSlot: number, interfaceId: number = 3214): boolean {
@@ -5467,9 +5487,7 @@ export class Client extends GameShell {
                                     // empty
                                 }
                             } else if (this.chatInput.startsWith('::')) {
-                                this.out.p1Enc(ClientProt.CLIENT_CHEAT);
-                                this.out.p1(this.chatInput.length - 2 + 1);
-                                this.out.pjstr(this.chatInput.substring(2));
+                                this.sendCheat(this.chatInput);
                             } else {
                                 let colour: number = 0;
                                 if (this.chatInput.startsWith('yellow:')) {

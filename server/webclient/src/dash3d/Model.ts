@@ -168,6 +168,7 @@ export default class Model extends ModelSource {
         identity: SceneDrawInstanceIdentity;
     } | null = null;
     private static sceneCpuDrawRecordOnly: boolean = false;
+    private static sceneDrawSourceOverride: SceneDrawSource | null = null;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -205,6 +206,16 @@ export default class Model extends ModelSource {
     private static gpuModelRelativeY: number = 0;
     private static gpuModelRelativeZ: number = 0;
 
+    static withSceneDrawSource<T>(source: SceneDrawSource, draw: () => T): T {
+        const previous = Model.sceneDrawSourceOverride;
+        Model.sceneDrawSourceOverride = source;
+        try {
+            return draw();
+        } finally {
+            Model.sceneDrawSourceOverride = previous;
+        }
+    }
+
     private beginSceneDrawContext(
         typecode: number,
         identity: SceneDrawInstanceIdentity | null,
@@ -234,9 +245,10 @@ export default class Model extends ModelSource {
             }
         }
 
+        const source: SceneDrawSource = Model.sceneDrawSourceOverride ?? (volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL);
         return {
             geomId,
-            source: volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
+            source,
             animated: volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             identity,
         };
@@ -2186,6 +2198,7 @@ export default class Model extends ModelSource {
             && uploadModel.hasSceneTexturedFaces();
         const nearClipCpuFallback: boolean = nearClipFallback && !shouldEmitSceneNativeNearClip();
         let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
+        const sceneDrawSource: SceneDrawSource = Model.sceneDrawSourceOverride ?? (volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL);
 
         const nativeSceneFastPath = gpuRenderPackets.shouldEmitSceneInstances() && !nearClipCpuFallback && !textureFallback;
         let nativeSceneRecordOnly = false;
@@ -2237,7 +2250,7 @@ export default class Model extends ModelSource {
                 relativeZ,
                 256,
                 sceneAnimation?.animFrameId ?? 0,
-                volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
+                sceneDrawSource,
                 volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             );
             if (!shouldRecordSceneCpuDrawset()) {

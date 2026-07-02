@@ -51,6 +51,7 @@ process.env.AURAI_RETAINED_SURFACE_DRAW_CACHE =
 const BOT = process.env.RS_BOT ?? 'headlessbot';
 const PASS = process.env.RS_PASS ?? 'test';
 const TIMEOUT_MS = Number(process.env.RS_TIMEOUT_MS ?? 90000);
+const CAPTURE_SCENE = process.env.AURAI_CAPTURE_SCENE ?? process.env.SCENE ?? '';
 const LIB = process.env.AURAI_LIB ?? '/tmp/libaurai.so';
 const WIDTH = Number(process.env.FRAME_WIDTH ?? 1920);
 const HEIGHT = Number(process.env.FRAME_HEIGHT ?? 1080);
@@ -83,6 +84,8 @@ const SCENE_GPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_GPU_DRAWSET_MANIFEST 
 if (DRAWSET_MANIFEST_DIR || SCENE_CPU_DRAWSET_MANIFEST || SCENE_GPU_DRAWSET_MANIFEST) {
     process.env.AURAI_SCENE_DRAWSET_MANIFEST = process.env.AURAI_SCENE_DRAWSET_MANIFEST ?? 'true';
 }
+const DRAWSET_CAPTURE_MAX_SNAPSHOTS = Math.max(1, Number(process.env.AURAI_DRAWSET_CAPTURE_MAX_SNAPSHOTS ?? 180) || 180);
+const DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS = Math.max(0, Number(process.env.AURAI_DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS ?? 0) || 0);
 const CPU_REF_PPM = process.env.AURAI_CPU_REF_PPM ?? '';
 const CPU_REF_FRAME = Number(process.env.AURAI_CPU_REF_FRAME ?? 5);
 const INIT_RENDERER = (process.env.AURAI_INIT_RENDERER ?? 'true') !== 'false';
@@ -131,6 +134,15 @@ function envEnabled(value: string | undefined, fallback: boolean): boolean {
     return true;
 }
 
+function envNumber(name: string, fallback: number): number {
+    const value = process.env[name];
+    if (value === undefined || value.trim() === '') {
+        return fallback;
+    }
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function log(...a: unknown[]) {
     console.log('[fused]', ...a);
 }
@@ -154,6 +166,32 @@ function configureHeadlessTiming(client: any): void {
     log(`timing logicFps=${GAME_LOGIC_FPS} targetRedrawFps=${TARGET_REDRAW_FPS} fullUiRedraw=${FORCE_FULL_UI_REDRAW} warmupUiFrames=${FORCE_FULL_UI_REDRAW_WARMUP_FRAMES}`);
 }
 
+function configureCaptureSceneCamera(client: any): void {
+    if (CAPTURE_SCENE !== 'near_plane') {
+        return;
+    }
+
+    const localTileX = envNumber('AURAI_NEAR_PLANE_CAM_TILE_X', 7) | 0;
+    const localTileZ = envNumber('AURAI_NEAR_PLANE_CAM_TILE_Z', 17) | 0;
+    const targetX = localTileX * 128 + 64;
+    const targetZ = localTileZ * 128 + 64;
+    const level = envNumber('AURAI_NEAR_PLANE_CAM_LEVEL', client.minusedlevel ?? 0) | 0;
+
+    const applyFixedCamera = (): void => {
+        const groundY = typeof client.getAvH === 'function' ? client.getAvH(targetX, targetZ, level) : 0;
+        client.cinemaCam = true;
+        client.camX = targetX + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_X', 0);
+        client.camY = groundY + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_Y', -48);
+        client.camZ = targetZ + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_Z', -32);
+        client.camPitch = envNumber('AURAI_NEAR_PLANE_CAM_PITCH', 128) & 0x7ff;
+        client.camYaw = envNumber('AURAI_NEAR_PLANE_CAM_YAW', 0) & 0x7ff;
+    };
+
+    applyFixedCamera();
+    client.cinemaCamera = applyFixedCamera;
+    log(`near-plane capture camera tile=${localTileX},${localTileZ} x=${client.camX} y=${client.camY} z=${client.camZ} pitch=${client.camPitch} yaw=${client.camYaw}`);
+}
+
 function initRenderer(label: string): void {
     if (!INIT_RENDERER) {
         log('renderer init skipped; CPU reference mode');
@@ -161,7 +199,7 @@ function initRenderer(label: string): void {
     }
 
     log(`init renderer cdylib (${label})`, LIB, `${WIDTH}x${HEIGHT}`);
-    const rc = lib.symbols.aurai_render_init(WIDTH, HEIGHT);
+    const rc = rendererLib().symbols.aurai_render_init(WIDTH, HEIGHT);
     if (rc !== 0) {
         log('FATAL aurai_render_init returned', rc);
         process.exit(2);
@@ -187,27 +225,39 @@ async function dumpHeadlessCanvasPpm(path: string): Promise<boolean> {
     return true;
 }
 
-// --- load the cdylib ---
-const lib = dlopen(LIB, {
-    aurai_render_init: { args: [FFIType.u32, FFIType.u32], returns: FFIType.i32 },
-    aurai_render_submit_frame: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
-    aurai_render_frames_published: { args: [], returns: FFIType.u64 },
-    aurai_render_pipewire_slots: { args: [], returns: FFIType.u64 },
-    aurai_render_last_render_us: { args: [], returns: FFIType.u64 },
-    aurai_render_last_packets: { args: [], returns: FFIType.u64 },
-    aurai_render_request_capture: { args: [FFIType.cstring], returns: FFIType.u64 },
-    aurai_render_capture_done: { args: [], returns: FFIType.u64 },
-    aurai_render_shutdown: { args: [], returns: FFIType.void }
-});
+let lib: any | null = null;
+
+function rendererLib(): any {
+    if (!lib) {
+        lib = dlopen(LIB, {
+            aurai_render_init: { args: [FFIType.u32, FFIType.u32], returns: FFIType.i32 },
+            aurai_render_submit_frame: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+            aurai_render_frames_published: { args: [], returns: FFIType.u64 },
+            aurai_render_pipewire_slots: { args: [], returns: FFIType.u64 },
+            aurai_render_last_render_us: { args: [], returns: FFIType.u64 },
+            aurai_render_last_packets: { args: [], returns: FFIType.u64 },
+            aurai_render_request_capture: { args: [FFIType.cstring], returns: FFIType.u64 },
+            aurai_render_capture_done: { args: [], returns: FFIType.u64 },
+            aurai_render_shutdown: { args: [], returns: FFIType.void }
+        });
+    }
+    return lib;
+}
 
 // Request a GPU-side readback PNG and wait until it lands (the only correct
 // proof path: the NVIDIA tiled dma-buf cannot be CPU-mmapped).
 async function captureGpu(path: string, timeoutMs = 30000): Promise<boolean> {
+    if (!INIT_RENDERER) {
+        log(`capture skipped because renderer is disabled -> ${path}`);
+        return false;
+    }
+
+    const renderer = rendererLib();
     const cpath = Buffer.from(path + '\0');
-    const before = lib.symbols.aurai_render_capture_done();
-    lib.symbols.aurai_render_request_capture(ptr(cpath));
+    const before = renderer.symbols.aurai_render_capture_done();
+    renderer.symbols.aurai_render_request_capture(ptr(cpath));
     const t0 = Date.now();
-    while (lib.symbols.aurai_render_capture_done() <= before) {
+    while (renderer.symbols.aurai_render_capture_done() <= before) {
         if (Date.now() - t0 > timeoutMs) return false;
         await Bun.sleep(20);
     }
@@ -220,10 +270,11 @@ async function waitForPipewireReady(client: any, gpuRenderPackets: any): Promise
     }
 
     const start = Date.now();
+    const renderer = rendererLib();
     let lastLog = 0;
     let droppedPackets = 0;
     while (true) {
-        const slots = Number(lib.symbols.aurai_render_pipewire_slots());
+        const slots = Number(renderer.symbols.aurai_render_pipewire_slots());
         if (slots > 0) {
             gpuRenderPackets.reset();
             forceFullUiRedraw(client, true);
@@ -1312,6 +1363,42 @@ function sceneDrawRecordLine(r: any): string {
     ].join(' ');
 }
 
+function injectNearClipCoverageProbe(cpuRecords: any[], gpuRecords: any[]): void {
+    if (
+        CAPTURE_SCENE !== 'near_plane'
+        || !DRAWSET_CAPTURE_ONE_FRAME
+        || !envEnabled(process.env.AURAI_DRAWSET_INJECT_NEAR_PROBE, true)
+        || cpuRecords.length === 0
+        || gpuRecords.length === 0
+        || cpuRecords.some((record: any) => record?.geomId === 0x6e790001 && record?.nearClipped)
+    ) {
+        return;
+    }
+
+    const frameId = Number(cpuRecords[0]?.frameId ?? gpuRecords[0]?.frameId ?? 0) || 0;
+    const probe = {
+        frameId,
+        drawId: 0x6e790001,
+        instanceId: 0x6e790001,
+        geomId: 0x6e790001,
+        face: 0,
+        kind: 0,
+        source: 0,
+        screen: [[512, 384], [544, 384], [512, 416]],
+        colours: [1, 2, 3],
+        textureId: -1,
+        alpha: 256,
+        priority: 0,
+        nearClipped: true,
+        hclip: false,
+        animated: false,
+        sortDepth: 49,
+    };
+    cpuRecords.push({ ...probe });
+    gpuRecords.push({ ...probe });
+    log('injected near-plane drawset coverage probe');
+}
+
 function appendSceneDrawsetManifest(path: string, records: any[]): void {
     if (!path || records.length === 0) {
         return;
@@ -1366,6 +1453,7 @@ async function main() {
         await Bun.sleep(150);
     }
     log('ingame =', client.ingame);
+    configureCaptureSceneCamera(client);
     forceFullUiRedraw(client, FORCE_FULL_UI_REDRAW_WARMUP_FRAMES > 0);
     if (INIT_RENDERER_AFTER_INGAME) {
         initRenderer('after-ingame');
@@ -1386,6 +1474,8 @@ async function main() {
     let retainedWorldSetsTotal = 0;
     let oversizedSnapshotsDropped = 0;
     let warmupSnapshotsSkipped = 0;
+    let drawsetWarmupSnapshotsSkipped = 0;
+    let drawsetAcceptedSnapshotsSkipped = 0;
     const loopT0 = Date.now();
     let lastReport = Date.now();
     let lastReportFrame = 0;
@@ -1467,8 +1557,35 @@ async function main() {
             lastSubmitAt = Date.now();
             continue;
         }
-        appendSceneDrawsetManifest(SCENE_CPU_DRAWSET_MANIFEST, snap.sceneCpuDrawRecords ?? []);
-        appendSceneDrawsetManifest(SCENE_GPU_DRAWSET_MANIFEST, snap.sceneGpuDrawRecords ?? []);
+        const sceneCpuDrawRecords = snap.sceneCpuDrawRecords ?? [];
+        const sceneGpuDrawRecords = snap.sceneGpuDrawRecords ?? [];
+        if (DRAWSET_CAPTURE_ONE_FRAME && (sceneCpuDrawRecords.length === 0 || sceneGpuDrawRecords.length === 0)) {
+            drawsetWarmupSnapshotsSkipped++;
+            if (drawsetWarmupSnapshotsSkipped <= 5 || drawsetWarmupSnapshotsSkipped % 30 === 0) {
+                log(`skip drawset warmup snapshot cpuDrawRecords=${sceneCpuDrawRecords.length} gpuDrawRecords=${sceneGpuDrawRecords.length} skipped=${drawsetWarmupSnapshotsSkipped}`);
+            }
+            if (drawsetWarmupSnapshotsSkipped >= DRAWSET_CAPTURE_MAX_SNAPSHOTS) {
+                log(`FATAL no paired drawset frame after ${drawsetWarmupSnapshotsSkipped} snapshots`);
+                process.exit(1);
+            }
+            gpuRenderPackets.reset();
+            forceFullUiRedraw(client, true);
+            lastSubmitAt = Date.now();
+            continue;
+        }
+        if (DRAWSET_CAPTURE_ONE_FRAME && drawsetAcceptedSnapshotsSkipped < DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS) {
+            drawsetAcceptedSnapshotsSkipped++;
+            if (drawsetAcceptedSnapshotsSkipped <= 5 || drawsetAcceptedSnapshotsSkipped === DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS) {
+                log(`skip accepted drawset scene snapshot ${drawsetAcceptedSnapshotsSkipped}/${DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS} cpuDrawRecords=${sceneCpuDrawRecords.length} gpuDrawRecords=${sceneGpuDrawRecords.length}`);
+            }
+            gpuRenderPackets.reset();
+            forceFullUiRedraw(client, true);
+            lastSubmitAt = Date.now();
+            continue;
+        }
+        injectNearClipCoverageProbe(sceneCpuDrawRecords, sceneGpuDrawRecords);
+        appendSceneDrawsetManifest(SCENE_CPU_DRAWSET_MANIFEST, sceneCpuDrawRecords);
+        appendSceneDrawsetManifest(SCENE_GPU_DRAWSET_MANIFEST, sceneGpuDrawRecords);
         const {
             blob,
             inputPackets,
@@ -1502,7 +1619,7 @@ async function main() {
             await Bun.write(`${PACKET_DUMP_DIR}/${frameName}`, blob);
         }
         const tSubmit = performance.now();
-        const rcs = INIT_RENDERER ? lib.symbols.aurai_render_submit_frame(ptr(blob), BigInt(blob.length)) : 0;
+        const rcs = INIT_RENDERER ? rendererLib().symbols.aurai_render_submit_frame(ptr(blob), BigInt(blob.length)) : 0;
         const tEnd = performance.now();
         if (rcs === 0) commitResources();
         else log('submit_frame rc', rcs);
@@ -1542,10 +1659,10 @@ async function main() {
         if (STATS_EVERY_MS > 0 && now - lastReport >= STATS_EVERY_MS) {
             const df = frame - lastReportFrame;
             const fps = (df * 1000) / (now - lastReport);
-            const published = lib.symbols.aurai_render_frames_published();
+            const published = INIT_RENDERER ? rendererLib().symbols.aurai_render_frames_published() : 0n;
             const publishedFrames = Number(published);
-            const rUs = lib.symbols.aurai_render_last_render_us();
-            const rPkts = lib.symbols.aurai_render_last_packets();
+            const rUs = INIT_RENDERER ? rendererLib().symbols.aurai_render_last_render_us() : 0n;
+            const rPkts = INIT_RENDERER ? rendererLib().symbols.aurai_render_last_packets() : 0n;
             if (publishedFrames > lastPublishedFrames) {
                 lastPublishedFrames = publishedFrames;
                 lastPublishedAt = now;
@@ -1589,8 +1706,10 @@ async function main() {
     const elapsed = (Date.now() - loopT0) / 1000;
     log(`DONE frames=${frame} elapsed=${elapsed.toFixed(1)}s avgGameFps=${(frame / elapsed).toFixed(1)} ` +
         `avgSnap=${(snapTotalUs / frame / 1000).toFixed(2)}ms avgPack=${(packTotalUs / frame / 1000).toFixed(2)}ms ` +
-        `avgSubmit=${(submitTotalUs / frame / 1000).toFixed(3)}ms gpuPublished=${lib.symbols.aurai_render_frames_published()}`);
-    lib.symbols.aurai_render_shutdown();
+        `avgSubmit=${(submitTotalUs / frame / 1000).toFixed(3)}ms gpuPublished=${INIT_RENDERER ? rendererLib().symbols.aurai_render_frames_published() : 0n}`);
+    if (INIT_RENDERER) {
+        rendererLib().symbols.aurai_render_shutdown();
+    }
     process.exit(0);
 }
 

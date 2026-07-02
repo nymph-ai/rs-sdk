@@ -16,8 +16,12 @@ import LinkList from '#/datastruct/LinkList.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
 import {
+    SCENE_DRAW_SOURCE_DECOR,
+    SCENE_DRAW_SOURCE_GROUND_DECOR,
     SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
     SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+    SCENE_DRAW_SOURCE_OBJ,
+    SCENE_DRAW_SOURCE_WALL,
     beginSceneCpuDrawInstance,
     beginSceneGpuDrawInstance,
     beginSceneDrawsetFrame,
@@ -1314,6 +1318,15 @@ export default class World {
         }
     }
 
+    private renderSceneModelSource(source: SceneDrawSource, model: ModelSource | null | undefined, yaw: number, relativeX: number, relativeY: number, relativeZ: number, typecode: number): void {
+        if (!model) {
+            return;
+        }
+        Model.withSceneDrawSource(source, () => {
+            model.worldRender(yaw, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, relativeX, relativeY, relativeZ, typecode);
+        });
+    }
+
     private calcOcclude(): void {
         const count: number = World.numOccluders[World.maxLevel];
         const occluders: (Occlude | null)[] = World.occluders[World.maxLevel];
@@ -1543,7 +1556,7 @@ export default class World {
 
                     const wall: Wall | null = linkedSquare.wall;
                     if (wall) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     for (let i: number = 0; i < linkedSquare.spriteCount; i++) {
@@ -1611,17 +1624,17 @@ export default class World {
                     }
 
                     if ((wall.angle1 & frontWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     if ((wall.angle2 & frontWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle2)) {
-                        wall.model2?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model2, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
                 }
 
                 if (decor && !this.spriteOccluded(originalLevel, tileX, tileZ, decor.model.minY)) {
                     if ((decor.wshape & frontWallTypes) !== 0) {
-                        decor.model.worldRender(decor.angle, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, decor.angle, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
                     } else if ((decor.wshape & 0x300) !== 0) {
                         const x: number = decor.x - World.cx;
                         const y: number = decor.y - World.cy;
@@ -1645,13 +1658,13 @@ export default class World {
                         if ((decor.wshape & 0x100) !== 0 && nearestZ < nearestX) {
                             const drawX: number = x + DECORXOF[angle];
                             const drawZ: number = z + DECORZOF[angle];
-                            decor.model.worldRender(angle * 512 + 256, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, angle * 512 + 256, drawX, y, drawZ, decor.typecode);
                         }
 
                         if ((decor.wshape & 0x200) !== 0 && nearestZ > nearestX) {
                             const drawX: number = x + DECORXOF2[angle];
                             const drawZ: number = z + DECORZOF2[angle];
-                            decor.model.worldRender((angle * 512 + 1280) & 0x7ff, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, (angle * 512 + 1280) & 0x7ff, drawX, y, drawZ, decor.typecode);
                         }
                     }
                 }
@@ -1659,21 +1672,21 @@ export default class World {
                 if (tileDrawn) {
                     const groundDecor: GroundDecor | null = tile.groundDecor;
                     if (groundDecor) {
-                        groundDecor.model?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, groundDecor.x - World.cx, groundDecor.y - World.cy, groundDecor.z - World.cz, groundDecor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_GROUND_DECOR, groundDecor.model, 0, groundDecor.x - World.cx, groundDecor.y - World.cy, groundDecor.z - World.cz, groundDecor.typecode);
                     }
 
                     const objs: GroundObject | null = tile.groundObject;
                     if (objs && objs.height === 0) {
                         if (objs.bottomObj) {
-                            objs.bottomObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.bottomObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
 
                         if (objs.middleObj) {
-                            objs.middleObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.middleObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
 
                         if (objs.topObj) {
-                            objs.topObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.topObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
                     }
                 }
@@ -1729,7 +1742,7 @@ export default class World {
                     const wall: Wall | null = tile.wall;
 
                     if (wall && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     tile.cornerSides = 0;
@@ -1896,15 +1909,15 @@ export default class World {
             const objs: GroundObject | null = tile.groundObject;
             if (objs && objs.height !== 0) {
                 if (objs.bottomObj) {
-                    objs.bottomObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.bottomObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
 
                 if (objs.middleObj) {
-                    objs.middleObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.middleObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
 
                 if (objs.topObj) {
-                    objs.topObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.topObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
             }
 
@@ -1913,7 +1926,7 @@ export default class World {
 
                 if (decor && !this.spriteOccluded(originalLevel, tileX, tileZ, decor.model.minY)) {
                     if ((decor.wshape & tile.backWallTypes) !== 0) {
-                        decor.model.worldRender(decor.angle, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, decor.angle, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
                     } else if ((decor.wshape & 0x300) !== 0) {
                         const x: number = decor.x - World.cx;
                         const y: number = decor.y - World.cy;
@@ -1937,13 +1950,13 @@ export default class World {
                         if ((decor.wshape & 0x100) !== 0 && nearestZ >= nearestX) {
                             const drawX: number = x + DECORXOF[angle];
                             const drawZ: number = z + DECORZOF[angle];
-                            decor.model.worldRender(angle * 512 + 256, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, angle * 512 + 256, drawX, y, drawZ, decor.typecode);
                         }
 
                         if ((decor.wshape & 0x200) !== 0 && nearestZ <= nearestX) {
                             const drawX: number = x + DECORXOF2[angle];
                             const drawZ: number = z + DECORZOF2[angle];
-                            decor.model.worldRender((angle * 512 + 1280) & 0x7ff, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, (angle * 512 + 1280) & 0x7ff, drawX, y, drawZ, decor.typecode);
                         }
                     }
                 }
@@ -1951,11 +1964,11 @@ export default class World {
                 const wall: Wall | null = tile.wall;
                 if (wall) {
                     if ((wall.angle2 & tile.backWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle2)) {
-                        wall.model2?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model2, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     if ((wall.angle1 & tile.backWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
                 }
             }
