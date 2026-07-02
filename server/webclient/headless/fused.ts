@@ -14,8 +14,8 @@
 //   AURAI_DUMP_BLOB_DIR optional .aur2 packet dump directory (renderer can be disabled)
 //   AURAI_DUMP_BLOB_START first submitted frame index to dump (default 0)
 //   AURAI_DUMP_BLOB_LIMIT max dumped frames (0 = unlimited, default 0)
-//   AURAI_SCENE_CPU_DRAWSET_MANIFEST optional NYM-220 CPU draw-set manifest path
-//   AURAI_SCENE_GPU_DRAWSET_MANIFEST optional NYM-220 GPU draw-set manifest path
+//   AURAI_DRAWSET_MANIFEST_DIR optional NYM-220 dir for frame.cpu.drawset/frame.gpu.drawset
+//   AURAI_DRAWSET_CAPTURE_ONE_FRAME stop after one submitted drawset frame
 //   AURAI_PACKET_DUMP_DIR legacy alias for AURAI_DUMP_BLOB_DIR
 //   PW_FPS            PipeWire node nominal fps (default 30)
 //   RS_TIMEOUT_MS     in-game wait timeout (default 90000)
@@ -23,7 +23,7 @@
 import { dlopen, FFIType, ptr } from 'bun:ffi';
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { installDomStubs } from './dom-stubs.js';
 
 installDomStubs();
@@ -54,7 +54,8 @@ const TIMEOUT_MS = Number(process.env.RS_TIMEOUT_MS ?? 90000);
 const LIB = process.env.AURAI_LIB ?? '/tmp/libaurai.so';
 const WIDTH = Number(process.env.FRAME_WIDTH ?? 1920);
 const HEIGHT = Number(process.env.FRAME_HEIGHT ?? 1080);
-const FRAME_LIMIT = Number(process.env.AURAI_FRAMES ?? 0);
+const DRAWSET_CAPTURE_ONE_FRAME = envEnabled(process.env.AURAI_DRAWSET_CAPTURE_ONE_FRAME, false);
+const FRAME_LIMIT = DRAWSET_CAPTURE_ONE_FRAME ? 1 : Number(process.env.AURAI_FRAMES ?? 0);
 const STATS_EVERY_MS = Number(process.env.AURAI_STATS_EVERY_MS ?? 2000);
 const PUBLISH_STALL_MS = Number(process.env.AURAI_PUBLISH_STALL_MS ?? 10000);
 const WAIT_PIPEWIRE_READY = envEnabled(process.env.AURAI_WAIT_PIPEWIRE_READY, true);
@@ -76,9 +77,10 @@ const SCENE_INSTANCE_MODE = envEnabled(process.env.AURAI_SCENE_INSTANCE_MODE, fa
 const PACKET_DUMP_DIR = process.env.AURAI_DUMP_BLOB_DIR ?? process.env.AURAI_PACKET_DUMP_DIR ?? '';
 const PACKET_DUMP_START = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_START ?? 0) || 0);
 const PACKET_DUMP_LIMIT = Math.max(0, Number(process.env.AURAI_DUMP_BLOB_LIMIT ?? 0) || 0);
-const SCENE_CPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_CPU_DRAWSET_MANIFEST ?? '';
-const SCENE_GPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_GPU_DRAWSET_MANIFEST ?? '';
-if (SCENE_CPU_DRAWSET_MANIFEST || SCENE_GPU_DRAWSET_MANIFEST) {
+const DRAWSET_MANIFEST_DIR = process.env.AURAI_DRAWSET_MANIFEST_DIR ?? '';
+const SCENE_CPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_CPU_DRAWSET_MANIFEST ?? (DRAWSET_MANIFEST_DIR ? join(DRAWSET_MANIFEST_DIR, 'frame.cpu.drawset') : '');
+const SCENE_GPU_DRAWSET_MANIFEST = process.env.AURAI_SCENE_GPU_DRAWSET_MANIFEST ?? (DRAWSET_MANIFEST_DIR ? join(DRAWSET_MANIFEST_DIR, 'frame.gpu.drawset') : '');
+if (DRAWSET_MANIFEST_DIR || SCENE_CPU_DRAWSET_MANIFEST || SCENE_GPU_DRAWSET_MANIFEST) {
     process.env.AURAI_SCENE_DRAWSET_MANIFEST = process.env.AURAI_SCENE_DRAWSET_MANIFEST ?? 'true';
 }
 const CPU_REF_PPM = process.env.AURAI_CPU_REF_PPM ?? '';

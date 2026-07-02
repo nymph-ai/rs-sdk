@@ -2350,9 +2350,13 @@ export default class World {
             console.log(`[rqg] called L${level} emit=${gpuRenderPackets.shouldEmitSceneInstances()} cycle=${World.cycleNo}`);
         }
         const textureFallback = this.quickGroundLevelHasSceneTextureFallback(level);
+        let sceneCpuRecordOnly = false;
         if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
             this.emitQuickGroundRegion(level);
-            return;
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            sceneCpuRecordOnly = true;
         }
         const sceneIdentity = textureFallback
             ? this.beginSceneQuickGroundGpuFallbackDrawInstance(level)
@@ -2455,7 +2459,7 @@ export default class World {
                         ground.texture,
                         textureFallback,
                     );
-                    if (ground.flat) {
+                    if (!sceneCpuRecordOnly && ground.flat) {
                         Pix3D.textureTriangle(
                             py1, px3, pz0,
                             pz1, py3, px1,
@@ -2466,7 +2470,7 @@ export default class World {
                             z1, z3,
                             ground.texture
                         );
-                    } else {
+                    } else if (!sceneCpuRecordOnly) {
                         Pix3D.textureTriangle(
                             py1, px3, pz0,
                             pz1, py3, px1,
@@ -2491,11 +2495,13 @@ export default class World {
                         -1,
                         textureFallback,
                     );
-                    Pix3D.gouraudTriangle(
-                        py1, px3, pz0,
-                        pz1, py3, px1,
-                        colours[0], colours[1], colours[2]
-                    );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            py1, px3, pz0,
+                            pz1, py3, px1,
+                            colours[0], colours[1], colours[2]
+                        );
+                    }
                 }
             } else {
                 if (ground.colourNE !== 12345678) {
@@ -2510,11 +2516,13 @@ export default class World {
                         -1,
                         textureFallback,
                     );
-                    Pix3D.gouraudTriangle(
-                        py1, px3, pz0,
-                        pz1, py3, px1,
-                        ground.colourNE, ground.colourNW, ground.colourSE
-                    );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            py1, px3, pz0,
+                            pz1, py3, px1,
+                            ground.colourNE, ground.colourNW, ground.colourSE
+                        );
+                    }
                 }
             }
         }
@@ -2542,16 +2550,18 @@ export default class World {
                         ground.texture,
                         textureFallback,
                     );
-                    Pix3D.textureTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        ground.colourSW, ground.colourSE, ground.colourNW,
-                        x0, y0, z0,
-                        x1, x3,
-                        y1, y3,
-                        z1, z3,
-                        ground.texture
-                    );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.textureTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            ground.colourSW, ground.colourSE, ground.colourNW,
+                            x0, y0, z0,
+                            x1, x3,
+                            y1, y3,
+                            z1, z3,
+                            ground.texture
+                        );
+                    }
                 } else {
                     const colours = this.lowMemTextureColours(ground.texture, ground.colourSW, ground.colourSE, ground.colourNW);
                     this.recordSceneTerrainCpuFace(
@@ -2565,11 +2575,13 @@ export default class World {
                         -1,
                         textureFallback,
                     );
-                    Pix3D.gouraudTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        colours[0], colours[1], colours[2]
-                    );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            colours[0], colours[1], colours[2]
+                        );
+                    }
                 }
             } else {
                 if (ground.colourSW !== 12345678) {
@@ -2584,11 +2596,13 @@ export default class World {
                         -1,
                         textureFallback,
                     );
-                    Pix3D.gouraudTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        ground.colourSW, ground.colourSE, ground.colourNW
-                    );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            ground.colourSW, ground.colourSE, ground.colourNW
+                        );
+                    }
                 }
             }
         }
@@ -2596,6 +2610,7 @@ export default class World {
 
     private renderGround(tileX: number, tileZ: number, ground: Ground, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
         const textureFallback = this.groundHasSceneTextureFallback(ground);
+        let sceneCpuRecordOnly = false;
         if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
             // NYM-210 Slice 2: terrain on GPU. Ground verts are WORLD-space; the
             // GPU projects them with yaw=0 + rel=-camera (world → camera-relative),
@@ -2610,7 +2625,10 @@ export default class World {
             const geomId = this.ensureSceneGroundGeomId(ground);
             recordGroundGeometryUpload(geomId, ground);
             recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_COMPLEX);
-            return;
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            sceneCpuRecordOnly = true;
         }
         const sceneIdentity = textureFallback
             ? this.beginSceneGroundGpuFallbackDrawInstance()
@@ -2685,7 +2703,7 @@ export default class World {
                             ground.faceTexture[v],
                             textureFallback,
                         );
-                        if (ground.flat) {
+                        if (!sceneCpuRecordOnly && ground.flat) {
                             Pix3D.textureTriangle(
                                 x0, x1, x2,
                                 y0, y1, y2,
@@ -2696,7 +2714,7 @@ export default class World {
                                 Ground.drawTextureVertexZ[1], Ground.drawTextureVertexZ[3],
                                 ground.faceTexture[v]
                             );
-                        } else {
+                        } else if (!sceneCpuRecordOnly) {
                             Pix3D.textureTriangle(
                                 x0, x1, x2,
                                 y0, y1, y2,
@@ -2721,11 +2739,13 @@ export default class World {
                             -1,
                             textureFallback,
                         );
-                        Pix3D.gouraudTriangle(
-                            x0, x1, x2,
-                            y0, y1, y2,
-                            colours[0], colours[1], colours[2]
-                        );
+                        if (!sceneCpuRecordOnly) {
+                            Pix3D.gouraudTriangle(
+                                x0, x1, x2,
+                                y0, y1, y2,
+                                colours[0], colours[1], colours[2]
+                            );
+                        }
                     }
                 } else {
                     if (ground.faceColourA[v] !== 12345678) {
@@ -2740,11 +2760,13 @@ export default class World {
                             -1,
                             textureFallback,
                         );
-                        Pix3D.gouraudTriangle(
-                            x0, x1, x2,
-                            y0, y1, y2,
-                            ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]
-                        );
+                        if (!sceneCpuRecordOnly) {
+                            Pix3D.gouraudTriangle(
+                                x0, x1, x2,
+                                y0, y1, y2,
+                                ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]
+                            );
+                        }
                     }
                 }
             }

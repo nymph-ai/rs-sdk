@@ -167,6 +167,7 @@ export default class Model extends ModelSource {
         animated: boolean;
         identity: SceneDrawInstanceIdentity;
     } | null = null;
+    private static sceneCpuDrawRecordOnly: boolean = false;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -2186,7 +2187,9 @@ export default class Model extends ModelSource {
         const nearClipCpuFallback: boolean = nearClipFallback && !shouldEmitSceneNativeNearClip();
         let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
 
-        if (gpuRenderPackets.shouldEmitSceneInstances() && !nearClipCpuFallback && !textureFallback) {
+        const nativeSceneFastPath = gpuRenderPackets.shouldEmitSceneInstances() && !nearClipCpuFallback && !textureFallback;
+        let nativeSceneRecordOnly = false;
+        if (nativeSceneFastPath) {
             // NYM-210: the model passed bounding-cylinder culling (cheap, game
             // logic). Emit its geometry once (cached by id) + a per-frame
             // instance, then bail BEFORE the per-vertex CPU projection loop —
@@ -2237,7 +2240,10 @@ export default class Model extends ModelSource {
                 volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL,
                 volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
             );
-            return;
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            nativeSceneRecordOnly = true;
         }
 
         let clipped: boolean = nearClipFallback;
@@ -2339,11 +2345,13 @@ export default class Model extends ModelSource {
 
         const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
         const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
+        const previousSceneCpuDrawRecordOnly = Model.sceneCpuDrawRecordOnly;
         const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipCpuFallback || textureFallback);
         Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode);
         Model.sceneGpuFallbackDrawContext = sceneGpuFallback
             ? this.beginSceneGpuFallbackDrawContext(typecode, nativeSceneIdentity ?? beginSceneGpuDrawInstance())
             : null;
+        Model.sceneCpuDrawRecordOnly = nativeSceneRecordOnly;
         try {
             try {
                 // try catch for example a model being drawn from 3d can crash like at baxtorian falls
@@ -2354,6 +2362,7 @@ export default class Model extends ModelSource {
         } finally {
             Model.sceneCpuDrawContext = previousSceneCpuDrawContext;
             Model.sceneGpuFallbackDrawContext = previousSceneGpuFallbackDrawContext;
+            Model.sceneCpuDrawRecordOnly = previousSceneCpuDrawRecordOnly;
         }
     }
 
@@ -2630,6 +2639,9 @@ export default class Model extends ModelSource {
                 ],
                 false,
             );
+            if (Model.sceneCpuDrawRecordOnly) {
+                return;
+            }
         }
 
         if (type === 0) {
@@ -2858,6 +2870,9 @@ export default class Model extends ModelSource {
                 [Model.clippedColour[0], Model.clippedColour[1], Model.clippedColour[2]],
                 clippedHclip,
             );
+            if (Model.sceneCpuDrawRecordOnly) {
+                return;
+            }
         }
 
         if (elements === 3) {

@@ -504,7 +504,7 @@ function readEnvFlag(name: string): boolean {
 }
 
 function readSceneDrawsetManifestEnabled(): boolean {
-    return readEnvFlag('AURAI_SCENE_DRAWSET_MANIFEST');
+    return readEnvFlag('AURAI_SCENE_DRAWSET_MANIFEST') || readEnvFlag('AURAI_DRAWSET_MANIFEST_DIR');
 }
 
 function parseFlag(value: string | null): boolean | null {
