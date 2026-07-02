@@ -170,8 +170,8 @@ function configureCaptureSceneCamera(client: any): void {
     if (CAPTURE_SCENE !== 'near_plane') {
         return;
     }
-    if (!envEnabled(process.env.AURAI_NEAR_PLANE_CAPTURE_CAMERA, false)) {
-        log('near-plane fixed capture camera disabled; using injected drawset probe');
+    if (!envEnabled(process.env.AURAI_NEAR_PLANE_CAPTURE_CAMERA, true)) {
+        log('near-plane fixed capture camera disabled');
         return;
     }
 
@@ -186,12 +186,13 @@ function configureCaptureSceneCamera(client: any): void {
         client.cinemaCam = true;
         client.camX = targetX + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_X', 0);
         client.camY = groundY + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_Y', -48);
-        client.camZ = targetZ + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_Z', -32);
+        client.camZ = targetZ + envNumber('AURAI_NEAR_PLANE_CAM_OFFSET_Z', 576);
         client.camPitch = envNumber('AURAI_NEAR_PLANE_CAM_PITCH', 128) & 0x7ff;
         client.camYaw = envNumber('AURAI_NEAR_PLANE_CAM_YAW', 0) & 0x7ff;
     };
 
     applyFixedCamera();
+    client.followCamera = applyFixedCamera;
     client.cinemaCamera = applyFixedCamera;
     log(`near-plane capture camera tile=${localTileX},${localTileZ} x=${client.camX} y=${client.camY} z=${client.camZ} pitch=${client.camPitch} yaw=${client.camYaw}`);
 }
@@ -242,6 +243,7 @@ function rendererLib(): any {
             aurai_render_last_packets: { args: [], returns: FFIType.u64 },
             aurai_render_request_capture: { args: [FFIType.cstring], returns: FFIType.u64 },
             aurai_render_capture_done: { args: [], returns: FFIType.u64 },
+            aurai_render_write_drawset_manifest: { args: [FFIType.ptr, FFIType.u64, FFIType.cstring, FFIType.i32], returns: FFIType.i32 },
             aurai_render_shutdown: { args: [], returns: FFIType.void }
         });
     }
@@ -1194,6 +1196,9 @@ function packSnapshot(snap: any): PackResult {
                 const hasRelight = hasFaceBaseColour && (hasFaceNormals || hasVertexNormals);
                 writePacketTag(hasRelight ? T_MODEL_GEOMETRY_UPLOAD_RELIGHT : T_MODEL_GEOMETRY_UPLOAD_TEXTURED);
                 w.u32(p.geomId >>> 0);
+                w.i32((p.minDepth ?? 0) | 0);
+                w.i32((p.maxDepth ?? 0) | 0);
+                w.u32(p.hasFacePriority ? 1 : 0);
                 const np = p.numPoints | 0;
                 w.u32(np >>> 0);
                 for (let i = 0; i < np; i++) { w.i32(p.pointX[i] | 0); w.i32(p.pointY[i] | 0); w.i32(p.pointZ[i] | 0); }
@@ -1277,7 +1282,11 @@ function packSnapshot(snap: any): PackResult {
                 nPackets++; break;
             case 'sceneInstance':
                 writePacketTag(T_SCENE_INSTANCE);
-                w.u32(p.geomId >>> 0); w.i32(p.sinYaw | 0); w.i32(p.cosYaw | 0);
+                w.u32(p.geomId >>> 0);
+                w.i32((p.drawId ?? -1) | 0);
+                w.i32((p.instanceId ?? -1) | 0);
+                w.i32((p.source ?? 0) | 0);
+                w.i32(p.sinYaw | 0); w.i32(p.cosYaw | 0);
                 w.i32(p.relativeX | 0); w.i32(p.relativeY | 0); w.i32(p.relativeZ | 0);
                 w.i32((p.alpha ?? 256) | 0); w.u32((p.flags ?? 0) >>> 0);
                 w.u32((p.animFrameId ?? 0) >>> 0);
@@ -1365,42 +1374,6 @@ function sceneDrawRecordLine(r: any): string {
         r.hclip ? 1 : 0,
         r.animated ? 1 : 0,
     ].join(' ');
-}
-
-function injectNearClipCoverageProbe(cpuRecords: any[], gpuRecords: any[]): void {
-    if (
-        CAPTURE_SCENE !== 'near_plane'
-        || !DRAWSET_CAPTURE_ONE_FRAME
-        || !envEnabled(process.env.AURAI_DRAWSET_INJECT_NEAR_PROBE, true)
-        || cpuRecords.length === 0
-        || gpuRecords.length === 0
-        || cpuRecords.some((record: any) => record?.geomId === 0x6e790001 && record?.nearClipped)
-    ) {
-        return;
-    }
-
-    const frameId = Number(cpuRecords[0]?.frameId ?? gpuRecords[0]?.frameId ?? 0) || 0;
-    const probe = {
-        frameId,
-        drawId: 0x6e790001,
-        instanceId: 0x6e790001,
-        geomId: 0x6e790001,
-        face: 0,
-        kind: 0,
-        source: 0,
-        screen: [[512, 384], [544, 384], [512, 416]],
-        colours: [1, 2, 3],
-        textureId: -1,
-        alpha: 256,
-        priority: 0,
-        nearClipped: true,
-        hclip: false,
-        animated: false,
-        sortDepth: 49,
-    };
-    cpuRecords.push({ ...probe });
-    gpuRecords.push({ ...probe });
-    log('injected near-plane drawset coverage probe');
 }
 
 function appendSceneDrawsetManifest(path: string, records: any[]): void {
@@ -1562,14 +1535,13 @@ async function main() {
             continue;
         }
         const sceneCpuDrawRecords = snap.sceneCpuDrawRecords ?? [];
-        const sceneGpuDrawRecords = snap.sceneGpuDrawRecords ?? [];
-        if (DRAWSET_CAPTURE_ONE_FRAME && (sceneCpuDrawRecords.length === 0 || sceneGpuDrawRecords.length === 0)) {
+        if (DRAWSET_CAPTURE_ONE_FRAME && sceneCpuDrawRecords.length === 0) {
             drawsetWarmupSnapshotsSkipped++;
             if (drawsetWarmupSnapshotsSkipped <= 5 || drawsetWarmupSnapshotsSkipped % 30 === 0) {
-                log(`skip drawset warmup snapshot cpuDrawRecords=${sceneCpuDrawRecords.length} gpuDrawRecords=${sceneGpuDrawRecords.length} skipped=${drawsetWarmupSnapshotsSkipped}`);
+                log(`skip drawset warmup snapshot cpuDrawRecords=${sceneCpuDrawRecords.length} skipped=${drawsetWarmupSnapshotsSkipped}`);
             }
             if (drawsetWarmupSnapshotsSkipped >= DRAWSET_CAPTURE_MAX_SNAPSHOTS) {
-                log(`FATAL no paired drawset frame after ${drawsetWarmupSnapshotsSkipped} snapshots`);
+                log(`FATAL no CPU drawset frame after ${drawsetWarmupSnapshotsSkipped} snapshots`);
                 process.exit(1);
             }
             gpuRenderPackets.reset();
@@ -1580,16 +1552,13 @@ async function main() {
         if (DRAWSET_CAPTURE_ONE_FRAME && drawsetAcceptedSnapshotsSkipped < DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS) {
             drawsetAcceptedSnapshotsSkipped++;
             if (drawsetAcceptedSnapshotsSkipped <= 5 || drawsetAcceptedSnapshotsSkipped === DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS) {
-                log(`skip accepted drawset scene snapshot ${drawsetAcceptedSnapshotsSkipped}/${DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS} cpuDrawRecords=${sceneCpuDrawRecords.length} gpuDrawRecords=${sceneGpuDrawRecords.length}`);
+                log(`skip accepted drawset scene snapshot ${drawsetAcceptedSnapshotsSkipped}/${DRAWSET_CAPTURE_SKIP_SCENE_SNAPSHOTS} cpuDrawRecords=${sceneCpuDrawRecords.length}`);
             }
             gpuRenderPackets.reset();
             forceFullUiRedraw(client, true);
             lastSubmitAt = Date.now();
             continue;
         }
-        injectNearClipCoverageProbe(sceneCpuDrawRecords, sceneGpuDrawRecords);
-        appendSceneDrawsetManifest(SCENE_CPU_DRAWSET_MANIFEST, sceneCpuDrawRecords);
-        appendSceneDrawsetManifest(SCENE_GPU_DRAWSET_MANIFEST, sceneGpuDrawRecords);
         const {
             blob,
             inputPackets,
@@ -1618,6 +1587,16 @@ async function main() {
             resources,
             commitResources
         } = packSnapshot(snap);
+        if (SCENE_GPU_DRAWSET_MANIFEST) {
+            const cpath = Buffer.from(SCENE_GPU_DRAWSET_MANIFEST + '\0');
+            const frameId = Number(sceneCpuDrawRecords[0]?.frameId ?? 0) | 0;
+            const rcDrawset = rendererLib().symbols.aurai_render_write_drawset_manifest(ptr(blob), BigInt(blob.length), ptr(cpath), frameId);
+            if (rcDrawset !== 0) {
+                log(`FATAL aurai_render_write_drawset_manifest returned ${rcDrawset}`);
+                process.exit(2);
+            }
+        }
+        appendSceneDrawsetManifest(SCENE_CPU_DRAWSET_MANIFEST, sceneCpuDrawRecords);
         if (dumpingThisFrame) {
             const frameName = `frame-${String(frame).padStart(6, '0')}.aur2`;
             await Bun.write(`${PACKET_DUMP_DIR}/${frameName}`, blob);

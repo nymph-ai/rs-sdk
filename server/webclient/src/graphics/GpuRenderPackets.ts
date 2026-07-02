@@ -310,6 +310,9 @@ export type GpuRenderPacket =
     | (ScenePacketBase & {
           kind: 'modelGeometryUpload';
           geomId: number;
+          minDepth: number;
+          maxDepth: number;
+          hasFacePriority: boolean;
           numPoints: number;
           pointX: ArrayLike<number> | null;
           pointY: ArrayLike<number> | null;
@@ -359,6 +362,9 @@ export type GpuRenderPacket =
     | (ScenePacketBase & {
           kind: 'sceneInstance';
           geomId: number;
+          drawId: number;
+          instanceId: number;
+          source: SceneDrawSource;
           sinYaw: number;
           cosYaw: number;
           relativeX: number;
@@ -2204,6 +2210,9 @@ export function recordModelGeometryUpload(geomId: number, model: any, force: boo
         {
             kind: 'modelGeometryUpload',
             geomId,
+            minDepth: model.minDepth ?? 0,
+            maxDepth: model.maxDepth ?? 0,
+            hasFacePriority: !!model.facePriority,
             numPoints: model.numPoints,
             pointX: sceneGeometryField(model.pointX, model.numPoints, force),
             pointY: sceneGeometryField(model.pointY, model.numPoints, force),
@@ -2399,6 +2408,9 @@ export function recordGroundGeometryUpload(geomId: number, ground: any): void {
         {
             kind: 'modelGeometryUpload',
             geomId,
+            minDepth: 0,
+            maxDepth: 0,
+            hasFacePriority: false,
             numPoints: ground.vertexX.length,
             pointX: ground.vertexX,
             pointY: ground.vertexY,
@@ -2474,6 +2486,9 @@ export function recordQuickGroundRegionGeometryUpload(
         {
             kind: 'modelGeometryUpload',
             geomId,
+            minDepth: 0,
+            maxDepth: 0,
+            hasFacePriority: false,
             numPoints: pointX.length,
             pointX,
             pointY,
@@ -2527,13 +2542,16 @@ export function recordSceneInstance(
         {
             kind: 'sceneInstance',
             geomId,
+            drawId: identity?.drawId ?? -1,
+            instanceId: identity?.instanceId ?? -1,
+            source,
             sinYaw,
             cosYaw,
             relativeX,
             relativeY,
             relativeZ,
             alpha,
-            flags: animFrameId > 0 ? 1 : 0,
+            flags: animated ? 1 : 0,
             animFrameId,
         },
         false,
