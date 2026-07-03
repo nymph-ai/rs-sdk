@@ -1,4 +1,5 @@
-import { canvas2d } from '#/graphics/Canvas.js';
+import { canvas2d, presentGpuRenderPackets, presentImageData } from '#/graphics/Canvas.js';
+import { gpuRenderPackets } from '#/graphics/GpuRenderPackets.js';
 import Pix2D from '#/graphics/Pix2D.js';
 
 export default class PixMap {
@@ -20,14 +21,28 @@ export default class PixMap {
         this.paint = new Uint32Array(this.img.data.buffer);
 
         this.setPixels();
+        gpuRenderPackets.markSurfaceRecordable(this.data, this.width, this.height);
     }
 
     setPixels(): void {
         Pix2D.setPixels(this.data, this.width, this.height);
     }
 
+    markCpuRasterWritesSkippable(): void {
+        gpuRenderPackets.markSurfaceCpuRasterWritesSkippable(this.data, this.width, this.height);
+    }
+
     draw(x: number, y: number): void {
+        gpuRenderPackets.recordSurfacePresent(this.data, this.width, this.height, x, y);
+        if (presentGpuRenderPackets(this.width, this.height, x, y, this.ctx, this.data)) {
+            return;
+        }
+
         this.prepareCanvas();
+        if (presentImageData(this.img, x, y, this.ctx)) {
+            return;
+        }
+
         this.ctx.putImageData(this.img, x, y);
     }
 

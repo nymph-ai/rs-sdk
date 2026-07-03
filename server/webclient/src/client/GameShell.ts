@@ -1,7 +1,9 @@
 import { CanvasEnabledKeys, KeyCodes } from '#/client/KeyCodes.js';
+import { getStreamClientProfile, publishStreamClientProfile, type StreamClientProfile } from '#/client/StreamClientProfile.js';
 
-import { canvas, canvas2d } from '#/graphics/Canvas.js';
+import { canvas, canvas2d, isGpuPacketReplayPending, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import Pix2D from '#/graphics/Pix2D.js';
 import PixMap from '#/graphics/PixMap.js';
 
 import { sleep } from '#/util/JsUtil.js';
@@ -37,6 +39,7 @@ export default abstract class GameShell {
 
     /// custom
     protected resizeToFit: boolean = false;
+    protected readonly streamClientProfile: StreamClientProfile = getStreamClientProfile();
     protected tfps: number = 50;
     private absMouseX: number = 0;
     private absMouseY: number = 0;
@@ -59,11 +62,21 @@ export default abstract class GameShell {
 
     constructor(resizetoFit: boolean = false) {
         canvas.tabIndex = -1;
-        canvas2d.fillStyle = 'black';
-        canvas2d.fillRect(0, 0, canvas.width, canvas.height);
+        if (!isGpuPacketReplayRequested()) {
+            canvas2d.fillStyle = 'black';
+            canvas2d.fillRect(0, 0, canvas.width, canvas.height);
+        }
 
         this.resizeToFit = resizetoFit;
-        if (this.resizeToFit) {
+        if (this.streamClientProfile.enabled) {
+            this.applyStreamClientDocumentState();
+            this.resize(
+                this.streamClientProfile.backingWidth,
+                this.streamClientProfile.backingHeight,
+                this.streamClientProfile.logicalWidth,
+                this.streamClientProfile.logicalHeight
+            );
+        } else if (this.resizeToFit) {
             this.resize(window.innerWidth, window.innerHeight);
         } else {
             this.resize(canvas.width, canvas.height);
@@ -78,11 +91,37 @@ export default abstract class GameShell {
         return canvas.height;
     }
 
-    protected resize(width: number, height: number) {
+    protected resize(width: number, height: number, cssWidth: number = width, cssHeight: number = height) {
         canvas.width = width;
         canvas.height = height;
+        this.applyCanvasCssSize(cssWidth, cssHeight);
         this.drawArea = new PixMap(width, height);
+        this.drawArea.markCpuRasterWritesSkippable();
         Pix3D.setRenderClipping();
+        publishStreamClientProfile(this.streamClientProfile, {
+            game: { x: 0, y: 0, width, height }
+        });
+    }
+
+    private applyStreamClientDocumentState(): void {
+        document.documentElement.dataset.rsSdkStreamClient = this.streamClientProfile.name;
+        document.body.classList.add('stream-client');
+    }
+
+    private applyCanvasCssSize(width: number, height: number): void {
+        if (this.streamClientProfile.enabled) {
+            canvas.style.setProperty('width', `${width}px`, 'important');
+            canvas.style.setProperty('height', `${height}px`, 'important');
+        } else {
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+        }
+
+        const stack = canvas.parentElement?.dataset.rsSdkCanvasStack === 'webgpu' ? canvas.parentElement : null;
+        if (stack) {
+            stack.style.width = canvas.style.width;
+            stack.style.height = canvas.style.height;
+        }
     }
 
     async run() {
@@ -274,6 +313,24 @@ export default abstract class GameShell {
     protected async drawProgress(message: string, progress: number): Promise<void> {
         const width: number = this.sWid;
         const height: number = this.sHei;
+
+        if (isGpuPacketReplayRequested() && this.drawArea) {
+            while (isGpuPacketReplayPending()) {
+                await sleep(5);
+            }
+
+            this.drawArea.setPixels();
+            Pix2D.cls();
+
+            const y: number = height / 2 - 18;
+            Pix2D.drawRect(((width / 2) | 0) - 152, y, 304, 34, 0x8c1111);
+            Pix2D.fillRect(((width / 2) | 0) - 150, y + 2, progress * 3, 30, 0x8c1111);
+            Pix2D.fillRect(((width / 2) | 0) - 150 + progress * 3, y + 2, 300 - progress * 3, 30, 0);
+            this.drawArea.draw(0, 0);
+
+            await sleep(5);
+            return;
+        }
 
         if (this.fullredraw) {
             canvas2d.fillStyle = 'black';

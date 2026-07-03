@@ -1,5 +1,6 @@
 import Pix2D from '#/graphics/Pix2D.js';
 import { decodeJpeg } from '#/graphics/Jpeg.js';
+import { gpuRenderPackets, recordMaskedSprite, recordRgbaSprite, recordTransformSprite } from '#/graphics/GpuRenderPackets.js';
 import Pix8 from '#/graphics/Pix8.js';
 
 import JagFile from '#/io/JagFile.js';
@@ -230,6 +231,32 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:quick',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(true),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotQuick(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
     }
@@ -301,8 +328,63 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
+    }
+
+    private makeRgba(opaqueZero: boolean): Uint8Array {
+        const rgba = new Uint8Array(this.wi * this.hi * 4);
+        for (let i = 0; i < this.data.length; i++) {
+            const rgb = this.data[i];
+            const offset = i * 4;
+            rgba[offset] = (rgb >> 16) & 0xff;
+            rgba[offset + 1] = (rgb >> 8) & 0xff;
+            rgba[offset + 2] = rgb & 0xff;
+            rgba[offset + 3] = rgb === 0 && !opaqueZero ? 0 : 0xff;
+        }
+        return rgba;
+    }
+
+    private static makeMaskRgba(mask: Pix8): Uint8Array {
+        const rgba = new Uint8Array(mask.wi * mask.hi * 4);
+        for (let i = 0; i < mask.data.length; i++) {
+            if (mask.data[i] === 0) {
+                continue;
+            }
+
+            const offset = i * 4;
+            rgba[offset] = 0xff;
+            rgba[offset + 1] = 0xff;
+            rgba[offset + 2] = 0xff;
+            rgba[offset + 3] = 0xff;
+        }
+        return rgba;
     }
 
     private plot(w: number, h: number, src: Int32Array, srcOff: number, srcStep: number, dst: Int32Array, dstOff: number, dstStep: number): void {
@@ -398,6 +480,33 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const clippedSrcX = srcStep % this.wi;
+            const clippedSrcY = (srcStep / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                clippedSrcX,
+                clippedSrcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY,
+                alpha
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.tranSprite(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, alpha);
         }
     }
@@ -439,18 +548,52 @@ export default class Pix32 extends Pix2D {
             let leftX: number = (anchorX << 16) + centerY * sinZoom + centerX * cosZoom;
             let leftY: number = (anchorY << 16) + (centerY * cosZoom - centerX * sinZoom);
             let leftOff: number = x + y * Pix2D.width;
+            const skipCpuRasterWrites = gpuRenderPackets.shouldSkipCpuRasterWrites();
+            let cpuRasterWriteBypassRecorded = false;
 
             for (let i: number = 0; i < h; i++) {
                 const dstOff: number = lineStart[i];
-                let dstX: number = leftOff + dstOff;
+                const rowWidth: number = lineWidth[i];
+                if (rowWidth > 0) {
+                    recordTransformSprite(
+                        this,
+                        'pix32:opaque-linear',
+                        this.wi,
+                        this.hi,
+                        () => this.makeRgba(false),
+                        x + dstOff,
+                        y + i,
+                        rowWidth,
+                        1,
+                        leftX + cosZoom * dstOff,
+                        leftY - sinZoom * dstOff,
+                        cosZoom,
+                        -sinZoom,
+                        sinZoom,
+                        cosZoom,
+                        this.wi,
+                        false,
+                        0,
+                        0,
+                        Pix2D.width,
+                        Pix2D.height
+                    );
+                    if (skipCpuRasterWrites && !cpuRasterWriteBypassRecorded) {
+                        gpuRenderPackets.recordCpuRasterWriteBypass();
+                        cpuRasterWriteBypassRecorded = true;
+                    }
+                }
 
-                let srcX: number = leftX + cosZoom * dstOff;
-                let srcY: number = leftY - sinZoom * dstOff;
+                if (!skipCpuRasterWrites) {
+                    let dstX: number = leftOff + dstOff;
+                    let srcX: number = leftX + cosZoom * dstOff;
+                    let srcY: number = leftY - sinZoom * dstOff;
 
-                for (let j: number = -lineWidth[i]; j < 0; j++) {
-                    Pix2D.pixels[dstX++] = this.data[(srcX >> 16) + (srcY >> 16) * this.wi];
-                    srcX += cosZoom;
-                    srcY -= sinZoom;
+                    for (let j: number = -rowWidth; j < 0; j++) {
+                        Pix2D.pixels[dstX++] = this.data[(srcX >> 16) + (srcY >> 16) * this.wi];
+                        srcX += cosZoom;
+                        srcY -= sinZoom;
+                    }
                 }
 
                 leftX += sinZoom;
@@ -479,6 +622,34 @@ export default class Pix32 extends Pix2D {
 
             let leftX: number = (anchorX << 16) + (centerY * sinZoom + centerX * cosZoom);
             let leftY: number = (anchorY << 16) + (centerY * cosZoom - centerX * sinZoom);
+            recordTransformSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                leftX,
+                leftY,
+                cosZoom,
+                -sinZoom,
+                sinZoom,
+                cosZoom,
+                this.owi,
+                true,
+                0,
+                0,
+                Pix2D.width,
+                Pix2D.height
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             let leftOff: number = x + y * Pix2D.width;
 
             for (let i: number = 0; i < h; i++) {
@@ -551,6 +722,34 @@ export default class Pix32 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            recordMaskedSprite(
+                this,
+                'pix32:transparent-zero',
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                mask,
+                `pix8-mask:${mask.wi}x${mask.hi}`,
+                mask.wi,
+                mask.hi,
+                () => Pix32.makeMaskRgba(mask),
+                x,
+                y,
+                w,
+                h,
+                srcStep % this.wi,
+                (srcStep / this.wi) | 0,
+                Pix2D.width,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotScanline(Pix2D.pixels, this.data, srcStep, dstStep, w, h, dstOff, srcOff, mask.data);
         }
     }

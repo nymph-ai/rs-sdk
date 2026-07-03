@@ -1,4 +1,5 @@
 import Pix2D from '#/graphics/Pix2D.js';
+import { gpuRenderPackets, recordRgbaSprite } from '#/graphics/GpuRenderPackets.js';
 
 import JagFile from '#/io/JagFile.js';
 import Packet from '#/io/Packet.js';
@@ -227,8 +228,53 @@ export default class Pix8 extends Pix2D {
         }
 
         if (w > 0 && h > 0) {
+            const srcX = srcOff % this.wi;
+            const srcY = (srcOff / this.wi) | 0;
+            recordRgbaSprite(
+                this,
+                `pix8:${Array.from(this.bpal).join(',')}`,
+                this.wi,
+                this.hi,
+                () => this.makeRgba(false),
+                x,
+                y,
+                w,
+                h,
+                srcX,
+                srcY,
+                w,
+                h,
+                Pix2D.clipMinX,
+                Pix2D.clipMinY,
+                Pix2D.clipMaxX,
+                Pix2D.clipMaxY
+            );
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plot(w, h, this.data, srcOff, srcStep, Pix2D.pixels, dstOff, dstStep);
         }
+    }
+
+    private makeRgba(_opaqueZero: boolean): Uint8Array {
+        const rgba = new Uint8Array(this.wi * this.hi * 4);
+        for (let i = 0; i < this.data.length; i++) {
+            const palIndex = this.data[i] & 0xff;
+            const offset = i * 4;
+            if (palIndex === 0) {
+                rgba[offset + 3] = 0;
+                continue;
+            }
+
+            const rgb = this.bpal[palIndex];
+            rgba[offset] = (rgb >> 16) & 0xff;
+            rgba[offset + 1] = (rgb >> 8) & 0xff;
+            rgba[offset + 2] = rgb & 0xff;
+            rgba[offset + 3] = 0xff;
+        }
+        return rgba;
     }
 
     private plot(w: number, h: number, src: Int8Array, srcOff: number, srcStep: number, dst: Int32Array, dstOff: number, dstStep: number): void {
@@ -330,6 +376,32 @@ export default class Pix8 extends Pix2D {
                 arg2 -= local144;
                 local137 += local144;
             }
+            if (arg2 > 0 && arg3 > 0) {
+                recordRgbaSprite(
+                    this,
+                    `pix8:${Array.from(this.bpal).join(',')}`,
+                    this.wi,
+                    this.hi,
+                    () => this.makeRgba(false),
+                    arg0,
+                    arg1,
+                    arg2,
+                    arg3,
+                    local7 / 65536,
+                    local9 / 65536,
+                    (arg2 * local33) / 65536,
+                    (arg3 * local39) / 65536,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
+            }
+            if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
+
             this.plotScale(Pix2D.pixels, this.data, this.bpal, local7, local9, local133, local137, arg2, arg3, local33, local39, local2);
         } catch (_e) {
             console.log('error in sprite clipping routine');

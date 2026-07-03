@@ -544,6 +544,7 @@ export default class ClientPlayer extends ClientEntity {
 
         const tmp = Model.tempModel;
         tmp.set(model, AnimFrame.animateTransparencies(primaryTransformId) && AnimFrame.animateTransparencies(secondaryTransformId));
+        tmp.setSceneAnimation(model, primaryTransformId, secondaryTransformId, SeqType.list[this.primaryAnim]?.walkmerge ?? null);
 
         if (primaryTransformId !== -1 && secondaryTransformId !== -1) {
             tmp.maskAnimate(primaryTransformId, secondaryTransformId, SeqType.list[this.primaryAnim].walkmerge);

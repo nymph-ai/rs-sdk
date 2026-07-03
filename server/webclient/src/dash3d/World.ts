@@ -15,6 +15,31 @@ import LinkList from '#/datastruct/LinkList.js';
 
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import {
+    SCENE_DRAW_SOURCE_DECOR,
+    SCENE_DRAW_SOURCE_GROUND_DECOR,
+    SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+    SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+    SCENE_DRAW_SOURCE_OBJ,
+    SCENE_DRAW_SOURCE_WALL,
+    beginSceneCpuDrawInstance,
+    beginSceneGpuDrawInstance,
+    beginSceneDrawsetFrame,
+    gpuRenderPackets,
+    isSceneGeometryUploaded,
+    recordGroundGeometryUpload,
+    recordQuickGroundRegionGeometryUpload,
+    recordSceneCamera,
+    recordSceneCpuDrawRecord,
+    recordSceneGpuDrawRecord,
+    recordSceneInstance,
+    recordSceneLight,
+    sceneDrawFaceKind,
+    shouldEmitSceneNativeTextures,
+    shouldRecordSceneCpuDrawset,
+    type SceneDrawInstanceIdentity,
+    type SceneDrawSource
+} from '#/graphics/GpuRenderPackets.js';
 import Model from '#/dash3d/Model.js';
 
 import { Int32Array3d, TypedArray1d, TypedArray2d, TypedArray3d, TypedArray4d } from '#/util/Arrays.js';
@@ -138,6 +163,17 @@ export default class World {
     private readonly groundh: Int32Array[][];
     private readonly squares: (Square | null)[][][];
     private readonly occlusionCycle: Int32Array[][];
+    private readonly sceneQuickGroundGeomIds: Int32Array;
+    private readonly sceneQuickGroundEmittedCycle: Int32Array;
+    private readonly sceneQuickGroundCpuIdentityCycle: Int32Array;
+    private readonly sceneQuickGroundCpuDrawIds: Int32Array;
+    private readonly sceneQuickGroundCpuInstanceIds: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackIdentityCycle: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackDrawIds: Int32Array;
+    private readonly sceneQuickGroundGpuFallbackInstanceIds: Int32Array;
+    private readonly sceneQuickGroundTextureFallbackCycle: Int32Array;
+    private readonly sceneQuickGroundTextureFallback: Int8Array;
+    private sceneNextQuickGroundGeomId: number = 1;
 
     private dynamicCount: number = 0;
     private readonly dynamicSprites: (Sprite | null)[] = new TypedArray1d(5000, null);
@@ -153,8 +189,28 @@ export default class World {
         this.squares = new TypedArray3d(maxLevel, maxTileX, maxTileZ, null);
         this.occlusionCycle = new Int32Array3d(maxLevel, maxTileX + 1, maxTileZ + 1);
         this.groundh = levelHeightmaps;
+        this.sceneQuickGroundGeomIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundEmittedCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuIdentityCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuDrawIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundCpuInstanceIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackIdentityCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackDrawIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundGpuFallbackInstanceIds = new Int32Array(maxLevel);
+        this.sceneQuickGroundTextureFallbackCycle = new Int32Array(maxLevel);
+        this.sceneQuickGroundTextureFallback = new Int8Array(maxLevel);
+        this.sceneQuickGroundCpuIdentityCycle.fill(-1);
+        this.sceneQuickGroundGpuFallbackIdentityCycle.fill(-1);
+        this.sceneQuickGroundTextureFallbackCycle.fill(-1);
 
         this.resetMap();
+    }
+
+    private invalidateSceneQuickGroundRegions(): void {
+        this.sceneQuickGroundGeomIds.fill(0);
+        this.sceneQuickGroundCpuIdentityCycle.fill(-1);
+        this.sceneQuickGroundGpuFallbackIdentityCycle.fill(-1);
+        this.sceneQuickGroundTextureFallbackCycle.fill(-1);
     }
 
     resetMap(): void {
@@ -177,6 +233,8 @@ export default class World {
         for (let i: number = 0; i < this.dynamicCount; i++) {
             this.dynamicSprites[i] = null;
         }
+
+        this.invalidateSceneQuickGroundRegions();
 
         this.dynamicCount = 0;
 
@@ -246,6 +304,7 @@ export default class World {
         colour2SW: number, colour2SE: number, colour2NE: number, colour2NW: number,
         overlay: number, underlay: number
     ): void {
+        this.invalidateSceneQuickGroundRegions();
         if (shape === TerrainOverlayShape.PLAIN) {
             for (let l: number = level; l >= 0; l--) {
                 if (!this.squares[l][x][z]) {
@@ -589,6 +648,7 @@ export default class World {
     shareLight(ambient: number, contrast: number, lightSrcX: number, lightSrcY: number, lightSrcZ: number): void {
         const lightMagnitude: number = Math.sqrt(lightSrcX * lightSrcX + lightSrcY * lightSrcY + lightSrcZ * lightSrcZ) | 0;
         const attenuation: number = (contrast * lightMagnitude) >> 8;
+        recordSceneLight(ambient, attenuation, lightSrcX, lightSrcY, lightSrcZ);
 
         for (let level: number = 0; level < this.maxTileLevel; level++) {
             for (let tileX: number = 0; tileX < this.maxTileX; tileX++) {
@@ -971,6 +1031,27 @@ export default class World {
         World.cameraSinY = Pix3D.sinTable[eyeYaw];
         World.cameraCosY = Pix3D.cosTable[eyeYaw];
 
+        beginSceneDrawsetFrame();
+
+        if (gpuRenderPackets.shouldEmitSceneInstances()) {
+            // NYM-210: scene mode bypasses the gouraud/model CPU path that normally
+            // emits the HSL->RGB colour table, so emit it here (deduped by version)
+            // — else the GPU scene binds the black fallback table => invisible geometry.
+            Pix3D.recordGpuColourTable();
+            // NYM-210: one camera per frame, shared by every scene instance.
+            // pitch = cameraSinX/CosX, yaw = cameraSinY/CosY, origin = Pix3D origin.
+            recordSceneCamera(
+                World.cameraSinX,
+                World.cameraCosX,
+                World.cameraSinY,
+                World.cameraCosY,
+                Pix3D.originX,
+                Pix3D.originY,
+                Pix2D.width,
+                Pix2D.height,
+            );
+        }
+
         World.visBackingDirty = World.visBacking[((eyePitch - 128) / 32) | 0][(eyeYaw / 64) | 0];
         World.cx = eyeX;
         World.cy = eyeY;
@@ -1237,6 +1318,15 @@ export default class World {
         }
     }
 
+    private renderSceneModelSource(source: SceneDrawSource, model: ModelSource | null | undefined, yaw: number, relativeX: number, relativeY: number, relativeZ: number, typecode: number): void {
+        if (!model) {
+            return;
+        }
+        Model.withSceneDrawSource(source, () => {
+            model.worldRender(yaw, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, relativeX, relativeY, relativeZ, typecode);
+        });
+    }
+
     private calcOcclude(): void {
         const count: number = World.numOccluders[World.maxLevel];
         const occluders: (Occlude | null)[] = World.occluders[World.maxLevel];
@@ -1466,7 +1556,7 @@ export default class World {
 
                     const wall: Wall | null = linkedSquare.wall;
                     if (wall) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     for (let i: number = 0; i < linkedSquare.spriteCount; i++) {
@@ -1534,17 +1624,17 @@ export default class World {
                     }
 
                     if ((wall.angle1 & frontWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     if ((wall.angle2 & frontWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle2)) {
-                        wall.model2?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model2, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
                 }
 
                 if (decor && !this.spriteOccluded(originalLevel, tileX, tileZ, decor.model.minY)) {
                     if ((decor.wshape & frontWallTypes) !== 0) {
-                        decor.model.worldRender(decor.angle, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, decor.angle, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
                     } else if ((decor.wshape & 0x300) !== 0) {
                         const x: number = decor.x - World.cx;
                         const y: number = decor.y - World.cy;
@@ -1568,13 +1658,13 @@ export default class World {
                         if ((decor.wshape & 0x100) !== 0 && nearestZ < nearestX) {
                             const drawX: number = x + DECORXOF[angle];
                             const drawZ: number = z + DECORZOF[angle];
-                            decor.model.worldRender(angle * 512 + 256, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, angle * 512 + 256, drawX, y, drawZ, decor.typecode);
                         }
 
                         if ((decor.wshape & 0x200) !== 0 && nearestZ > nearestX) {
                             const drawX: number = x + DECORXOF2[angle];
                             const drawZ: number = z + DECORZOF2[angle];
-                            decor.model.worldRender((angle * 512 + 1280) & 0x7ff, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, (angle * 512 + 1280) & 0x7ff, drawX, y, drawZ, decor.typecode);
                         }
                     }
                 }
@@ -1582,21 +1672,21 @@ export default class World {
                 if (tileDrawn) {
                     const groundDecor: GroundDecor | null = tile.groundDecor;
                     if (groundDecor) {
-                        groundDecor.model?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, groundDecor.x - World.cx, groundDecor.y - World.cy, groundDecor.z - World.cz, groundDecor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_GROUND_DECOR, groundDecor.model, 0, groundDecor.x - World.cx, groundDecor.y - World.cy, groundDecor.z - World.cz, groundDecor.typecode);
                     }
 
                     const objs: GroundObject | null = tile.groundObject;
                     if (objs && objs.height === 0) {
                         if (objs.bottomObj) {
-                            objs.bottomObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.bottomObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
 
                         if (objs.middleObj) {
-                            objs.middleObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.middleObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
 
                         if (objs.topObj) {
-                            objs.topObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.topObj, 0, objs.x - World.cx, objs.y - World.cy, objs.z - World.cz, objs.typecode);
                         }
                     }
                 }
@@ -1652,7 +1742,7 @@ export default class World {
                     const wall: Wall | null = tile.wall;
 
                     if (wall && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     tile.cornerSides = 0;
@@ -1819,15 +1909,15 @@ export default class World {
             const objs: GroundObject | null = tile.groundObject;
             if (objs && objs.height !== 0) {
                 if (objs.bottomObj) {
-                    objs.bottomObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.bottomObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
 
                 if (objs.middleObj) {
-                    objs.middleObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.middleObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
 
                 if (objs.topObj) {
-                    objs.topObj.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
+                    this.renderSceneModelSource(SCENE_DRAW_SOURCE_OBJ, objs.topObj, 0, objs.x - World.cx, objs.y - World.cy - objs.height, objs.z - World.cz, objs.typecode);
                 }
             }
 
@@ -1836,7 +1926,7 @@ export default class World {
 
                 if (decor && !this.spriteOccluded(originalLevel, tileX, tileZ, decor.model.minY)) {
                     if ((decor.wshape & tile.backWallTypes) !== 0) {
-                        decor.model.worldRender(decor.angle, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, decor.angle, decor.x - World.cx, decor.y - World.cy, decor.z - World.cz, decor.typecode);
                     } else if ((decor.wshape & 0x300) !== 0) {
                         const x: number = decor.x - World.cx;
                         const y: number = decor.y - World.cy;
@@ -1860,13 +1950,13 @@ export default class World {
                         if ((decor.wshape & 0x100) !== 0 && nearestZ >= nearestX) {
                             const drawX: number = x + DECORXOF[angle];
                             const drawZ: number = z + DECORZOF[angle];
-                            decor.model.worldRender(angle * 512 + 256, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, angle * 512 + 256, drawX, y, drawZ, decor.typecode);
                         }
 
                         if ((decor.wshape & 0x200) !== 0 && nearestZ <= nearestX) {
                             const drawX: number = x + DECORXOF2[angle];
                             const drawZ: number = z + DECORZOF2[angle];
-                            decor.model.worldRender((angle * 512 + 1280) & 0x7ff, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, drawX, y, drawZ, decor.typecode);
+                            this.renderSceneModelSource(SCENE_DRAW_SOURCE_DECOR, decor.model, (angle * 512 + 1280) & 0x7ff, drawX, y, drawZ, decor.typecode);
                         }
                     }
                 }
@@ -1874,11 +1964,11 @@ export default class World {
                 const wall: Wall | null = tile.wall;
                 if (wall) {
                     if ((wall.angle2 & tile.backWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle2)) {
-                        wall.model2?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model2, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
 
                     if ((wall.angle1 & tile.backWallTypes) !== 0 && !this.wallOccluded(originalLevel, tileX, tileZ, wall.angle1)) {
-                        wall.model1?.worldRender(0, World.cameraSinX, World.cameraCosX, World.cameraSinY, World.cameraCosY, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
+                        this.renderSceneModelSource(SCENE_DRAW_SOURCE_WALL, wall.model1, 0, wall.x - World.cx, wall.y - World.cy, wall.z - World.cz, wall.typecode);
                     }
                 }
             }
@@ -1920,7 +2010,476 @@ export default class World {
         }
     }
 
+    private ensureSceneQuickGroundGeomId(level: number): number {
+        let geomId = this.sceneQuickGroundGeomIds[level];
+        if (geomId < 0) {
+            return -1;
+        }
+        if (geomId === 0) {
+            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
+            this.sceneQuickGroundGeomIds[level] = geomId;
+        }
+        return geomId;
+    }
+
+    private ensureSceneGroundGeomId(ground: Ground): number {
+        let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+        if (geomId < 0) {
+            const w = World as unknown as { __nextGroundGeomId?: number };
+            w.__nextGroundGeomId = (w.__nextGroundGeomId ?? 1) + 1;
+            geomId = 0x40000000 | (w.__nextGroundGeomId & 0x3fffffff);
+            (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+        }
+        return geomId;
+    }
+
+    private ensureSceneQuickGroundTileGeomId(ground: QuickGround): number {
+        let geomId: number = (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+        if (geomId < 0) {
+            geomId = 0x50000000 | (this.sceneNextQuickGroundGeomId++ & 0x0fffffff);
+            (ground as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+        }
+        return geomId;
+    }
+
+    private sceneGroundFaceId(ground: Ground, face: number): number {
+        const slot = ground as unknown as { __sceneDrawFaceIds?: Int32Array };
+        const cached = slot.__sceneDrawFaceIds;
+        if (cached && cached.length === ground.faceVertexA.length) {
+            return cached[face] ?? -1;
+        }
+
+        const faceIds = new Int32Array(ground.faceVertexA.length);
+        faceIds.fill(-1);
+        let nextFace = 0;
+        for (let i = 0; i < ground.faceVertexA.length; i++) {
+            if (ground.faceColourA[i] === 12345678) {
+                continue;
+            }
+            faceIds[i] = nextFace++;
+        }
+        slot.__sceneDrawFaceIds = faceIds;
+        return faceIds[face] ?? -1;
+    }
+
+    private sceneQuickGroundFaceId(level: number, tileX: number, tileZ: number, triangle: 0 | 1): number {
+        let face = 0;
+        for (let x = 0; x < this.maxTileX; x++) {
+            for (let z = 0; z < this.maxTileZ; z++) {
+                const quick = this.squares[level][x][z]?.quickGround;
+                if (!quick) {
+                    continue;
+                }
+
+                const drawNorthEast = quick.texture !== -1 || quick.colourNE !== 12345678;
+                const drawSouthWest = quick.texture !== -1 || quick.colourSW !== 12345678;
+                if (x === tileX && z === tileZ) {
+                    if (triangle === 0) {
+                        return drawNorthEast ? face : -1;
+                    }
+                    return drawSouthWest ? face + (drawNorthEast ? 1 : 0) : -1;
+                }
+                if (drawNorthEast) {
+                    face++;
+                }
+                if (drawSouthWest) {
+                    face++;
+                }
+            }
+        }
+        return -1;
+    }
+
+    private sceneQuickGroundTileFaceId(ground: QuickGround, triangle: 0 | 1): number {
+        const drawNorthEast = ground.texture !== -1 || ground.colourNE !== 12345678;
+        const drawSouthWest = ground.texture !== -1 || ground.colourSW !== 12345678;
+        if (triangle === 0) {
+            return drawNorthEast ? 0 : -1;
+        }
+        return drawSouthWest ? (drawNorthEast ? 1 : 0) : -1;
+    }
+
+    private beginSceneQuickGroundCpuDrawInstance(level: number): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        if (this.sceneQuickGroundCpuIdentityCycle[level] !== World.cycleNo) {
+            const identity = beginSceneCpuDrawInstance();
+            if (!identity) {
+                return null;
+            }
+            this.sceneQuickGroundCpuIdentityCycle[level] = World.cycleNo;
+            this.sceneQuickGroundCpuDrawIds[level] = identity.drawId;
+            this.sceneQuickGroundCpuInstanceIds[level] = identity.instanceId;
+        }
+        return {
+            drawId: this.sceneQuickGroundCpuDrawIds[level],
+            instanceId: this.sceneQuickGroundCpuInstanceIds[level],
+        };
+    }
+
+    private beginSceneQuickGroundGpuFallbackDrawInstance(level: number): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        if (this.sceneQuickGroundGpuFallbackIdentityCycle[level] !== World.cycleNo) {
+            const identity = beginSceneGpuDrawInstance();
+            if (!identity) {
+                return null;
+            }
+            this.sceneQuickGroundGpuFallbackIdentityCycle[level] = World.cycleNo;
+            this.sceneQuickGroundGpuFallbackDrawIds[level] = identity.drawId;
+            this.sceneQuickGroundGpuFallbackInstanceIds[level] = identity.instanceId;
+        }
+        return {
+            drawId: this.sceneQuickGroundGpuFallbackDrawIds[level],
+            instanceId: this.sceneQuickGroundGpuFallbackInstanceIds[level],
+        };
+    }
+
+    private beginSceneGroundCpuDrawInstance(): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return beginSceneCpuDrawInstance();
+    }
+
+    private beginSceneGroundGpuFallbackDrawInstance(): SceneDrawInstanceIdentity | null {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return beginSceneGpuDrawInstance();
+    }
+
+    private quickGroundLevelHasSceneTextureFallback(level: number): boolean {
+        if (!gpuRenderPackets.shouldEmitSceneInstances() || shouldEmitSceneNativeTextures()) {
+            return false;
+        }
+        if (this.sceneQuickGroundTextureFallbackCycle[level] === World.cycleNo) {
+            return this.sceneQuickGroundTextureFallback[level] !== 0;
+        }
+
+        let fallback = false;
+        for (let x = 0; x < this.maxTileX && !fallback; x++) {
+            for (let z = 0; z < this.maxTileZ; z++) {
+                const quick = this.squares[level][x][z]?.quickGround;
+                if (quick && quick.texture !== -1) {
+                    fallback = true;
+                    break;
+                }
+            }
+        }
+
+        this.sceneQuickGroundTextureFallbackCycle[level] = World.cycleNo;
+        this.sceneQuickGroundTextureFallback[level] = fallback ? 1 : 0;
+        return fallback;
+    }
+
+    private groundHasSceneTextureFallback(ground: Ground): boolean {
+        if (!ground.faceTexture || !gpuRenderPackets.shouldEmitSceneInstances() || shouldEmitSceneNativeTextures()) {
+            return false;
+        }
+        for (let i = 0; i < ground.faceTexture.length; i++) {
+            if (ground.faceTexture[i] !== -1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private recordSceneTerrainCpuFace(
+        identity: SceneDrawInstanceIdentity | null,
+        geomId: number,
+        face: number,
+        source: SceneDrawSource,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        colours: [number, number, number],
+        textureId: number,
+        gpuFallback: boolean = false,
+    ): void {
+        if (!identity || geomId < 0 || face < 0) {
+            return;
+        }
+        const record = {
+            drawId: identity.drawId,
+            instanceId: identity.instanceId,
+            geomId,
+            face,
+            kind: sceneDrawFaceKind(renderType, textureId),
+            source,
+            screen,
+            colours,
+            textureId,
+            alpha: 256,
+            priority: 0,
+            nearClipped: false,
+            hclip: Pix3D.hclip,
+            animated: false,
+        };
+        if (gpuFallback) {
+            recordSceneGpuDrawRecord(record);
+        } else {
+            recordSceneCpuDrawRecord(record);
+        }
+    }
+
+    private lowMemTextureColours(texture: number, colourA: number, colourB: number, colourC: number): [number, number, number] {
+        const textureAverage: number = TEXTURE_AVERAGE[texture];
+        return [
+            this.getTable(textureAverage, colourA),
+            this.getTable(textureAverage, colourB),
+            this.getTable(textureAverage, colourC),
+        ];
+    }
+
+    private emitQuickGroundRegion(level: number): void {
+        if (this.sceneQuickGroundEmittedCycle[level] === World.cycleNo) {
+            return;
+        }
+        this.sceneQuickGroundEmittedCycle[level] = World.cycleNo;
+
+        const geomId = this.ensureSceneQuickGroundGeomId(level);
+        if (geomId < 0) {
+            return;
+        }
+        // NYM-218: re-build + re-upload the region geometry whenever the native
+        // geometry cache was cleared at a keyframe boundary (sceneGeometryUploaded
+        // no longer has this geomId). Otherwise the QuickGround terrain mesh is
+        // sent exactly once and lost when a consumer (OBS) connects after that
+        // frame, leaving the ground black. geomId stays stable so no cache leak.
+        if (!isSceneGeometryUploaded(geomId)) {
+            const pointX: number[] = [];
+            const pointY: number[] = [];
+            const pointZ: number[] = [];
+            const faceA: number[] = [];
+            const faceB: number[] = [];
+            const faceC: number[] = [];
+            const faceColourA: number[] = [];
+            const faceColourB: number[] = [];
+            const faceColourC: number[] = [];
+            const faceType: number[] = [];
+            const faceTexture: number[] = [];
+            const faceTextureA: number[] = [];
+            const faceTextureB: number[] = [];
+            const faceTextureC: number[] = [];
+
+            const colourFor = (ground: QuickGround, colour: number): number => {
+                if (ground.texture === -1) {
+                    return colour;
+                }
+                return colour;
+            };
+
+            const pushFace = (
+                a: number,
+                b: number,
+                c: number,
+                ca: number,
+                cb: number,
+                cc: number,
+                texture: number,
+                ta: number,
+                tb: number,
+                tc: number,
+            ): void => {
+                faceA.push(a);
+                faceB.push(b);
+                faceC.push(c);
+                faceColourA.push(ca);
+                faceColourB.push(cb);
+                faceColourC.push(cc);
+                faceType.push(texture >= 0 ? 2 : 0);
+                faceTexture.push(texture);
+                faceTextureA.push(texture >= 0 ? ta : 0);
+                faceTextureB.push(texture >= 0 ? tb : 0);
+                faceTextureC.push(texture >= 0 ? tc : 0);
+            };
+
+            for (let x = 0; x < this.maxTileX; x++) {
+                for (let z = 0; z < this.maxTileZ; z++) {
+                    const tile = this.squares[level][x][z];
+                    const quick = tile?.quickGround;
+                    if (!quick) {
+                        continue;
+                    }
+
+                    const base = pointX.length;
+                    pointX.push(x << 7, (x << 7) + 128, (x << 7) + 128, x << 7);
+                    pointZ.push(z << 7, z << 7, (z << 7) + 128, (z << 7) + 128);
+                    pointY.push(
+                        this.groundh[level][x][z],
+                        this.groundh[level][x + 1][z],
+                        this.groundh[level][x + 1][z + 1],
+                        this.groundh[level][x][z + 1],
+                    );
+
+                    const sw = colourFor(quick, quick.colourSW);
+                    const se = colourFor(quick, quick.colourSE);
+                    const ne = colourFor(quick, quick.colourNE);
+                    const nw = colourFor(quick, quick.colourNW);
+                    if (quick.texture !== -1 || quick.colourNE !== 12345678) {
+                        if (quick.texture !== -1) {
+                            Pix3D.recordGpuTextureResource(quick.texture);
+                        }
+                        pushFace(
+                            base + 2,
+                            base + 3,
+                            base + 1,
+                            ne,
+                            nw,
+                            se,
+                            quick.texture,
+                            quick.flat ? base : base + 2,
+                            quick.flat ? base + 1 : base + 3,
+                            quick.flat ? base + 3 : base + 1,
+                        );
+                    }
+                    if (quick.texture !== -1 || quick.colourSW !== 12345678) {
+                        if (quick.texture !== -1) {
+                            Pix3D.recordGpuTextureResource(quick.texture);
+                        }
+                        pushFace(base, base + 1, base + 3, sw, se, nw, quick.texture, base, base + 1, base + 3);
+                    }
+                }
+            }
+
+            if (faceA.length === 0) {
+                console.log(`[qg] EMPTY build L${level} geom=${(geomId >>> 0).toString(16)} cycle=${World.cycleNo} -> kill`);
+                this.sceneQuickGroundGeomIds[level] = -1;
+                return;
+            }
+            console.log(`[qg] BUILD L${level} geom=${(geomId >>> 0).toString(16)} faces=${faceA.length} pts=${pointX.length} cycle=${World.cycleNo}`);
+
+            recordQuickGroundRegionGeometryUpload(
+                geomId,
+                pointX,
+                pointY,
+                pointZ,
+                faceA,
+                faceB,
+                faceC,
+                faceColourA,
+                faceColourB,
+                faceColourC,
+                faceType,
+                faceTexture,
+                faceTextureA,
+                faceTextureB,
+                faceTextureC,
+            );
+        }
+
+        if ((World.cycleNo % 120) === 0) {
+            console.log(`[qg] emit L${level} geom=${(geomId >>> 0).toString(16)} uploaded=${isSceneGeometryUploaded(geomId)} cycle=${World.cycleNo}`);
+        }
+        recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_QUICK);
+    }
+
+    private recordQuickGroundTileGeometryUpload(geomId: number, ground: QuickGround, level: number, tileX: number, tileZ: number): void {
+        if (isSceneGeometryUploaded(geomId)) {
+            return;
+        }
+        if (ground.texture !== -1) {
+            Pix3D.recordGpuTextureResource(ground.texture);
+        }
+
+        const pointX = [tileX << 7, (tileX << 7) + 128, (tileX << 7) + 128, tileX << 7];
+        const pointZ = [tileZ << 7, tileZ << 7, (tileZ << 7) + 128, (tileZ << 7) + 128];
+        const pointY = [
+            this.groundh[level][tileX][tileZ],
+            this.groundh[level][tileX + 1][tileZ],
+            this.groundh[level][tileX + 1][tileZ + 1],
+            this.groundh[level][tileX][tileZ + 1],
+        ];
+        const faceA: number[] = [];
+        const faceB: number[] = [];
+        const faceC: number[] = [];
+        const faceColourA: number[] = [];
+        const faceColourB: number[] = [];
+        const faceColourC: number[] = [];
+        const faceType: number[] = [];
+        const faceTexture: number[] = [];
+        const faceTextureA: number[] = [];
+        const faceTextureB: number[] = [];
+        const faceTextureC: number[] = [];
+        const pushFace = (a: number, b: number, c: number, ca: number, cb: number, cc: number, ta: number, tb: number, tc: number): void => {
+            faceA.push(a);
+            faceB.push(b);
+            faceC.push(c);
+            faceColourA.push(ca);
+            faceColourB.push(cb);
+            faceColourC.push(cc);
+            faceType.push(ground.texture >= 0 ? 2 : 0);
+            faceTexture.push(ground.texture);
+            faceTextureA.push(ground.texture >= 0 ? ta : 0);
+            faceTextureB.push(ground.texture >= 0 ? tb : 0);
+            faceTextureC.push(ground.texture >= 0 ? tc : 0);
+        };
+
+        if (ground.texture !== -1 || ground.colourNE !== 12345678) {
+            pushFace(
+                2,
+                3,
+                1,
+                ground.colourNE,
+                ground.colourNW,
+                ground.colourSE,
+                ground.flat ? 0 : 2,
+                ground.flat ? 1 : 3,
+                ground.flat ? 3 : 1,
+            );
+        }
+        if (ground.texture !== -1 || ground.colourSW !== 12345678) {
+            pushFace(0, 1, 3, ground.colourSW, ground.colourSE, ground.colourNW, 0, 1, 3);
+        }
+        if (faceA.length === 0) {
+            return;
+        }
+
+        recordQuickGroundRegionGeometryUpload(
+            geomId,
+            pointX,
+            pointY,
+            pointZ,
+            faceA,
+            faceB,
+            faceC,
+            faceColourA,
+            faceColourB,
+            faceColourC,
+            faceType,
+            faceTexture,
+            faceTextureA,
+            faceTextureB,
+            faceTextureC,
+        );
+    }
+
     private renderQuickGround(ground: QuickGround, level: number, tileX: number, tileZ: number, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
+        if ((World.cycleNo % 120) === 0 && level === 0) {
+            console.log(`[rqg] called L${level} emit=${gpuRenderPackets.shouldEmitSceneInstances()} cycle=${World.cycleNo}`);
+        }
+        const textureFallback = this.quickGroundLevelHasSceneTextureFallback(level);
+        let sceneCpuRecordOnly = false;
+        let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
+        let sceneGeomId = -1;
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
+            sceneGeomId = this.ensureSceneQuickGroundTileGeomId(ground);
+            this.recordQuickGroundTileGeometryUpload(sceneGeomId, ground, level, tileX, tileZ);
+            nativeSceneIdentity = recordSceneInstance(sceneGeomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_QUICK);
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            sceneCpuRecordOnly = true;
+        }
+        const sceneIdentity = textureFallback
+            ? this.beginSceneQuickGroundGpuFallbackDrawInstance(level)
+            : nativeSceneIdentity ? beginSceneCpuDrawInstance(nativeSceneIdentity) : this.beginSceneQuickGroundCpuDrawInstance(level);
+        if (sceneGeomId < 0) {
+            sceneGeomId = sceneIdentity ? this.ensureSceneQuickGroundGeomId(level) : -1;
+        }
+
         let x3: number;
         let x0: number = (x3 = (tileX << 7) - World.cx);
         let z1: number;
@@ -2002,9 +2561,24 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
+            const sceneFace = nativeSceneIdentity
+                ? this.sceneQuickGroundTileFaceId(ground, 0)
+                : this.sceneQuickGroundFaceId(level, tileX, tileZ, 0);
+            const screen: [[number, number], [number, number], [number, number]] = [[py1, pz1], [px3, py3], [pz0, px1]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {
-                    if (ground.flat) {
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        2,
+                        screen,
+                        [ground.colourNE, ground.colourNW, ground.colourSE],
+                        ground.texture,
+                        textureFallback,
+                    );
+                    if (!sceneCpuRecordOnly && ground.flat) {
                         Pix3D.textureTriangle(
                             py1, px3, pz0,
                             pz1, py3, px1,
@@ -2015,7 +2589,7 @@ export default class World {
                             z1, z3,
                             ground.texture
                         );
-                    } else {
+                    } else if (!sceneCpuRecordOnly) {
                         Pix3D.textureTriangle(
                             py1, px3, pz0,
                             pz1, py3, px1,
@@ -2028,20 +2602,46 @@ export default class World {
                         );
                     }
                 } else {
-                    const textureAverage: number = TEXTURE_AVERAGE[ground.texture];
-                    Pix3D.gouraudTriangle(
-                        py1, px3, pz0,
-                        pz1, py3, px1,
-                        this.getTable(textureAverage, ground.colourNE), this.getTable(textureAverage, ground.colourNW), this.getTable(textureAverage, ground.colourSE)
+                    const colours = this.lowMemTextureColours(ground.texture, ground.colourNE, ground.colourNW, ground.colourSE);
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        colours,
+                        -1,
+                        textureFallback,
                     );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            py1, px3, pz0,
+                            pz1, py3, px1,
+                            colours[0], colours[1], colours[2]
+                        );
+                    }
                 }
             } else {
                 if (ground.colourNE !== 12345678) {
-                    Pix3D.gouraudTriangle(
-                        py1, px3, pz0,
-                        pz1, py3, px1,
-                        ground.colourNE, ground.colourNW, ground.colourSE
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        [ground.colourNE, ground.colourNW, ground.colourSE],
+                        -1,
+                        textureFallback,
                     );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            py1, px3, pz0,
+                            pz1, py3, px1,
+                            ground.colourNE, ground.colourNW, ground.colourSE
+                        );
+                    }
                 }
             }
         }
@@ -2054,39 +2654,108 @@ export default class World {
                 World.groundZ = tileZ;
             }
 
+            const sceneFace = nativeSceneIdentity
+                ? this.sceneQuickGroundTileFaceId(ground, 1)
+                : this.sceneQuickGroundFaceId(level, tileX, tileZ, 1);
+            const screen: [[number, number], [number, number], [number, number]] = [[px0, py0], [pz0, px1], [px3, py3]];
             if (ground.texture !== -1) {
                 if (!World.lowMem) {
-                    Pix3D.textureTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        ground.colourSW, ground.colourSE, ground.colourNW,
-                        x0, y0, z0,
-                        x1, x3,
-                        y1, y3,
-                        z1, z3,
-                        ground.texture
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        2,
+                        screen,
+                        [ground.colourSW, ground.colourSE, ground.colourNW],
+                        ground.texture,
+                        textureFallback,
                     );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.textureTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            ground.colourSW, ground.colourSE, ground.colourNW,
+                            x0, y0, z0,
+                            x1, x3,
+                            y1, y3,
+                            z1, z3,
+                            ground.texture
+                        );
+                    }
                 } else {
-                    const textureAverage: number = TEXTURE_AVERAGE[ground.texture];
-                    Pix3D.gouraudTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        this.getTable(textureAverage, ground.colourSW), this.getTable(textureAverage, ground.colourSE), this.getTable(textureAverage, ground.colourNW)
+                    const colours = this.lowMemTextureColours(ground.texture, ground.colourSW, ground.colourSE, ground.colourNW);
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        colours,
+                        -1,
+                        textureFallback,
                     );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            colours[0], colours[1], colours[2]
+                        );
+                    }
                 }
             } else {
                 if (ground.colourSW !== 12345678) {
-                    Pix3D.gouraudTriangle(
-                        px0, pz0, px3,
-                        py0, px1, py3,
-                        ground.colourSW, ground.colourSE, ground.colourNW
+                    this.recordSceneTerrainCpuFace(
+                        sceneIdentity,
+                        sceneGeomId,
+                        sceneFace,
+                        SCENE_DRAW_SOURCE_TERRAIN_QUICK,
+                        0,
+                        screen,
+                        [ground.colourSW, ground.colourSE, ground.colourNW],
+                        -1,
+                        textureFallback,
                     );
+                    if (!sceneCpuRecordOnly) {
+                        Pix3D.gouraudTriangle(
+                            px0, pz0, px3,
+                            py0, px1, py3,
+                            ground.colourSW, ground.colourSE, ground.colourNW
+                        );
+                    }
                 }
             }
         }
     }
 
     private renderGround(tileX: number, tileZ: number, ground: Ground, sinEyePitch: number, cosEyePitch: number, sinEyeYaw: number, cosEyeYaw: number): void {
+        const textureFallback = this.groundHasSceneTextureFallback(ground);
+        let sceneCpuRecordOnly = false;
+        if (gpuRenderPackets.shouldEmitSceneInstances() && !textureFallback) {
+            // NYM-210 Slice 2: terrain on GPU. Ground verts are WORLD-space; the
+            // GPU projects them with yaw=0 + rel=-camera (world → camera-relative),
+            // identical to the CPU path below. Geometry cached per Ground object.
+            if (ground.faceTexture) {
+                for (let i = 0; i < ground.faceTexture.length; i++) {
+                    if (ground.faceTexture[i] !== -1) {
+                        Pix3D.recordGpuTextureResource(ground.faceTexture[i]);
+                    }
+                }
+            }
+            const geomId = this.ensureSceneGroundGeomId(ground);
+            recordGroundGeometryUpload(geomId, ground);
+            recordSceneInstance(geomId, 0, 65536, -World.cx, -World.cy, -World.cz, 256, 0, SCENE_DRAW_SOURCE_TERRAIN_COMPLEX);
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            sceneCpuRecordOnly = true;
+        }
+        const sceneIdentity = textureFallback
+            ? this.beginSceneGroundGpuFallbackDrawInstance()
+            : this.beginSceneGroundCpuDrawInstance();
+        const sceneGeomId = sceneIdentity ? this.ensureSceneGroundGeomId(ground) : -1;
+
         let vertexCount: number = ground.vertexX.length;
 
         for (let i: number = 0; i < vertexCount; i++) {
@@ -2140,9 +2809,22 @@ export default class World {
                     World.groundZ = tileZ;
                 }
 
+                const sceneFace = this.sceneGroundFaceId(ground, v);
+                const screen: [[number, number], [number, number], [number, number]] = [[x0, y0], [x1, y1], [x2, y2]];
                 if (ground.faceTexture && ground.faceTexture[v] !== -1) {
                     if (!World.lowMem) {
-                        if (ground.flat) {
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            2,
+                            screen,
+                            [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
+                            ground.faceTexture[v],
+                            textureFallback,
+                        );
+                        if (!sceneCpuRecordOnly && ground.flat) {
                             Pix3D.textureTriangle(
                                 x0, x1, x2,
                                 y0, y1, y2,
@@ -2153,7 +2835,7 @@ export default class World {
                                 Ground.drawTextureVertexZ[1], Ground.drawTextureVertexZ[3],
                                 ground.faceTexture[v]
                             );
-                        } else {
+                        } else if (!sceneCpuRecordOnly) {
                             Pix3D.textureTriangle(
                                 x0, x1, x2,
                                 y0, y1, y2,
@@ -2166,20 +2848,46 @@ export default class World {
                             );
                         }
                     } else {
-                        const textureAverage: number = TEXTURE_AVERAGE[ground.faceTexture[v]];
-                        Pix3D.gouraudTriangle(
-                            x0, x1, x2,
-                            y0, y1, y2,
-                            this.getTable(textureAverage, ground.faceColourA[v]), this.getTable(textureAverage, ground.faceColourB[v]), this.getTable(textureAverage, ground.faceColourC[v])
+                        const colours = this.lowMemTextureColours(ground.faceTexture[v], ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]);
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            0,
+                            screen,
+                            colours,
+                            -1,
+                            textureFallback,
                         );
+                        if (!sceneCpuRecordOnly) {
+                            Pix3D.gouraudTriangle(
+                                x0, x1, x2,
+                                y0, y1, y2,
+                                colours[0], colours[1], colours[2]
+                            );
+                        }
                     }
                 } else {
                     if (ground.faceColourA[v] !== 12345678) {
-                        Pix3D.gouraudTriangle(
-                            x0, x1, x2,
-                            y0, y1, y2,
-                            ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]
+                        this.recordSceneTerrainCpuFace(
+                            sceneIdentity,
+                            sceneGeomId,
+                            sceneFace,
+                            SCENE_DRAW_SOURCE_TERRAIN_COMPLEX,
+                            0,
+                            screen,
+                            [ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]],
+                            -1,
+                            textureFallback,
                         );
+                        if (!sceneCpuRecordOnly) {
+                            Pix3D.gouraudTriangle(
+                                x0, x1, x2,
+                                y0, y1, y2,
+                                ground.faceColourA[v], ground.faceColourB[v], ground.faceColourC[v]
+                            );
+                        }
                     }
                 }
             }

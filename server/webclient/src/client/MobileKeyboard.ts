@@ -1,4 +1,4 @@
-import { canvas, canvas2d } from '#/graphics/Canvas.js';
+import { canvas, canvas2d, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 
 // ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!"£$%^&*()-_=+[{]};:\'@#~,<.>/?\\| 
 // ^ Allowed characters in client
@@ -103,6 +103,12 @@ class MobileKeyboard {
     }
 
     public show(originX?: number, originY?: number, clientX?: number, clientY?: number) {
+        if (isGpuPacketReplayRequested()) {
+            this.canvasKeyboard.hide();
+            this.nativeKeyboard.show(clientX ?? originX, clientY ?? originY);
+            return;
+        }
+
         if (this.mode === UserKeyboardMode.Hybrid) {
             if (isFullScreen()) {
                 this.canvasKeyboard.show(originX, originY);
@@ -122,6 +128,10 @@ class MobileKeyboard {
     }
 
     public draw() {
+        if (isGpuPacketReplayRequested()) {
+            return;
+        }
+
         this.canvasKeyboard.draw();
     }
 

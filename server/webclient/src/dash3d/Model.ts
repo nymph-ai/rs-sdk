@@ -2,6 +2,31 @@ import AnimBase, { AnimTransform } from '#/dash3d/AnimBase.js';
 import AnimFrame from '#/dash3d/AnimFrame.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
+import {
+    SCENE_DRAW_SOURCE_ENTITY,
+    SCENE_DRAW_SOURCE_MODEL,
+    beginSceneCpuDrawInstance,
+    beginSceneGpuDrawInstance,
+    gpuRenderPackets,
+    recordModelAnimFrameUpload,
+    recordModelFlatTriangle,
+    recordModelGeometryUpload,
+    recordModelGouraudTriangle,
+    recordModelLabelMapUpload,
+    recordModelSkeletonUpload,
+    recordSceneCpuDrawRecord,
+    recordSceneGpuDrawRecord,
+    recordSceneInstance,
+    sceneDrawFaceKind,
+    shouldEmitSceneNativeDeform,
+    shouldEmitSceneNativeLighting,
+    shouldEmitSceneNativeNearClip,
+    shouldEmitSceneNativeTextures,
+    shouldRecordSceneCpuDrawset,
+    type SceneDrawInstanceIdentity,
+    type SceneDrawSource,
+    type SceneAnimOpPacket
+} from '#/graphics/GpuRenderPackets.js';
 
 import Packet from '#/io/Packet.js';
 
@@ -33,6 +58,17 @@ class Metadata {
 
     faceTextureAxisOffset: number = -1;
 }
+
+type SceneAnimationDescriptor = {
+    baseModel: Model;
+    skeleton: AnimBase | null;
+    skeletonId: number;
+    animFrameId: number;
+    ops: SceneAnimOpPacket[];
+    resizeX: number;
+    resizeY: number;
+    resizeZ: number;
+};
 
 export default class Model extends ModelSource {
     static loaded: number = 0;
@@ -88,8 +124,17 @@ export default class Model extends ModelSource {
     faceColourA: Int32Array | null = null;
     faceColourB: Int32Array | null = null;
     faceColourC: Int32Array | null = null;
+    sceneBaseFaceColour: Int32Array | null = null;
+    sceneFaceNormalX: Int32Array | null = null;
+    sceneFaceNormalY: Int32Array | null = null;
+    sceneFaceNormalZ: Int32Array | null = null;
+    sceneVertexNormalX: Int32Array | null = null;
+    sceneVertexNormalY: Int32Array | null = null;
+    sceneVertexNormalZ: Int32Array | null = null;
+    sceneVertexNormalW: Int32Array | null = null;
 
     useAABBMouseCheck: boolean = false;
+    private sceneAnimation: SceneAnimationDescriptor | null = null;
     radius: number = 0;
     maxDepth: number = 0;
     minDepth: number = 0;
@@ -100,6 +145,30 @@ export default class Model extends ModelSource {
     static vertexScreenX: Int32Array = new Int32Array(4096);
     static vertexScreenY: Int32Array = new Int32Array(4096);
     static vertexScreenZ: Int32Array = new Int32Array(4096);
+
+    // NYM-210: monotonic id assigned per Model instance for the GPU geometry
+    // cache (object identity is stable for static scenery built once per region).
+    static nextSceneGeomId: number = 1;
+    private static readonly SCENE_DYNAMIC_GEOM_BIT: number = 0x80000000;
+    private static readonly SCENE_RESIZE_TRANSFORM: number = 6;
+    private static nextSceneSkeletonId: number = 1;
+    private static nextSceneAnimFrameId: number = 1;
+    private static readonly sceneSkeletonIds: WeakMap<AnimBase, number> = new WeakMap();
+    private static readonly sceneAnimFrameIds: Map<string, number> = new Map();
+    private static sceneCpuDrawContext: {
+        geomId: number;
+        source: SceneDrawSource;
+        animated: boolean;
+        identity: SceneDrawInstanceIdentity;
+    } | null = null;
+    private static sceneGpuFallbackDrawContext: {
+        geomId: number;
+        source: SceneDrawSource;
+        animated: boolean;
+        identity: SceneDrawInstanceIdentity;
+    } | null = null;
+    private static sceneCpuDrawRecordOnly: boolean = false;
+    private static sceneDrawSourceOverride: SceneDrawSource | null = null;
 
     static vertexViewSpaceX: Int32Array = new Int32Array(4096);
     static vertexViewSpaceY: Int32Array = new Int32Array(4096);
@@ -126,6 +195,149 @@ export default class Model extends ModelSource {
     static mouseY: number = 0;
     static pickedCount: number = 0;
     static pickedEntityTypecode: Int32Array = new Int32Array(1000);
+    private static gpuModelTransformActive: boolean = false;
+    private static gpuModelSinYaw: number = 0;
+    private static gpuModelCosYaw: number = 65536;
+    private static gpuModelSinEyePitch: number = 0;
+    private static gpuModelCosEyePitch: number = 65536;
+    private static gpuModelSinEyeYaw: number = 0;
+    private static gpuModelCosEyeYaw: number = 65536;
+    private static gpuModelRelativeX: number = 0;
+    private static gpuModelRelativeY: number = 0;
+    private static gpuModelRelativeZ: number = 0;
+
+    static withSceneDrawSource<T>(source: SceneDrawSource, draw: () => T): T {
+        const previous = Model.sceneDrawSourceOverride;
+        Model.sceneDrawSourceOverride = source;
+        try {
+            return draw();
+        } finally {
+            Model.sceneDrawSourceOverride = previous;
+        }
+    }
+
+    private beginSceneDrawContext(
+        typecode: number,
+        identity: SceneDrawInstanceIdentity | null,
+    ): typeof Model.sceneCpuDrawContext {
+        if (!identity) {
+            return null;
+        }
+
+        const entityKind: number = (typecode >>> 29) & 0x3;
+        const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+        const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
+        const uploadModel = sceneAnimation?.baseModel ?? this;
+        let geomId: number;
+        if (sceneAnimation) {
+            geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                geomId = Model.nextSceneGeomId++;
+                (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+        } else if (volatileEntityGeometry) {
+            geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
+        } else {
+            geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+            if (geomId < 0) {
+                geomId = Model.nextSceneGeomId++;
+                (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+            }
+        }
+
+        const source: SceneDrawSource = Model.sceneDrawSourceOverride ?? (volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL);
+        return {
+            geomId,
+            source,
+            animated: volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
+            identity,
+        };
+    }
+
+    private beginSceneCpuDrawContext(
+        typecode: number,
+        identity: SceneDrawInstanceIdentity | null = null,
+    ): typeof Model.sceneCpuDrawContext {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return this.beginSceneDrawContext(typecode, beginSceneCpuDrawInstance(identity));
+    }
+
+    private beginSceneGpuFallbackDrawContext(
+        typecode: number,
+        identity: SceneDrawInstanceIdentity | null = beginSceneGpuDrawInstance(),
+    ): typeof Model.sceneGpuFallbackDrawContext {
+        if (!shouldRecordSceneCpuDrawset()) {
+            return null;
+        }
+        return this.beginSceneDrawContext(typecode, identity);
+    }
+
+    private recordSceneCpuFace(
+        face: number,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        colours: [number, number, number],
+        textureId: number,
+        nearClipped: boolean,
+        hclip: boolean = Pix3D.hclip,
+    ): void {
+        const context = Model.sceneCpuDrawContext;
+        const rawAlpha = this.faceAlpha ? this.faceAlpha[face] | 0 : 0;
+        const record = {
+            face,
+            kind: sceneDrawFaceKind(renderType, textureId),
+            screen,
+            colours,
+            textureId,
+            alpha: rawAlpha > 0 ? 256 - rawAlpha : 256,
+            priority: this.facePriority ? this.facePriority[face] | 0 : this.priority | 0,
+            nearClipped,
+            hclip,
+        };
+        if (context) {
+            recordSceneCpuDrawRecord({
+                drawId: context.identity.drawId,
+                instanceId: context.identity.instanceId,
+                geomId: context.geomId,
+                source: context.source,
+                animated: context.animated,
+                ...record,
+            });
+        }
+
+        const gpuFallbackContext = Model.sceneGpuFallbackDrawContext;
+        if (gpuFallbackContext) {
+            recordSceneGpuDrawRecord({
+                drawId: gpuFallbackContext.identity.drawId,
+                instanceId: gpuFallbackContext.identity.instanceId,
+                geomId: gpuFallbackContext.geomId,
+                source: gpuFallbackContext.source,
+                animated: gpuFallbackContext.animated,
+                ...record,
+            });
+        }
+    }
+
+    private recordSceneCpuProjectedFace(
+        face: number,
+        renderType: number,
+        screen: [[number, number], [number, number], [number, number]],
+        nearClipped: boolean,
+        clippedColours: [number, number, number] | null = null,
+        hclip: boolean = Pix3D.hclip,
+    ): void {
+        if (!this.faceColourA) {
+            return;
+        }
+
+        const colourA = clippedColours ? clippedColours[0] | 0 : this.faceColourA[face] | 0;
+        const colourB = clippedColours ? clippedColours[1] | 0 : (this.faceColourB ? this.faceColourB[face] | 0 : colourA);
+        const colourC = clippedColours ? clippedColours[2] | 0 : (this.faceColourC ? this.faceColourC[face] | 0 : colourA);
+        const textureId = (renderType === 2 || renderType === 3) && this.faceColour ? this.faceColour[face] | 0 : -1;
+        this.recordSceneCpuFace(face, renderType, screen, [colourA, colourB, colourC], textureId, nearClipped, hclip);
+    }
 
     static init(total: number, provider: OnDemandProvider) {
         Model.meta = new Array(total);
@@ -946,6 +1158,178 @@ export default class Model extends ModelSource {
         this.faceTextureP = src.faceTextureP;
         this.faceTextureM = src.faceTextureM;
         this.faceTextureN = src.faceTextureN;
+        this.sceneAnimation = null;
+    }
+
+    private static sceneSkeletonId(skeleton: AnimBase | null): number {
+        if (!skeleton) {
+            return 0;
+        }
+        let id = Model.sceneSkeletonIds.get(skeleton);
+        if (!id) {
+            id = Model.nextSceneSkeletonId++;
+            Model.sceneSkeletonIds.set(skeleton, id);
+        }
+        return id;
+    }
+
+    private static maskHash(mask: Int32Array | null): string {
+        if (!mask) {
+            return 'none';
+        }
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < mask.length; i++) {
+            h ^= mask[i] >>> 0;
+            h = Math.imul(h, 16777619) >>> 0;
+        }
+        return `${mask.length}:${h}`;
+    }
+
+    private static appendFrameSceneOps(ops: SceneAnimOpPacket[], frame: AnimFrame | null, skeleton: AnimBase | null): void {
+        if (!frame || !skeleton || !frame.ti || !frame.tx || !frame.ty || !frame.tz || !skeleton.labels || !skeleton.type) {
+            return;
+        }
+        for (let i = 0; i < frame.size; i++) {
+            const group = frame.ti[i];
+            const labels = skeleton.labels[group];
+            if (!labels) {
+                continue;
+            }
+            ops.push({
+                type: skeleton.type[group] | 0,
+                x: frame.tx[i] | 0,
+                y: frame.ty[i] | 0,
+                z: frame.tz[i] | 0,
+                labels
+            });
+        }
+    }
+
+    private static appendMaskedSceneOps(ops: SceneAnimOpPacket[], primary: AnimFrame, secondary: AnimFrame, mask: Int32Array, skeleton: AnimBase | null): void {
+        if (!skeleton || !skeleton.type || !skeleton.labels) {
+            return;
+        }
+
+        let counter = 0;
+        let maskBase = mask[counter++];
+        if (primary.ti && primary.tx && primary.ty && primary.tz) {
+            for (let i = 0; i < primary.size; i++) {
+                const group = primary.ti[i];
+                while (group > maskBase) {
+                    maskBase = mask[counter++];
+                }
+                if (group !== maskBase || skeleton.type[group] === AnimTransform.ORIGIN) {
+                    ops.push({
+                        type: skeleton.type[group] | 0,
+                        x: primary.tx[i] | 0,
+                        y: primary.ty[i] | 0,
+                        z: primary.tz[i] | 0,
+                        labels: skeleton.labels[group]
+                    });
+                }
+            }
+        }
+
+        // CPU maskAnimate resets Model.oX/Y/Z before the secondary pass. A zero
+        // origin op with no labels gives the GPU deform kernel the same state.
+        ops.push({ type: AnimTransform.ORIGIN, x: 0, y: 0, z: 0, labels: null });
+
+        counter = 0;
+        maskBase = mask[counter++];
+        if (secondary.ti && secondary.tx && secondary.ty && secondary.tz) {
+            for (let i = 0; i < secondary.size; i++) {
+                const group = secondary.ti[i];
+                while (group > maskBase) {
+                    maskBase = mask[counter++];
+                }
+                if (group === maskBase || skeleton.type[group] === AnimTransform.ORIGIN) {
+                    ops.push({
+                        type: skeleton.type[group] | 0,
+                        x: secondary.tx[i] | 0,
+                        y: secondary.ty[i] | 0,
+                        z: secondary.tz[i] | 0,
+                        labels: skeleton.labels[group]
+                    });
+                }
+            }
+        }
+    }
+
+    setSceneAnimation(baseModel: Model, primaryId: number, secondaryId: number, mask: Int32Array | null, resizeX: number = 128, resizeY: number = 128, resizeZ: number = 128): void {
+        this.sceneAnimation = null;
+
+        if (!shouldEmitSceneNativeDeform()) {
+            return;
+        }
+
+        const primary = primaryId === -1 ? null : AnimFrame.get(primaryId);
+        const secondary = secondaryId === -1 ? null : AnimFrame.get(secondaryId);
+        const skeleton: AnimBase | null = primary?.base ?? secondary?.base ?? null;
+        const ops: SceneAnimOpPacket[] = [];
+
+        if (primary && secondary && mask) {
+            Model.appendMaskedSceneOps(ops, primary, secondary, mask, skeleton);
+        } else {
+            Model.appendFrameSceneOps(ops, primary ?? secondary, skeleton);
+        }
+        if (!baseModel.labelVertices) {
+            // CPU animate()/maskAnimate() returns before applying any frame op
+            // when the model has no vertex labels. Keep the post-animation
+            // resize op below, but drop all skeleton frame ops for parity.
+            ops.length = 0;
+        } else if (!baseModel.labelFaces || !baseModel.faceAlpha) {
+            // CPU animate2 skips transparency when face labels/alpha storage are
+            // missing, while still applying vertex transforms.
+            for (let i = ops.length - 1; i >= 0; i--) {
+                if (ops[i].type === AnimTransform.TRANSPARENCY) {
+                    ops.splice(i, 1);
+                }
+            }
+        }
+        if (resizeX !== 128 || resizeY !== 128 || resizeZ !== 128) {
+            ops.push({
+                type: Model.SCENE_RESIZE_TRANSFORM,
+                x: resizeX | 0,
+                y: resizeY | 0,
+                z: resizeZ | 0,
+                labels: null
+            });
+        }
+
+        const skeletonId = ops.length > 0 ? Model.sceneSkeletonId(skeleton) : 0;
+        let animFrameId = 0;
+        if (ops.length > 0) {
+            const key = `${primaryId}:${secondaryId}:${Model.maskHash(mask)}:${skeletonId}:${resizeX}:${resizeY}:${resizeZ}`;
+            animFrameId = Model.sceneAnimFrameIds.get(key) ?? 0;
+            if (!animFrameId) {
+                animFrameId = Model.nextSceneAnimFrameId++;
+                Model.sceneAnimFrameIds.set(key, animFrameId);
+            }
+        }
+        this.sceneAnimation = {
+            baseModel,
+            skeleton,
+            skeletonId,
+            animFrameId,
+            ops,
+            resizeX,
+            resizeY,
+            resizeZ
+        };
+    }
+
+    private hasSceneTexturedFaces(): boolean {
+        if (!this.faceRenderType || !this.faceColour || !this.faceTextureP || !this.faceTextureM || !this.faceTextureN) {
+            return false;
+        }
+
+        for (let face = 0; face < this.numFaces; face++) {
+            const type = this.faceRenderType[face] & 0x3;
+            if (type === 2 || type === 3) {
+                return true;
+            }
+        }
+        return false;
     }
 
     addPoint(src: Model, vertex: number) {
@@ -1471,6 +1855,16 @@ export default class Model extends ModelSource {
                 this.pointNormal[v] = new PointNormal();
             }
         }
+        const retainSceneLighting = shouldEmitSceneNativeLighting();
+        if (retainSceneLighting) {
+            this.sceneFaceNormalX = new Int32Array(this.numFaces);
+            this.sceneFaceNormalY = new Int32Array(this.numFaces);
+            this.sceneFaceNormalZ = new Int32Array(this.numFaces);
+        } else {
+            this.sceneFaceNormalX = null;
+            this.sceneFaceNormalY = null;
+            this.sceneFaceNormalZ = null;
+        }
 
         for (let f: number = 0; f < this.numFaces; f++) {
             const a: number = this.faceVertexA![f];
@@ -1503,6 +1897,11 @@ export default class Model extends ModelSource {
             nx = ((nx * 256) / length) | 0;
             ny = ((ny * 256) / length) | 0;
             nz = ((nz * 256) / length) | 0;
+            if (retainSceneLighting && this.sceneFaceNormalX && this.sceneFaceNormalY && this.sceneFaceNormalZ) {
+                this.sceneFaceNormalX[f] = nx;
+                this.sceneFaceNormalY[f] = ny;
+                this.sceneFaceNormalZ[f] = nz;
+            }
 
             if (!this.faceRenderType || (this.faceRenderType[f] & 0x1) === 0) {
                 let n: PointNormal | null = this.pointNormal[a];
@@ -1608,6 +2007,7 @@ export default class Model extends ModelSource {
             }
         }
 
+        this.retainSceneRelightMetadata();
         this.pointNormal = null;
         this.sharedPointNormal = null;
         this.vertexLabel = null;
@@ -1622,6 +2022,46 @@ export default class Model extends ModelSource {
         }
 
         this.faceColour = null;
+    }
+
+    private retainSceneRelightMetadata(): void {
+        this.sceneBaseFaceColour = null;
+        this.sceneVertexNormalX = null;
+        this.sceneVertexNormalY = null;
+        this.sceneVertexNormalZ = null;
+        this.sceneVertexNormalW = null;
+
+        if (!shouldEmitSceneNativeLighting()) {
+            this.sceneFaceNormalX = null;
+            this.sceneFaceNormalY = null;
+            this.sceneFaceNormalZ = null;
+            return;
+        }
+        if (this.faceColour) {
+            this.sceneBaseFaceColour = new Int32Array(this.faceColour);
+        }
+        if (!this.pointNormal) {
+            return;
+        }
+
+        const normalX = new Int32Array(this.numPoints);
+        const normalY = new Int32Array(this.numPoints);
+        const normalZ = new Int32Array(this.numPoints);
+        const normalW = new Int32Array(this.numPoints);
+        for (let v: number = 0; v < this.numPoints; v++) {
+            const normal: PointNormal | null = this.pointNormal[v];
+            if (!normal) {
+                continue;
+            }
+            normalX[v] = normal.x;
+            normalY[v] = normal.y;
+            normalZ[v] = normal.z;
+            normalW[v] = normal.w;
+        }
+        this.sceneVertexNormalX = normalX;
+        this.sceneVertexNormalY = normalY;
+        this.sceneVertexNormalZ = normalZ;
+        this.sceneVertexNormalW = normalW;
     }
 
     static getColour(hsl: number, scalar: number, faceRenderType: number): number {
@@ -1708,6 +2148,7 @@ export default class Model extends ModelSource {
 
         try {
             // try catch for example a model being drawn from 3d can crash like at baxtorian falls
+            Model.gpuModelTransformActive = false;
             this.render2(false, false, 0);
         } catch (_e) {
             // empty
@@ -1750,8 +2191,78 @@ export default class Model extends ModelSource {
         }
 
         const radiusZ: number = radiusCosEyePitch + ((this.minY * sinEyePitch) >> 16);
+        const nearClipFallback: boolean = midZ - radiusZ <= 50;
+        const entityKind: number = (typecode >>> 29) & 0x3;
+        const volatileEntityGeometry: boolean = (entityKind === 0 && typecode > 0) || entityKind === 1;
+        const sceneAnimation = volatileEntityGeometry ? this.sceneAnimation : null;
+        const uploadModel = sceneAnimation?.baseModel ?? this;
+        const textureFallback: boolean = gpuRenderPackets.shouldEmitSceneInstances()
+            && !shouldEmitSceneNativeTextures()
+            && uploadModel.hasSceneTexturedFaces();
+        const nearClipCpuFallback: boolean = nearClipFallback && !shouldEmitSceneNativeNearClip();
+        let nativeSceneIdentity: SceneDrawInstanceIdentity | null = null;
+        const sceneDrawSource: SceneDrawSource = Model.sceneDrawSourceOverride ?? (volatileEntityGeometry ? SCENE_DRAW_SOURCE_ENTITY : SCENE_DRAW_SOURCE_MODEL);
 
-        let clipped: boolean = midZ - radiusZ <= 50;
+        const nativeSceneFastPath = gpuRenderPackets.shouldEmitSceneInstances() && !nearClipCpuFallback && !textureFallback;
+        let nativeSceneRecordOnly = false;
+        if (nativeSceneFastPath) {
+            // NYM-210: the model passed bounding-cylinder culling (cheap, game
+            // logic). Emit its geometry once (cached by id) + a per-frame
+            // instance, then bail BEFORE the per-vertex CPU projection loop —
+            // the GPU does projection/lighting/near-plane clipping/raster. This
+            // is where the ~65ms renderAll cost disappears.
+            let geomId: number;
+            if (sceneAnimation) {
+                geomId = (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+                if (geomId < 0) {
+                    geomId = Model.nextSceneGeomId++;
+                    (uploadModel as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+                }
+            } else if (volatileEntityGeometry) {
+                // Fallback for entities without a scene animation descriptor:
+                // re-upload the final CPU geometry each frame under a stable
+                // entity geom id until that path is explicit.
+                geomId = (Model.SCENE_DYNAMIC_GEOM_BIT | (typecode >>> 0)) >>> 0;
+            } else {
+                geomId = (this as unknown as { __sceneGeomId?: number }).__sceneGeomId ?? -1;
+                if (geomId < 0) {
+                    geomId = Model.nextSceneGeomId++;
+                    (this as unknown as { __sceneGeomId?: number }).__sceneGeomId = geomId;
+                }
+            }
+            if (uploadModel.faceRenderType && uploadModel.faceColour) {
+                for (let f = 0; f < uploadModel.numFaces; f++) {
+                    const type = uploadModel.faceRenderType[f] & 0x3;
+                    if (type === 2 || type === 3) {
+                        Pix3D.recordGpuTextureResource(uploadModel.faceColour[f]);
+                    }
+                }
+            }
+            recordModelGeometryUpload(geomId, uploadModel, volatileEntityGeometry && !sceneAnimation);
+            if (sceneAnimation) {
+                recordModelLabelMapUpload(geomId, uploadModel);
+                recordModelSkeletonUpload(sceneAnimation.skeletonId, sceneAnimation.skeleton);
+                recordModelAnimFrameUpload(sceneAnimation.animFrameId, sceneAnimation.skeletonId, sceneAnimation.ops);
+            }
+            nativeSceneIdentity = recordSceneInstance(
+                geomId,
+                Pix3D.sinTable[yaw & 0x7ff],
+                Pix3D.cosTable[yaw & 0x7ff],
+                relativeX,
+                relativeY,
+                relativeZ,
+                256,
+                sceneAnimation?.animFrameId ?? 0,
+                sceneDrawSource,
+                volatileEntityGeometry || (sceneAnimation?.animFrameId ?? 0) > 0,
+            );
+            if (!shouldRecordSceneCpuDrawset()) {
+                return;
+            }
+            nativeSceneRecordOnly = true;
+        }
+
+        let clipped: boolean = nearClipFallback;
         let picking: boolean = false;
 
         if (typecode > 0 && Model.mouseCheck) {
@@ -1791,11 +2302,21 @@ export default class Model extends ModelSource {
         const centerY: number = Pix3D.originY;
 
         let sinYaw: number = 0;
-        let cosYaw: number = 0;
+        let cosYaw: number = 65536;
         if (yaw !== 0) {
             sinYaw = Pix3D.sinTable[yaw];
             cosYaw = Pix3D.cosTable[yaw];
         }
+        Model.gpuModelTransformActive = true;
+        Model.gpuModelSinYaw = sinYaw;
+        Model.gpuModelCosYaw = cosYaw;
+        Model.gpuModelSinEyePitch = sinEyePitch;
+        Model.gpuModelCosEyePitch = cosEyePitch;
+        Model.gpuModelSinEyeYaw = sinEyeYaw;
+        Model.gpuModelCosEyeYaw = cosEyeYaw;
+        Model.gpuModelRelativeX = relativeX;
+        Model.gpuModelRelativeY = relativeY;
+        Model.gpuModelRelativeZ = relativeZ;
 
         for (let v: number = 0; v < this.numPoints; v++) {
             let x: number = this.pointX![v];
@@ -1838,11 +2359,26 @@ export default class Model extends ModelSource {
             }
         }
 
+        const previousSceneCpuDrawContext = Model.sceneCpuDrawContext;
+        const previousSceneGpuFallbackDrawContext = Model.sceneGpuFallbackDrawContext;
+        const previousSceneCpuDrawRecordOnly = Model.sceneCpuDrawRecordOnly;
+        const sceneGpuFallback = gpuRenderPackets.shouldEmitSceneInstances() && (nearClipCpuFallback || textureFallback);
+        Model.sceneCpuDrawContext = sceneGpuFallback ? null : this.beginSceneCpuDrawContext(typecode, nativeSceneIdentity);
+        Model.sceneGpuFallbackDrawContext = sceneGpuFallback
+            ? this.beginSceneGpuFallbackDrawContext(typecode, nativeSceneIdentity ?? beginSceneGpuDrawInstance())
+            : null;
+        Model.sceneCpuDrawRecordOnly = nativeSceneRecordOnly;
         try {
-            // try catch for example a model being drawn from 3d can crash like at baxtorian falls
-            this.render2(clipped, picking, typecode);
-        } catch (_e) {
-            // empty
+            try {
+                // try catch for example a model being drawn from 3d can crash like at baxtorian falls
+                this.render2(clipped, picking, typecode);
+            } catch (_e) {
+                // empty
+            }
+        } finally {
+            Model.sceneCpuDrawContext = previousSceneCpuDrawContext;
+            Model.sceneGpuFallbackDrawContext = previousSceneGpuFallbackDrawContext;
+            Model.sceneCpuDrawRecordOnly = previousSceneCpuDrawRecordOnly;
         }
     }
 
@@ -2108,13 +2644,86 @@ export default class Model extends ModelSource {
             type = this.faceRenderType[face] & 0x3;
         }
 
+        if (Model.sceneCpuDrawContext || Model.sceneGpuFallbackDrawContext) {
+            this.recordSceneCpuProjectedFace(
+                face,
+                type,
+                [
+                    [Model.vertexScreenX[a], Model.vertexScreenY[a]],
+                    [Model.vertexScreenX[b], Model.vertexScreenY[b]],
+                    [Model.vertexScreenX[c], Model.vertexScreenY[c]],
+                ],
+                false,
+            );
+            if (Model.sceneCpuDrawRecordOnly) {
+                return;
+            }
+        }
+
         if (type === 0) {
+            if (Model.gpuModelTransformActive && this.pointX && this.pointY && this.pointZ && gpuRenderPackets.shouldRecordModelGouraudTriangles()) {
+                Pix3D.recordGpuColourTable();
+                recordModelGouraudTriangle(
+                    this.pointX[a], this.pointY[a], this.pointZ[a],
+                    this.pointX[b], this.pointY[b], this.pointZ[b],
+                    this.pointX[c], this.pointY[c], this.pointZ[c],
+                    Model.gpuModelSinYaw,
+                    Model.gpuModelCosYaw,
+                    Model.gpuModelSinEyePitch,
+                    Model.gpuModelCosEyePitch,
+                    Model.gpuModelSinEyeYaw,
+                    Model.gpuModelCosEyeYaw,
+                    Model.gpuModelRelativeX,
+                    Model.gpuModelRelativeY,
+                    Model.gpuModelRelativeZ,
+                    Pix3D.originX,
+                    Pix3D.originY,
+                    this.faceColourA![face],
+                    this.faceColourB![face],
+                    this.faceColourC![face],
+                    Pix3D.trans === 0 ? 256 : 256 - Pix3D.trans,
+                    Pix3D.lowDetail,
+                    Pix3D.hclip,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
             Pix3D.gouraudTriangle(
                 Model.vertexScreenX[a], Model.vertexScreenX[b], Model.vertexScreenX[c],
                 Model.vertexScreenY[a], Model.vertexScreenY[b], Model.vertexScreenY[c],
                 this.faceColourA![face], this.faceColourB![face], this.faceColourC![face]
             );
         } else if (type === 1) {
+            if (Model.gpuModelTransformActive && this.pointX && this.pointY && this.pointZ && gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+                recordModelFlatTriangle(
+                    this.pointX[a], this.pointY[a], this.pointZ[a],
+                    this.pointX[b], this.pointY[b], this.pointZ[b],
+                    this.pointX[c], this.pointY[c], this.pointZ[c],
+                    Model.gpuModelSinYaw,
+                    Model.gpuModelCosYaw,
+                    Model.gpuModelSinEyePitch,
+                    Model.gpuModelCosEyePitch,
+                    Model.gpuModelSinEyeYaw,
+                    Model.gpuModelCosEyeYaw,
+                    Model.gpuModelRelativeX,
+                    Model.gpuModelRelativeY,
+                    Model.gpuModelRelativeZ,
+                    Pix3D.originX,
+                    Pix3D.originY,
+                    Pix3D.colourTable[this.faceColourA![face]],
+                    Pix3D.trans === 0 ? 256 : 256 - Pix3D.trans,
+                    Pix2D.clipMinX,
+                    Pix2D.clipMinY,
+                    Pix2D.clipMaxX,
+                    Pix2D.clipMaxY
+                );
+                gpuRenderPackets.recordCpuRasterWriteBypass();
+                return;
+            }
             Pix3D.flatTriangle(
                 Model.vertexScreenX[a], Model.vertexScreenX[b], Model.vertexScreenX[c],
                 Model.vertexScreenY[a], Model.vertexScreenY[b], Model.vertexScreenY[c],
@@ -2254,17 +2863,36 @@ export default class Model extends ModelSource {
 
         Pix3D.hclip = false;
 
-        if (elements === 3) {
-            if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX) {
-                Pix3D.hclip = true;
-            }
+        let type: number;
+        if (!this.faceRenderType) {
+            type = 0;
+        } else {
+            type = this.faceRenderType[face] & 0x3;
+        }
 
-            let type: number;
-            if (!this.faceRenderType) {
-                type = 0;
-            } else {
-                type = this.faceRenderType[face] & 0x3;
+        const clippedHclip = elements === 3
+            ? x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX
+            : x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX || Model.clippedX[3] < 0 || Model.clippedX[3] > Pix2D.sizeX;
+        if ((Model.sceneCpuDrawContext || Model.sceneGpuFallbackDrawContext) && (elements === 3 || elements === 4)) {
+            this.recordSceneCpuProjectedFace(
+                face,
+                type,
+                [
+                    [x0, y0],
+                    [x1, y1],
+                    [x2, y2],
+                ],
+                true,
+                [Model.clippedColour[0], Model.clippedColour[1], Model.clippedColour[2]],
+                clippedHclip,
+            );
+            if (Model.sceneCpuDrawRecordOnly) {
+                return;
             }
+        }
+
+        if (elements === 3) {
+            Pix3D.hclip = clippedHclip;
 
             if (type === 0) {
                 Pix3D.gouraudTriangle(
@@ -2312,16 +2940,7 @@ export default class Model extends ModelSource {
                 );
             }
         } else if (elements === 4) {
-            if (x0 < 0 || x1 < 0 || x2 < 0 || x0 > Pix2D.sizeX || x1 > Pix2D.sizeX || x2 > Pix2D.sizeX || Model.clippedX[3] < 0 || Model.clippedX[3] > Pix2D.sizeX) {
-                Pix3D.hclip = true;
-            }
-
-            let type: number;
-            if (!this.faceRenderType) {
-                type = 0;
-            } else {
-                type = this.faceRenderType[face] & 0x3;
-            }
+            Pix3D.hclip = clippedHclip;
 
             if (type === 0) {
                 Pix3D.gouraudTriangle(

@@ -8,6 +8,7 @@ import { MiniMenuAction } from '#/client/MiniMenuAction.js';
 import MobileKeyboard from '#/client/MobileKeyboard.js';
 import MouseTracking from '#/client/MouseTracking.js';
 import Skill from '#/client/Skill.js';
+import { publishStreamClientProfile, resolveAvatarSafeZone, resolveStreamUiSurfaceRect, type StreamRect } from '#/client/StreamClientProfile.js';
 import TitleFlames from '#/client/TitleFlames.js';
 
 import FloType from '#/config/FloType.js';
@@ -46,7 +47,7 @@ import { Int32Array2d, TypedArray1d, TypedArray3d, Int32Array3d, Uint8Array3d } 
 import { downloadUrl, sleep } from '#/util/JsUtil.js';
 
 import AnimFrame from '#/dash3d/AnimFrame.js';
-import { canvas2d } from '#/graphics/Canvas.js';
+import { canvas2d, isGpuPacketReplayRequested } from '#/graphics/Canvas.js';
 import { Colour } from '#/graphics/Colour.js';
 import Pix2D from '#/graphics/Pix2D.js';
 import Pix3D from '#/dash3d/Pix3D.js';
@@ -301,6 +302,8 @@ export class Client extends GameShell {
     private imageTitle8: PixMap | null = null;
     private imageTitlebox: Pix8 | null = null;
     private imageTitlebutton: Pix8 | null = null;
+    private imageTitleFlame0: Pix32 | null = null;
+    private imageTitleFlame1: Pix32 | null = null;
     private loginscreen: number = 0;
     private loginSelect: number = 0;
     private loginMes1: string = '';
@@ -632,6 +635,191 @@ export class Client extends GameShell {
         }
 
         this.run();
+    }
+
+    private get streamMode(): boolean {
+        return this.streamClientProfile.enabled;
+    }
+
+    private get gameSurfaceWidth(): number {
+        return this.streamMode ? this.streamClientProfile.backingWidth : 512;
+    }
+
+    private get gameSurfaceHeight(): number {
+        return this.streamMode ? this.streamClientProfile.backingHeight : 334;
+    }
+
+    private gameSurfaceRect(): StreamRect {
+        return this.streamMode
+            ? { x: 0, y: 0, width: this.gameSurfaceWidth, height: this.gameSurfaceHeight }
+            : { x: 4, y: 4, width: 512, height: 334 };
+    }
+
+    private minimapSurfaceRect(): StreamRect {
+        return this.streamMode
+            ? resolveStreamUiSurfaceRect(this.streamClientProfile, 'minimap', 172, 156)
+            : { x: 550, y: 4, width: 172, height: 156 };
+    }
+
+    private inventoryStreamLayout(): { cluster: StreamRect; topTabs: StreamRect; side: StreamRect; bottomTabs: StreamRect } {
+        const cluster = resolveStreamUiSurfaceRect(this.streamClientProfile, 'inventory', 269, 343);
+        return {
+            cluster,
+            topTabs: {
+                x: cluster.x + 10,
+                y: cluster.y,
+                width: 249,
+                height: 45
+            },
+            side: {
+                x: cluster.x + 39,
+                y: cluster.y + 45,
+                width: 190,
+                height: 261
+            },
+            bottomTabs: {
+                x: cluster.x,
+                y: cluster.y + 306,
+                width: 269,
+                height: 37
+            }
+        };
+    }
+
+    private sideSurfaceRect(): StreamRect {
+        return this.streamMode
+            ? this.inventoryStreamLayout().side
+            : { x: 553, y: 205, width: 190, height: 261 };
+    }
+
+    private chatStreamLayout(): { cluster: StreamRect; chat: StreamRect; mode: StreamRect } {
+        const cluster = resolveStreamUiSurfaceRect(this.streamClientProfile, 'chat', 496, 146);
+        return {
+            cluster,
+            chat: {
+                x: cluster.x + 17,
+                y: cluster.y,
+                width: 479,
+                height: 96
+            },
+            mode: {
+                x: cluster.x,
+                y: cluster.y + 96,
+                width: 496,
+                height: 50
+            }
+        };
+    }
+
+    private chatSurfaceRect(): StreamRect {
+        return this.streamMode
+            ? this.chatStreamLayout().chat
+            : { x: 17, y: 357, width: 479, height: 96 };
+    }
+
+    private chatModeRect(): StreamRect {
+        return this.streamMode
+            ? this.chatStreamLayout().mode
+            : { x: 0, y: 453, width: 496, height: 50 };
+    }
+
+    private isMinimapVisible(): boolean {
+        return !this.streamMode || this.streamClientProfile.ui.minimap.visible;
+    }
+
+    private isInventoryVisible(): boolean {
+        return !this.streamMode || this.streamClientProfile.ui.inventory.visible;
+    }
+
+    private isChatVisible(): boolean {
+        return !this.streamMode || this.streamClientProfile.ui.chat.visible || this.chatModalId !== -1 || this.tutComId !== -1 || this.tutComMessage !== null || this.socialInputOpen || this.dialogInputOpen;
+    }
+
+    private drawGameSurface(): void {
+        const rect = this.gameSurfaceRect();
+        this.areaGame?.draw(rect.x, rect.y);
+    }
+
+    private drawMinimapSurface(): void {
+        if (!this.isMinimapVisible()) {
+            return;
+        }
+
+        const rect = this.minimapSurfaceRect();
+        this.areaMap?.draw(rect.x, rect.y);
+    }
+
+    private drawSideSurface(): void {
+        if (!this.isInventoryVisible()) {
+            return;
+        }
+
+        const rect = this.sideSurfaceRect();
+        this.areaSide?.draw(rect.x, rect.y);
+    }
+
+    private drawInventoryTabSurfaces(): void {
+        if (!this.isInventoryVisible()) {
+            return;
+        }
+
+        if (this.streamMode) {
+            const layout = this.inventoryStreamLayout();
+            this.areaBackhmid1?.draw(layout.topTabs.x, layout.topTabs.y);
+            this.areaBackbase2?.draw(layout.bottomTabs.x, layout.bottomTabs.y);
+            return;
+        }
+
+        this.areaBackhmid1?.draw(516, 160);
+        this.areaBackbase2?.draw(496, 466);
+    }
+
+    private drawChatSurface(): void {
+        if (!this.isChatVisible()) {
+            return;
+        }
+
+        const rect = this.chatSurfaceRect();
+        this.areaChat?.draw(rect.x, rect.y);
+    }
+
+    private drawChatModeSurface(): void {
+        if (!this.isChatVisible()) {
+            return;
+        }
+
+        const rect = this.chatModeRect();
+        this.areaBackbase1?.draw(rect.x, rect.y);
+    }
+
+    private menuAreaRect(area: number): StreamRect {
+        if (area === 1) {
+            return this.sideSurfaceRect();
+        }
+
+        if (area === 2) {
+            return this.chatSurfaceRect();
+        }
+
+        return this.gameSurfaceRect();
+    }
+
+    private pointInsideRect(x: number, y: number, rect: StreamRect): boolean {
+        return x > rect.x && y > rect.y && x < rect.x + rect.width && y < rect.y + rect.height;
+    }
+
+    private publishStreamLayout(): void {
+        if (!this.streamMode) {
+            return;
+        }
+
+        publishStreamClientProfile(this.streamClientProfile, {
+            avatarSafeZone: resolveAvatarSafeZone(this.streamClientProfile),
+            game: this.gameSurfaceRect(),
+            minimap: this.minimapSurfaceRect(),
+            inventory: this.inventoryStreamLayout().cluster,
+            chat: this.chatStreamLayout().cluster
+        });
     }
 
     // === BOT SDK PUBLIC METHODS ===
@@ -1835,6 +2023,26 @@ export class Client extends GameShell {
     }
 
     /**
+     * Send a server cheat command through the same packet path as ::chat input.
+     */
+    sendCheat(command: string): boolean {
+        if (!this.ingame || !this.out || !this.localPlayer) {
+            return false;
+        }
+
+        const input = command.startsWith('::') ? command.substring(2) : command;
+        if (input.length <= 0) {
+            return false;
+        }
+        const clipped = input.substring(0, 80);
+
+        this.out.p1Enc(ClientProt.CLIENT_CHEAT);
+        this.out.p1(clipped.length + 1);
+        this.out.pjstr(clipped);
+        return true;
+    }
+
+    /**
      * Use one inventory item on another inventory item (OPHELDU)
      */
     useItemOnItem(sourceSlot: number, targetSlot: number, interfaceId: number = 3214): boolean {
@@ -2664,6 +2872,11 @@ export class Client extends GameShell {
     }
 
     private drawError(): void {
+        if (isGpuPacketReplayRequested()) {
+            console.error(`[Client] Fatal client error in strict GPU packet mode: ${this.errorMessage || 'see error flags'}`);
+            return;
+        }
+
         canvas2d.fillStyle = 'black';
         canvas2d.fillRect(0, 0, this.sWid, this.sHei);
 
@@ -3145,38 +3358,47 @@ export class Client extends GameShell {
 
             const backleft1: Pix32 = Pix32.depack(media, 'backleft1', 0);
             this.areaBackleft1 = new PixMap(backleft1.wi, backleft1.hi);
+            this.areaBackleft1.markCpuRasterWritesSkippable();
             backleft1.quickPlotSprite(0, 0);
 
             const backleft2: Pix32 = Pix32.depack(media, 'backleft2', 0);
             this.areaBackleft2 = new PixMap(backleft2.wi, backleft2.hi);
+            this.areaBackleft2.markCpuRasterWritesSkippable();
             backleft2.quickPlotSprite(0, 0);
 
             const backright1: Pix32 = Pix32.depack(media, 'backright1', 0);
             this.areaBackright1 = new PixMap(backright1.wi, backright1.hi);
+            this.areaBackright1.markCpuRasterWritesSkippable();
             backright1.quickPlotSprite(0, 0);
 
             const backright2: Pix32 = Pix32.depack(media, 'backright2', 0);
             this.areaBackright2 = new PixMap(backright2.wi, backright2.hi);
+            this.areaBackright2.markCpuRasterWritesSkippable();
             backright2.quickPlotSprite(0, 0);
 
             const backtop1: Pix32 = Pix32.depack(media, 'backtop1', 0);
             this.areaBacktop1 = new PixMap(backtop1.wi, backtop1.hi);
+            this.areaBacktop1.markCpuRasterWritesSkippable();
             backtop1.quickPlotSprite(0, 0);
 
             const backvmid1: Pix32 = Pix32.depack(media, 'backvmid1', 0);
             this.areaBackvmid1 = new PixMap(backvmid1.wi, backvmid1.hi);
+            this.areaBackvmid1.markCpuRasterWritesSkippable();
             backvmid1.quickPlotSprite(0, 0);
 
             const backvmid2: Pix32 = Pix32.depack(media, 'backvmid2', 0);
             this.areaBackvmid2 = new PixMap(backvmid2.wi, backvmid2.hi);
+            this.areaBackvmid2.markCpuRasterWritesSkippable();
             backvmid2.quickPlotSprite(0, 0);
 
             const backvmid3: Pix32 = Pix32.depack(media, 'backvmid3', 0);
             this.areaBackvmid3 = new PixMap(backvmid3.wi, backvmid3.hi);
+            this.areaBackvmid3.markCpuRasterWritesSkippable();
             backvmid3.quickPlotSprite(0, 0);
 
             const backhmid2: Pix32 = Pix32.depack(media, 'backhmid2', 0);
             this.areaBackhmid2 = new PixMap(backhmid2.wi, backhmid2.hi);
+            this.areaBackhmid2.markCpuRasterWritesSkippable();
             backhmid2.quickPlotSprite(0, 0);
 
             const randR: number = ((Math.random() * 21.0) | 0) - 10;
@@ -3268,7 +3490,7 @@ export class Client extends GameShell {
             Pix3D.setClipping(190, 261);
             this.sideScanline = Pix3D.scanline;
 
-            Pix3D.setClipping(512, 334);
+            Pix3D.setClipping(this.gameSurfaceWidth, this.gameSurfaceHeight);
             this.gameScanline = Pix3D.scanline;
 
             const distance: Int32Array = new Int32Array(9);
@@ -3279,7 +3501,7 @@ export class Client extends GameShell {
                 distance[x] = (offset * sin) >> 16;
             }
 
-            World.resetVisCalc(distance, 500, 800, 512, 334);
+            World.resetVisCalc(distance, 500, this.streamClientProfile.drawDistance, this.gameSurfaceWidth, this.gameSurfaceHeight);
             WordFilter.unpack(wordenc);
 
             if (!this.mouseTrackingInterval) {
@@ -3653,30 +3875,39 @@ export class Client extends GameShell {
         this.areaBackhmid1 = null;
 
         this.imageTitle0 = new PixMap(128, 265);
+        this.imageTitle0.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle1 = new PixMap(128, 265);
+        this.imageTitle1.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle2 = new PixMap(509, 171);
+        this.imageTitle2.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle3 = new PixMap(360, 132);
+        this.imageTitle3.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle4 = new PixMap(360, 200);
+        this.imageTitle4.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle5 = new PixMap(202, 238);
+        this.imageTitle5.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle6 = new PixMap(203, 238);
+        this.imageTitle6.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle7 = new PixMap(74, 94);
+        this.imageTitle7.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.imageTitle8 = new PixMap(75, 94);
+        this.imageTitle8.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         if (this.title) {
@@ -3693,11 +3924,17 @@ export class Client extends GameShell {
         }
 
         const background: Pix32 = await Pix32.fromJpeg(this.title, 'title.dat');
+        this.imageTitleFlame0 = new Pix32(128, 265);
+        this.imageTitleFlame1 = new Pix32(128, 265);
 
         this.imageTitle0?.setPixels();
         background.quickPlotSprite(0, 0);
+        this.imageTitleFlame0.setPixels();
+        background.quickPlotSprite(0, 0);
 
         this.imageTitle1?.setPixels();
+        background.quickPlotSprite(-637, 0);
+        this.imageTitleFlame1.setPixels();
         background.quickPlotSprite(-637, 0);
 
         this.imageTitle2?.setPixels();
@@ -3726,8 +3963,12 @@ export class Client extends GameShell {
 
         this.imageTitle0?.setPixels();
         background.quickPlotSprite(382, 0);
+        this.imageTitleFlame0.setPixels();
+        background.quickPlotSprite(382, 0);
 
         this.imageTitle1?.setPixels();
+        background.quickPlotSprite(-255, 0);
+        this.imageTitleFlame1.setPixels();
         background.quickPlotSprite(-255, 0);
 
         this.imageTitle2?.setPixels();
@@ -3770,9 +4011,9 @@ export class Client extends GameShell {
         }
 
         this.drawProgress('Connecting to fileserver', 10).then((): void => {
-            if (!this.titleFlames && this.imageTitle0 && this.imageTitle1) {
+            if (!this.titleFlames && this.imageTitle0 && this.imageTitle1 && this.imageTitleFlame0 && this.imageTitleFlame1) {
                 this.titleFlames = new TitleFlames(this.imageRunes);
-                this.titleFlames.setupFire(this.imageTitle0, this.imageTitle1);
+                this.titleFlames.setupFire(this.imageTitle0, this.imageTitle1, this.imageTitleFlame0, this.imageTitleFlame1);
                 this.titleFlames.start();
             }
         });
@@ -4081,6 +4322,8 @@ export class Client extends GameShell {
 
         this.imageTitlebox = null;
         this.imageTitlebutton = null;
+        this.imageTitleFlame0 = null;
+        this.imageTitleFlame1 = null;
         this.imageRunes = [];
     }
 
@@ -4103,21 +4346,29 @@ export class Client extends GameShell {
         this.imageTitle8 = null;
 
         this.areaChat = new PixMap(479, 96);
+        this.areaChat.markCpuRasterWritesSkippable();
 
         this.areaMap = new PixMap(172, 156);
+        this.areaMap.markCpuRasterWritesSkippable();
         Pix2D.cls();
         this.mapback?.plotSprite(0, 0);
 
         this.areaSide = new PixMap(190, 261);
+        this.areaSide.markCpuRasterWritesSkippable();
 
-        this.areaGame = new PixMap(512, 334);
+        this.areaGame = new PixMap(this.gameSurfaceWidth, this.gameSurfaceHeight);
+        this.areaGame.markCpuRasterWritesSkippable();
         Pix2D.cls();
 
         this.areaBackbase1 = new PixMap(496, 50);
         this.areaBackbase2 = new PixMap(269, 37);
         this.areaBackhmid1 = new PixMap(249, 45);
+        this.areaBackbase1.markCpuRasterWritesSkippable();
+        this.areaBackbase2.markCpuRasterWritesSkippable();
+        this.areaBackhmid1.markCpuRasterWritesSkippable();
 
         this.redrawFrame = true;
+        this.publishStreamLayout();
     }
 
     private async gameLoop(): Promise<void> {
@@ -4599,7 +4850,7 @@ export class Client extends GameShell {
         this.p12?.centreString('Connection lost', 256, 143, Colour.WHITE);
         this.p12?.centreString('Please wait - attempting to reestablish', 257, 159, Colour.BLACK);
         this.p12?.centreString('Please wait - attempting to reestablish', 256, 158, Colour.WHITE);
-        this.areaGame?.draw(4, 4);
+        this.drawGameSurface();
 
         this.minimapState = 0;
         this.minimapFlagX = 0;
@@ -4628,11 +4879,12 @@ export class Client extends GameShell {
         this.addPrivateChatOptions();
         this.lastOverComId = 0;
 
-        if (this.mouseX > 4 && this.mouseY > 4 && this.mouseX < 516 && this.mouseY < 338) {
+        const gameRect = this.gameSurfaceRect();
+        if (this.pointInsideRect(this.mouseX, this.mouseY, gameRect)) {
             if (this.mainModalId === -1) {
                 this.addWorldOptions();
             } else {
-                this.addComponentOptions(IfType.list[this.mainModalId], this.mouseX, this.mouseY, 4, 4, 0);
+                this.addComponentOptions(IfType.list[this.mainModalId], this.mouseX, this.mouseY, gameRect.x, gameRect.y, 0);
             }
         }
 
@@ -4642,11 +4894,12 @@ export class Client extends GameShell {
 
         this.lastOverComId = 0;
 
-        if (this.mouseX > 553 && this.mouseY > 205 && this.mouseX < 743 && this.mouseY < 466) {
+        const sideRect = this.sideSurfaceRect();
+        if (this.isInventoryVisible() && this.pointInsideRect(this.mouseX, this.mouseY, sideRect)) {
             if (this.sideModalId !== -1) {
-                this.addComponentOptions(IfType.list[this.sideModalId], this.mouseX, this.mouseY, 553, 205, 0);
+                this.addComponentOptions(IfType.list[this.sideModalId], this.mouseX, this.mouseY, sideRect.x, sideRect.y, 0);
             } else if (this.sideIcon[this.activeIcon] !== -1) {
-                this.addComponentOptions(IfType.list[this.sideIcon[this.activeIcon]], this.mouseX, this.mouseY, 553, 205, 0);
+                this.addComponentOptions(IfType.list[this.sideIcon[this.activeIcon]], this.mouseX, this.mouseY, sideRect.x, sideRect.y, 0);
             }
         }
 
@@ -4657,11 +4910,12 @@ export class Client extends GameShell {
 
         this.lastOverComId = 0;
 
-        if (this.mouseX > 17 && this.mouseY > 357 && this.mouseX < 496 && this.mouseY < 453) {
+        const chatRect = this.chatSurfaceRect();
+        if (this.isChatVisible() && this.pointInsideRect(this.mouseX, this.mouseY, chatRect)) {
             if (this.chatModalId !== -1) {
-                this.addComponentOptions(IfType.list[this.chatModalId], this.mouseX, this.mouseY, 17, 357, 0);
-            } else if (this.mouseY < 434 && this.mouseX < 426) {
-                this.addChatOptions(this.mouseX - 17, this.mouseY - 357);
+                this.addComponentOptions(IfType.list[this.chatModalId], this.mouseX, this.mouseY, chatRect.x, chatRect.y, 0);
+            } else if (this.mouseY < chatRect.y + 77 && this.mouseX < chatRect.x + 409) {
+                this.addChatOptions(this.mouseX - chatRect.x, this.mouseY - chatRect.y);
             }
         }
 
@@ -4730,7 +4984,9 @@ export class Client extends GameShell {
                 if ((type === 3 || type === 7) && (type === 7 || this.chatPrivateMode === 0 || (this.chatPrivateMode === 1 && this.isFriend(sender)))) {
                     const y: number = 329 - line * 13;
 
-                    if (this.mouseX > 4 && this.mouseX < 516 && this.mouseY - 4 > y - 10 && this.mouseY - 4 <= y + 3) {
+                    const gameRect = this.gameSurfaceRect();
+                    const localMouseY = this.mouseY - gameRect.y;
+                    if (this.mouseX > gameRect.x && this.mouseX < gameRect.x + gameRect.width && localMouseY > y - 10 && localMouseY <= y + 3) {
                         if (this.staffmodlevel) {
                             this.menuOption[this.menuNumEntries] = 'Report abuse @whi@' + sender;
                             this.menuAction[this.menuNumEntries] = MiniMenuAction._PRIORITY + MiniMenuAction.ABUSE_REPORT;
@@ -4849,8 +5105,13 @@ export class Client extends GameShell {
             return;
         }
 
-        let x: number = this.mouseClickX - 25 - 550;
-        let y: number = this.mouseClickY - 4 - 4;
+        if (!this.isMinimapVisible()) {
+            return;
+        }
+
+        const minimapRect = this.minimapSurfaceRect();
+        let x: number = this.mouseClickX - 25 - minimapRect.x;
+        let y: number = this.mouseClickY - 4 - minimapRect.y;
 
         if (x < 0 || y < 0 || x >= 146 || y >= 151) {
             return;
@@ -4891,6 +5152,11 @@ export class Client extends GameShell {
     // todo: order
     private iconLoop(): void {
         if (this.mouseClickButton !== 1) {
+            return;
+        }
+
+        if (this.streamMode) {
+            this.streamIconLoop();
             return;
         }
 
@@ -4953,13 +5219,70 @@ export class Client extends GameShell {
         }
     }
 
+    private streamIconLoop(): void {
+        if (!this.isInventoryVisible()) {
+            return;
+        }
+
+        const layout = this.inventoryStreamLayout();
+        const x = this.mouseClickX;
+        const y = this.mouseClickY;
+        const topIconBounds = [
+            [23, 57, 8, 45],
+            [53, 83, 8, 45],
+            [81, 111, 8, 45],
+            [109, 153, 8, 43],
+            [150, 180, 8, 45],
+            [178, 208, 8, 45],
+            [206, 240, 9, 45]
+        ];
+        const bottomIconBounds = [
+            [44, 78, 0, 36],
+            [76, 106, 0, 37],
+            [103, 133, 0, 37],
+            [131, 175, 1, 36],
+            [173, 203, 0, 37],
+            [200, 230, 0, 37],
+            [228, 262, 0, 36]
+        ];
+
+        for (let i = 0; i < topIconBounds.length; i++) {
+            const [left, right, top, bottom] = topIconBounds[i];
+            if (x >= layout.topTabs.x + left && x <= layout.topTabs.x + right && y >= layout.topTabs.y + top && y < layout.topTabs.y + bottom && this.sideIcon[i] !== -1) {
+                this.redrawSide = true;
+                this.activeIcon = i;
+                this.redrawIcons = true;
+                return;
+            }
+        }
+
+        for (let i = 0; i < bottomIconBounds.length; i++) {
+            const icon = i + 7;
+            const [left, right, top, bottom] = bottomIconBounds[i];
+            if (x >= layout.bottomTabs.x + left && x <= layout.bottomTabs.x + right && y >= layout.bottomTabs.y + top && y < layout.bottomTabs.y + bottom && this.sideIcon[icon] !== -1) {
+                this.redrawSide = true;
+                this.activeIcon = icon;
+                this.redrawIcons = true;
+                return;
+            }
+        }
+    }
+
     // todo: order
     private chatModeLoop(): void {
         if (this.mouseClickButton !== 1) {
             return;
         }
 
-        if (this.mouseClickX >= 6 && this.mouseClickX <= 106 && this.mouseClickY >= 467 && this.mouseClickY <= 499) {
+        if (!this.isChatVisible()) {
+            return;
+        }
+
+        const rect = this.chatModeRect();
+        const x = this.mouseClickX - rect.x;
+        const y = this.mouseClickY - rect.y;
+
+        if (x >= 6 && x <= 106 && y >= 14 && y <= 46) {
             this.chatPublicMode = (this.chatPublicMode + 1) % 4;
             this.redrawChatMode = true;
             this.redrawChat = true;
@@ -4968,7 +5291,7 @@ export class Client extends GameShell {
             this.out.p1(this.chatPublicMode);
             this.out.p1(this.chatPrivateMode);
             this.out.p1(this.chatTradeMode);
-        } else if (this.mouseClickX >= 135 && this.mouseClickX <= 235 && this.mouseClickY >= 467 && this.mouseClickY <= 499) {
+        } else if (x >= 135 && x <= 235 && y >= 14 && y <= 46) {
             this.chatPrivateMode = (this.chatPrivateMode + 1) % 3;
             this.redrawChatMode = true;
             this.redrawChat = true;
@@ -4977,7 +5300,7 @@ export class Client extends GameShell {
             this.out.p1(this.chatPublicMode);
             this.out.p1(this.chatPrivateMode);
             this.out.p1(this.chatTradeMode);
-        } else if (this.mouseClickX >= 273 && this.mouseClickX <= 373 && this.mouseClickY >= 467 && this.mouseClickY <= 499) {
+        } else if (x >= 273 && x <= 373 && y >= 14 && y <= 46) {
             this.chatTradeMode = (this.chatTradeMode + 1) % 3;
             this.redrawChatMode = true;
             this.redrawChat = true;
@@ -4986,7 +5309,7 @@ export class Client extends GameShell {
             this.out.p1(this.chatPublicMode);
             this.out.p1(this.chatPrivateMode);
             this.out.p1(this.chatTradeMode);
-        } else if (this.mouseClickX >= 412 && this.mouseClickX <= 512 && this.mouseClickY >= 467 && this.mouseClickY <= 499) {
+        } else if (x >= 412 && x <= 512 && y >= 14 && y <= 46) {
             this.closeModal();
 
             this.reportAbuseInput = '';
@@ -5194,9 +5517,7 @@ export class Client extends GameShell {
                                     // empty
                                 }
                             } else if (this.chatInput.startsWith('::')) {
-                                this.out.p1Enc(ClientProt.CLIENT_CHEAT);
-                                this.out.p1(this.chatInput.length - 2 + 1);
-                                this.out.pjstr(this.chatInput.substring(2));
+                                this.sendCheat(this.chatInput);
                             } else {
                                 let colour: number = 0;
                                 if (this.chatInput.startsWith('yellow:')) {
@@ -6009,15 +6330,17 @@ export class Client extends GameShell {
         if (this.redrawFrame) {
             this.redrawFrame = false;
 
-            this.areaBackleft1?.draw(0, 4);
-            this.areaBackleft2?.draw(0, 357);
-            this.areaBackright1?.draw(722, 4);
-            this.areaBackright2?.draw(743, 205);
-            this.areaBacktop1?.draw(0, 0);
-            this.areaBackvmid1?.draw(516, 4);
-            this.areaBackvmid2?.draw(516, 205);
-            this.areaBackvmid3?.draw(496, 357);
-            this.areaBackhmid2?.draw(0, 338);
+            if (!this.streamMode) {
+                this.areaBackleft1?.draw(0, 4);
+                this.areaBackleft2?.draw(0, 357);
+                this.areaBackright1?.draw(722, 4);
+                this.areaBackright2?.draw(743, 205);
+                this.areaBacktop1?.draw(0, 0);
+                this.areaBackvmid1?.draw(516, 4);
+                this.areaBackvmid2?.draw(516, 205);
+                this.areaBackvmid3?.draw(496, 357);
+                this.areaBackhmid2?.draw(0, 338);
+            }
 
             this.redrawSide = true;
             this.redrawChat = true;
@@ -6025,8 +6348,8 @@ export class Client extends GameShell {
             this.redrawChatMode = true;
 
             if (this.sceneState !== 2) {
-                this.areaGame?.draw(4, 4);
-                this.areaMap?.draw(550, 4);
+                this.drawGameSurface();
+                this.drawMinimapSurface();
             }
         }
 
@@ -6061,8 +6384,9 @@ export class Client extends GameShell {
         if (this.chatModalId === -1) {
             this.chatInterface.scrollPos = this.chatScrollHeight - this.chatScrollPos - 77;
 
-            if (this.mouseX > 448 && this.mouseX < 560 && this.mouseY > 332) {
-                this.doScrollbar(this.mouseX - 17, this.mouseY - 357, this.chatScrollHeight, 77, false, 463, 0, this.chatInterface);
+            const chatRect = this.chatSurfaceRect();
+            if (this.isChatVisible() && this.mouseX > chatRect.x + 431 && this.mouseX < chatRect.x + 543 && this.mouseY > chatRect.y - 25) {
+                this.doScrollbar(this.mouseX - chatRect.x, this.mouseY - chatRect.y, this.chatScrollHeight, 77, false, 463, 0, this.chatInterface);
             }
 
             let offset: number = this.chatScrollHeight - this.chatInterface.scrollPos - 77;
@@ -6110,7 +6434,7 @@ export class Client extends GameShell {
 
         if (this.sceneState === 2) {
             this.minimapDraw();
-            this.areaMap?.draw(550, 4);
+            this.drawMinimapSurface();
         }
 
         if (this.tutFlashIcon !== -1) {
@@ -6176,8 +6500,6 @@ export class Client extends GameShell {
                 }
             }
 
-            this.areaBackhmid1?.draw(516, 160);
-
             this.areaBackbase2?.setPixels();
             this.backbase2?.plotSprite(0, 0);
 
@@ -6225,7 +6547,7 @@ export class Client extends GameShell {
                 }
             }
 
-            this.areaBackbase2?.draw(496, 466);
+            this.drawInventoryTabSurfaces();
 
             this.areaGame?.setPixels();
         }
@@ -6274,7 +6596,7 @@ export class Client extends GameShell {
 
             this.p12?.centreStringTag('Report abuse', 458, 33, Colour.WHITE, true);
 
-            this.areaBackbase1?.draw(0, 453);
+            this.drawChatModeSurface();
 
             this.areaGame?.setPixels();
         }
@@ -6357,8 +6679,9 @@ export class Client extends GameShell {
         const cycle = Pix3D.cycle;
         Model.mouseCheck = true;
         Model.pickedCount = 0;
-        Model.mouseX = this.mouseX - 4;
-        Model.mouseY = this.mouseY - 4;
+        const gameRect = this.gameSurfaceRect();
+        Model.mouseX = this.mouseX - gameRect.x;
+        Model.mouseY = this.mouseY - gameRect.y;
 
         Pix2D.cls();
         this.world?.renderAll(this.camX, this.camY, this.camZ, level, this.camYaw, this.camPitch);
@@ -6367,7 +6690,7 @@ export class Client extends GameShell {
         this.coordArrow();
         this.textureRunAnims(cycle);
         this.otherOverlays();
-        this.areaGame?.draw(4, 4);
+        this.drawGameSurface();
 
         this.camX = camX;
         this.camY = camY;
@@ -6888,7 +7211,7 @@ export class Client extends GameShell {
                 } else if (this.chatEffect[i] === 2) {
                     const w: number = this.b12?.stringWid(message) ?? 0;
                     const offsetX: number = ((150 - this.chatTimer[i]) * (w + 100)) / 150;
-                    Pix2D.setClipping(this.projectX - 50, 0, this.projectX + 50, 334);
+                    Pix2D.setClipping(this.projectX - 50, 0, this.projectX + 50, this.gameSurfaceHeight);
                     this.b12?.drawString(message, this.projectX + 50 - offsetX, this.projectY + 1, Colour.BLACK);
                     this.b12?.drawString(message, this.projectX + 50 - offsetX, this.projectY, colour);
                     Pix2D.resetClipping();
@@ -7197,7 +7520,7 @@ export class Client extends GameShell {
             this.areaGame?.setPixels();
             this.p12?.centreString('Loading - please wait.', 257, 151, Colour.BLACK);
             this.p12?.centreString('Loading - please wait.', 256, 150, Colour.WHITE);
-            this.areaGame?.draw(4, 4);
+            this.drawGameSurface();
             this.sceneState = 1;
             this.sceneLoadStartTime = performance.now();
         }
@@ -8989,7 +9312,7 @@ export class Client extends GameShell {
                 this.areaGame?.setPixels();
                 this.p12?.centreString('Loading - please wait.', 257, 151, Colour.BLACK);
                 this.p12?.centreString('Loading - please wait.', 256, 150, Colour.WHITE);
-                this.areaGame?.draw(4, 4);
+                this.drawGameSurface();
 
                 let regions = 0;
                 for (let x = ((this.mapBuildCentreZoneX - 6) / 8) | 0; x <= (((this.mapBuildCentreZoneX + 6) / 8) | 0); x++) {
@@ -10421,7 +10744,8 @@ export class Client extends GameShell {
         }
 
         let button: number = this.mouseClickButton;
-        if (this.targetMode === 1 && this.mouseClickX >= 516 && this.mouseClickY >= 160 && this.mouseClickX <= 765 && this.mouseClickY <= 205) {
+        const inventoryCluster = this.streamMode ? this.inventoryStreamLayout().cluster : { x: 516, y: 160, width: 249, height: 45 };
+        if (this.targetMode === 1 && this.mouseClickX >= inventoryCluster.x && this.mouseClickY >= inventoryCluster.y && this.mouseClickX <= inventoryCluster.x + inventoryCluster.width && this.mouseClickY <= inventoryCluster.y + inventoryCluster.height) {
             button = 0;
         }
 
@@ -10434,16 +10758,9 @@ export class Client extends GameShell {
                 let clickX: number = this.mouseClickX;
                 let clickY: number = this.mouseClickY;
 
-                if (this.menuArea === 0) {
-                    clickX -= 4;
-                    clickY -= 4;
-                } else if (this.menuArea === 1) {
-                    clickX -= 553;
-                    clickY -= 205;
-                } else if (this.menuArea === 2) {
-                    clickX -= 17;
-                    clickY -= 357;
-                }
+                const menuAreaRect = this.menuAreaRect(this.menuArea);
+                clickX -= menuAreaRect.x;
+                clickY -= menuAreaRect.y;
 
                 let option: number = -1;
                 for (let i: number = 0; i < this.menuNumEntries; i++) {
@@ -10468,16 +10785,9 @@ export class Client extends GameShell {
                 let x: number = this.mouseX;
                 let y: number = this.mouseY;
 
-                if (this.menuArea === 0) {
-                    x -= 4;
-                    y -= 4;
-                } else if (this.menuArea === 1) {
-                    x -= 553;
-                    y -= 205;
-                } else if (this.menuArea === 2) {
-                    x -= 17;
-                    y -= 357;
-                }
+                const menuAreaRect = this.menuAreaRect(this.menuArea);
+                x -= menuAreaRect.x;
+                y -= menuAreaRect.y;
 
                 if (x < this.menuX - 10 || x > this.menuX + this.menuWidth + 10 || y < this.menuY - 10 || y > this.menuY + this.menuHeight + 10) {
                     this.isMenuOpen = false;
@@ -10553,16 +10863,9 @@ export class Client extends GameShell {
 
         let mouseX: number = this.mouseX;
         let mouseY: number = this.mouseY;
-        if (this.menuArea === 0) {
-            mouseX -= 4;
-            mouseY -= 4;
-        } else if (this.menuArea === 1) {
-            mouseX -= 553;
-            mouseY -= 205;
-        } else if (this.menuArea === 2) {
-            mouseX -= 17;
-            mouseY -= 357;
-        }
+        const menuAreaRect = this.menuAreaRect(this.menuArea);
+        mouseX -= menuAreaRect.x;
+        mouseY -= menuAreaRect.y;
 
         for (let i: number = 0; i < this.menuNumEntries; i++) {
             const optionY: number = y + (this.menuNumEntries - 1 - i) * 15 + 31;
@@ -10616,18 +10919,19 @@ export class Client extends GameShell {
         let x: number;
         let y: number;
 
-        if (this.mouseClickX > 4 && this.mouseClickY > 4 && this.mouseClickX < 516 && this.mouseClickY < 338) {
-            x = this.mouseClickX - ((width / 2) | 0) - 4;
-            if (x + width > 512) {
-                x = 512 - width;
+        const gameRect = this.gameSurfaceRect();
+        if (this.pointInsideRect(this.mouseClickX, this.mouseClickY, gameRect)) {
+            x = this.mouseClickX - ((width / 2) | 0) - gameRect.x;
+            if (x + width > gameRect.width) {
+                x = gameRect.width - width;
             }
             if (x < 0) {
                 x = 0;
             }
 
-            y = this.mouseClickY - 4;
-            if (y + height > 334) {
-                y = 334 - height;
+            y = this.mouseClickY - gameRect.y;
+            if (y + height > gameRect.height) {
+                y = gameRect.height - height;
             }
             if (y < 0) {
                 y = 0;
@@ -10642,19 +10946,20 @@ export class Client extends GameShell {
         }
 
         // the sidebar/tabs area
-        if (this.mouseClickX > 553 && this.mouseClickY > 205 && this.mouseClickX < 743 && this.mouseClickY < 466) {
-            x = this.mouseClickX - ((width / 2) | 0) - 553;
+        const sideRect = this.sideSurfaceRect();
+        if (this.isInventoryVisible() && this.pointInsideRect(this.mouseClickX, this.mouseClickY, sideRect)) {
+            x = this.mouseClickX - ((width / 2) | 0) - sideRect.x;
             if (x < 0) {
                 x = 0;
-            } else if (x + width > 190) {
-                x = 190 - width;
+            } else if (x + width > sideRect.width) {
+                x = sideRect.width - width;
             }
 
-            y = this.mouseClickY - 205;
+            y = this.mouseClickY - sideRect.y;
             if (y < 0) {
                 y = 0;
-            } else if (y + height > 261) {
-                y = 261 - height;
+            } else if (y + height > sideRect.height) {
+                y = sideRect.height - height;
             }
 
             this.isMenuOpen = true;
@@ -10666,19 +10971,20 @@ export class Client extends GameShell {
         }
 
         // the chatbox area
-        if (this.mouseClickX > 17 && this.mouseClickY > 357 && this.mouseClickX < 496 && this.mouseClickY < 453) {
-            x = this.mouseClickX - ((width / 2) | 0) - 17;
+        const chatRect = this.chatSurfaceRect();
+        if (this.isChatVisible() && this.pointInsideRect(this.mouseClickX, this.mouseClickY, chatRect)) {
+            x = this.mouseClickX - ((width / 2) | 0) - chatRect.x;
             if (x < 0) {
                 x = 0;
-            } else if (x + width > 479) {
-                x = 479 - width;
+            } else if (x + width > chatRect.width) {
+                x = chatRect.width - width;
             }
 
-            y = this.mouseClickY - 357;
+            y = this.mouseClickY - chatRect.y;
             if (y < 0) {
                 y = 0;
-            } else if (y + height > 96) {
-                y = 96 - height;
+            } else if (y + height > chatRect.height) {
+                y = chatRect.height - height;
             }
 
             this.isMenuOpen = true;
@@ -11373,10 +11679,11 @@ export class Client extends GameShell {
         }
 
         if (action === MiniMenuAction.WALK) {
+            const gameRect = this.gameSurfaceRect();
             if (this.isMenuOpen) {
-                this.world?.updateMousePicking(b - 4, c - 4);
+                this.world?.updateMousePicking(b - gameRect.x, c - gameRect.y);
             } else {
-                this.world?.updateMousePicking(this.mouseClickX - 4, this.mouseClickY - 4);
+                this.world?.updateMousePicking(this.mouseClickX - gameRect.x, this.mouseClickY - gameRect.y);
             }
         }
 
@@ -13272,7 +13579,7 @@ export class Client extends GameShell {
             this.drawMinimenu();
         }
 
-        this.areaSide?.draw(553, 205);
+        this.drawSideSurface();
 
         this.areaGame?.setPixels();
         if (this.gameScanline) {
@@ -13427,7 +13734,7 @@ export class Client extends GameShell {
             this.drawMinimenu();
         }
 
-        this.areaChat?.draw(17, 357);
+        this.drawChatSurface();
 
         this.areaGame?.setPixels();
         if (this.gameScanline) {
@@ -13444,14 +13751,7 @@ export class Client extends GameShell {
 
         if (this.minimapState == 2) {
             if (this.mapback !== null) {
-                const mask = this.mapback.data;
-                const pixels = Pix2D.pixels;
-                const len = mask.length;
-                for (let i = 0; i < len; i++) {
-                    if (mask[i] === 0) {
-                        pixels[i] = 0;
-                    }
-                }
+                this.clearMapbackTransparentPixels(this.mapback);
             }
 
             this.compass?.scanlineRotatePlotSprite(0, 0, 33, 33, 25, 25, this.orbitCameraYaw, 256, this.compassMaskLineOffsets, this.compassMaskLineLengths);
@@ -13550,6 +13850,29 @@ export class Client extends GameShell {
         Pix2D.fillRect(97, 78, 3, 3, Colour.WHITE);
 
         this.areaGame?.setPixels();
+    }
+
+    private clearMapbackTransparentPixels(mask: Pix8): void {
+        const maskWidth = mask.wi;
+        const maskHeight = mask.hi;
+        for (let y = 0; y < maskHeight; y++) {
+            const row = y * maskWidth;
+            let x = 0;
+            while (x < maskWidth) {
+                while (x < maskWidth && mask.data[row + x] !== 0) {
+                    x++;
+                }
+
+                const startX = x;
+                while (x < maskWidth && mask.data[row + x] === 0) {
+                    x++;
+                }
+
+                if (x > startX) {
+                    Pix2D.fillRect(startX, y, x - startX, 1, Colour.BLACK);
+                }
+            }
+        }
     }
 
     minimapDrawArrow(dx: number, dy: number, image: Pix32 | null) {
@@ -14008,43 +14331,40 @@ export class Client extends GameShell {
     }
 
     private insideGame() {
-        const x1: number = 4;
-        const y1: number = 4;
-        const x2: number = x1 + 512;
-        const y2: number = y1 + 334;
-        return this.ingame && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
+        const rect = this.gameSurfaceRect();
+        return this.ingame && this.mouseX >= rect.x && this.mouseX <= rect.x + rect.width && this.mouseY >= rect.y && this.mouseY <= rect.y + rect.height;
     }
 
     private insideSide() {
-        const x1: number = 553;
-        const y1: number = 205;
-        const x2: number = x1 + 190;
-        const y2: number = y1 + 261;
-        return this.ingame && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
+        const rect = this.sideSurfaceRect();
+        return this.ingame && this.isInventoryVisible() && this.mouseX >= rect.x && this.mouseX <= rect.x + rect.width && this.mouseY >= rect.y && this.mouseY <= rect.y + rect.height;
     }
 
     private insideChat() {
-        const x1: number = 480;
-        const y1: number = 357;
+        const rect = this.chatSurfaceRect();
+        const x1: number = rect.x + 463;
+        const y1: number = rect.y;
         const x2: number = x1 + 16;
         const y2: number = y1 + 77;
-        return this.ingame && !this.dialogInputOpen && !this.socialInputOpen && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
+        return this.ingame && this.isChatVisible() && !this.dialogInputOpen && !this.socialInputOpen && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
     }
 
     private insideChatInput() {
-        const x1: number = 17;
-        const y1: number = 434;
+        const rect = this.chatSurfaceRect();
+        const x1: number = rect.x;
+        const y1: number = rect.y + 77;
         const x2: number = x1 + 479;
         const y2: number = y1 + 26;
-        return this.ingame && this.chatModalId === -1 && !this.dialogInputOpen && !this.socialInputOpen && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
+        return this.ingame && this.isChatVisible() && this.chatModalId === -1 && !this.dialogInputOpen && !this.socialInputOpen && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
     }
 
     protected insideChatPopup() {
-        const x1: number = 17;
-        const y1: number = 357;
+        const rect = this.chatSurfaceRect();
+        const x1: number = rect.x;
+        const y1: number = rect.y;
         const x2: number = x1 + 479;
         const y2: number = y1 + 96;
-        return this.ingame && (this.dialogInputOpen || this.socialInputOpen) && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
+        return this.ingame && this.isChatVisible() && (this.dialogInputOpen || this.socialInputOpen) && this.mouseX >= x1 && this.mouseX <= x2 && this.mouseY >= y1 && this.mouseY <= y2;
     }
 
     private insideReportAbuse() {

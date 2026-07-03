@@ -1,4 +1,13 @@
 import Linkable2 from '#/datastruct/Linkable2.js';
+import {
+    recordClear,
+    recordClip,
+    recordFillCircle,
+    recordFillRect,
+    recordLine,
+    recordSurfaceTarget,
+    gpuRenderPackets
+} from '#/graphics/GpuRenderPackets.js';
 
 export default class Pix2D extends Linkable2 {
     static pixels: Int32Array = new Int32Array();
@@ -16,6 +25,7 @@ export default class Pix2D extends Linkable2 {
     static maxY: number = 0;
 
     static setPixels(pixels: Int32Array, width: number, height: number): void {
+        recordSurfaceTarget(pixels, width, height);
         this.pixels = pixels;
         this.width = width;
         this.height = height;
@@ -29,6 +39,7 @@ export default class Pix2D extends Linkable2 {
         this.clipMaxY = this.height;
         this.sizeX = this.clipMaxX - 1;
         this.maxX = (this.clipMaxX / 2) | 0;
+        recordClip(this.clipMinX, this.clipMinY, this.clipMaxX, this.clipMaxY);
     }
 
     static setClipping(x1: number, y1: number, x2: number, y2: number): void {
@@ -56,9 +67,16 @@ export default class Pix2D extends Linkable2 {
         this.sizeX = this.clipMaxX - 1;
         this.maxX = (this.clipMaxX / 2) | 0;
         this.maxY = (this.clipMaxY / 2) | 0;
+        recordClip(this.clipMinX, this.clipMinY, this.clipMaxX, this.clipMaxY);
     }
 
     static cls(): void {
+        recordClear();
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         const len: number = this.width * this.height;
         for (let i: number = 0; i < len; i++) {
             this.pixels[i] = 0;
@@ -66,6 +84,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static fillRectTrans(x: number, y: number, width: number, height: number, rgb: number, alpha: number): void {
+        recordFillRect(x, y, width, height, rgb, alpha);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (x < this.clipMinX) {
             width -= this.clipMinX - x;
             x = this.clipMinX;
@@ -103,6 +127,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static fillRect(x: number, y: number, width: number, height: number, rgb: number): void {
+        recordFillRect(x, y, width, height, rgb);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (x < this.clipMinX) {
             width -= this.clipMinX - x;
             x = this.clipMinX;
@@ -149,6 +179,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static hline(x: number, y: number, width: number, rgb: number): void {
+        recordLine('h', x, y, width, rgb);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (y < this.clipMinY || y >= this.clipMaxY) {
             return;
         }
@@ -169,6 +205,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static hlineTrans(x: number, y: number, width: number, rgb: number, alpha: number): void {
+        recordLine('h', x, y, width, rgb, alpha);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (y < this.clipMinY || y >= this.clipMaxY) {
             return;
         }
@@ -198,6 +240,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static vline(x: number, y: number, height: number, rgb: number): void {
+        recordLine('v', x, y, height, rgb);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (x < this.clipMinX || x >= this.clipMaxX) {
             return;
         }
@@ -218,6 +266,12 @@ export default class Pix2D extends Linkable2 {
     }
 
     static vlineTrans(x: number, y: number, height: number, rgb: number, alpha: number): void {
+        recordLine('v', x, y, height, rgb, alpha);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         if (x < this.clipMinX || x >= this.clipMaxX) {
             return;
         }
@@ -249,6 +303,12 @@ export default class Pix2D extends Linkable2 {
     // mapview applet:
 
     static fillCircle(xCenter: number, yCenter: number, yRadius: number, rgb: number, alpha: number): void {
+        recordFillCircle(xCenter, yCenter, yRadius, rgb, alpha);
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         const invAlpha: number = 256 - alpha;
         const r0: number = ((rgb >> 16) & 0xff) * alpha;
         const g0: number = ((rgb >> 8) & 0xff) * alpha;

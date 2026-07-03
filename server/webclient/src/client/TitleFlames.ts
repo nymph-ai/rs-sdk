@@ -4,10 +4,12 @@ import { Colour } from '#/graphics/Colour.js';
 import Pix8 from '#/graphics/Pix8.js';
 import Pix32 from '#/graphics/Pix32.js';
 import PixMap from '#/graphics/PixMap.js';
+import { gpuRenderPackets, recordDynamicIndexedSprite } from '#/graphics/GpuRenderPackets.js';
 
 const FLAME_WIDTH = 128;
 const FLAME_HEIGHT = 256;
 const TITLE_FLAME_PIXELS = 33920;
+const TITLE_FLAME_HEIGHT = 265;
 
 export default class TitleFlames {
     private readonly runes: Pix8[];
@@ -36,14 +38,11 @@ export default class TitleFlames {
         this.runes = runes;
     }
 
-    setupFire(titleLeft: PixMap, titleRight: PixMap): void {
+    setupFire(titleLeft: PixMap, titleRight: PixMap, flameLeft: Pix32, flameRight: Pix32): void {
         this.titleLeft = titleLeft;
         this.titleRight = titleRight;
-        this.flameLeft = new Pix32(FLAME_WIDTH, 265);
-        this.flameRight = new Pix32(FLAME_WIDTH, 265);
-
-        this.flameLeft.data.set(titleLeft.data.subarray(0, TITLE_FLAME_PIXELS));
-        this.flameRight.data.set(titleRight.data.subarray(0, TITLE_FLAME_PIXELS));
+        this.flameLeft = flameLeft;
+        this.flameRight = flameRight;
 
         this.flameGradient0 = new Int32Array(256);
         for (let index: number = 0; index < 64; index++) {
@@ -268,6 +267,33 @@ export default class TitleFlames {
             return;
         }
 
+        if (gpuRenderPackets.shouldSkipCpuRasterWrites()) {
+            title.setPixels();
+            base.quickPlotSprite(0, 0);
+            recordDynamicIndexedSprite(
+                this,
+                side === 0 ? 'title-flame-left' : 'title-flame-right',
+                FLAME_WIDTH,
+                FLAME_HEIGHT,
+                this.flameBuffer3,
+                this.flameGradient,
+                this.flameLineOffset,
+                side === 0 ? 'titleFlameLeft' : 'titleFlameRight',
+                0,
+                0,
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT,
+                0,
+                0,
+                0,
+                0,
+                FLAME_WIDTH,
+                TITLE_FLAME_HEIGHT
+            );
+            gpuRenderPackets.recordCpuRasterWriteBypass();
+            return;
+        }
+
         title.data.set(base.data.subarray(0, TITLE_FLAME_PIXELS));
 
         let srcOffset: number = 0;
@@ -342,4 +368,5 @@ export default class TitleFlames {
         title.data[dstOffset] = ((((value & 0xff00ff) * alpha + (background & 0xff00ff) * invAlpha) & 0xff00ff00) + (((value & 0xff00) * alpha + (background & 0xff00) * invAlpha) & 0xff0000)) >> 8;
         return dstOffset + 1;
     }
+
 }
