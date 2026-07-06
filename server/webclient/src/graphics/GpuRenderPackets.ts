@@ -1306,10 +1306,14 @@ let sceneNextGpuInstanceId = 0;
 // complete scene within the interval. The native side dedups re-uploads by geom id
 // (upload_geometry is a no-op for cached ids), so this only costs blob bandwidth on
 // keyframe frames, not GPU work.
+// NYM-226: the native renderer now ingests EVERY submitted blob (bounded
+// FIFO + carried one-shot uploads), so skipped frames can no longer lose
+// geometry — the keyframe is only a rare safety net for a wedged consumer
+// thread, not a per-2s correctness crutch.
 let sceneKeyframeCounter = 0;
 const SCENE_GEOMETRY_KEYFRAME_INTERVAL = Math.max(
     1,
-    Number((globalThis as any).process?.env?.AURAI_SCENE_GEOMETRY_KEYFRAME ?? 60) || 60,
+    Number((globalThis as any).process?.env?.AURAI_SCENE_GEOMETRY_KEYFRAME ?? 600) || 600,
 );
 function maybeResetSceneGeometryKeyframe(): void {
     sceneKeyframeCounter++;

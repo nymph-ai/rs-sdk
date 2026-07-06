@@ -240,6 +240,11 @@ function rendererLib(): any {
             aurai_render_frames_published: { args: [], returns: FFIType.u64 },
             aurai_render_pipewire_slots: { args: [], returns: FFIType.u64 },
             aurai_render_last_render_us: { args: [], returns: FFIType.u64 },
+            aurai_render_last_parse_us: { args: [], returns: FFIType.u64 },
+            aurai_render_last_expand_us: { args: [], returns: FFIType.u64 },
+            aurai_render_last_encode_us: { args: [], returns: FFIType.u64 },
+            aurai_render_last_fence_wait_us: { args: [], returns: FFIType.u64 },
+            aurai_render_publish_counter: { args: [FFIType.u32], returns: FFIType.u64 },
             aurai_render_last_packets: { args: [], returns: FFIType.u64 },
             aurai_render_request_capture: { args: [FFIType.cstring], returns: FFIType.u64 },
             aurai_render_capture_done: { args: [], returns: FFIType.u64 },
@@ -1457,6 +1462,7 @@ async function main() {
     let lastReport = Date.now();
     let lastReportFrame = 0;
     let lastPublishedFrames = 0;
+    let lastQueuedFrames = 0;
     let lastPublishedAt = Date.now();
     let didCpuRef = false;
 
@@ -1644,6 +1650,11 @@ async function main() {
             const fps = (df * 1000) / (now - lastReport);
             const published = INIT_RENDERER ? rendererLib().symbols.aurai_render_frames_published() : 0n;
             const publishedFrames = Number(published);
+            // Consumer-facing rate: frames actually QUEUED to PipeWire this
+            // window (gameFps only tracks this loop; the two can diverge).
+            const queued = INIT_RENDERER ? Number(rendererLib().symbols.aurai_render_publish_counter(2)) : 0;
+            const publishFps = ((queued - lastQueuedFrames) * 1000) / (now - lastReport);
+            lastQueuedFrames = queued;
             const rUs = INIT_RENDERER ? rendererLib().symbols.aurai_render_last_render_us() : 0n;
             const rPkts = INIT_RENDERER ? rendererLib().symbols.aurai_render_last_packets() : 0n;
             if (publishedFrames > lastPublishedFrames) {
@@ -1664,7 +1675,11 @@ async function main() {
                 `retainedWorldSets=${retainedWorldSets} avgRetainedWorldSets=${(retainedWorldSetsTotal / frame).toFixed(0)} retainedWorldEvicts=${retainedWorldEvicts} retainedWorldCache=${retainedWorldCacheSize} clears=${retainedWorldClears} ` +
                 `oversizedDrops=${oversizedSnapshotsDropped} ` +
                 `snap=${(snapTotalUs / frame / 1000).toFixed(2)}ms pack=${(packTotalUs / frame / 1000).toFixed(2)}ms ` +
-                `submit=${(submitTotalUs / frame / 1000).toFixed(3)}ms | gpuRenderLast=${(Number(rUs) / 1000).toFixed(2)}ms ` +
+                `submit=${(submitTotalUs / frame / 1000).toFixed(3)}ms | publishFps=${publishFps.toFixed(1)} gpuRenderLast=${(Number(rUs) / 1000).toFixed(2)}ms ` +
+                `gpuParse=${INIT_RENDERER ? (Number(rendererLib().symbols.aurai_render_last_parse_us()) / 1000).toFixed(2) : 0}ms ` +
+                `gpuEncode=${INIT_RENDERER ? (Number(rendererLib().symbols.aurai_render_last_encode_us()) / 1000).toFixed(2) : 0}ms ` +
+                `gpuFenceWait=${INIT_RENDERER ? (Number(rendererLib().symbols.aurai_render_last_fence_wait_us()) / 1000).toFixed(3) : 0}ms ` +
+                `gpuEmptyDequeues=${INIT_RENDERER ? rendererLib().symbols.aurai_render_publish_counter(1) : 0} ` +
                 `gpuPublished=${published} gpuLastPkts=${rPkts}`);
             lastReport = now;
             lastReportFrame = frame;
