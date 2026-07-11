@@ -92,6 +92,12 @@ const INIT_RENDERER = (process.env.AURAI_INIT_RENDERER ?? 'true') !== 'false';
 const INIT_RENDERER_AFTER_INGAME = (process.env.AURAI_INIT_RENDERER_AFTER_INGAME ?? 'false') === 'true';
 const GAME_LOGIC_FPS = Number(process.env.AURAI_GAME_LOGIC_FPS ?? 50);
 const TARGET_REDRAW_FPS = Number(process.env.AURAI_TARGET_REDRAW_FPS ?? process.env.PW_FPS ?? 30);
+// Keep client-side movement and orbit-camera easing at the simulation cadence.
+// Tying redraw to the 30 Hz PipeWire publisher made both advance only on
+// publish boundaries, which defeated the client's interpolation and produced
+// visibly stepped motion. The native publisher independently samples the most
+// recent submitted frame at TARGET_REDRAW_FPS.
+const CLIENT_REDRAW_FPS = Number(process.env.AURAI_CLIENT_REDRAW_FPS ?? GAME_LOGIC_FPS);
 const TARGET_SUBMIT_INTERVAL_MS = Number.isFinite(TARGET_REDRAW_FPS) && TARGET_REDRAW_FPS > 0 ? 1000 / TARGET_REDRAW_FPS : 33.333;
 const MAX_PACKET_BACKLOG_BEFORE_SUBMIT = Number(process.env.AURAI_MAX_PACKET_BACKLOG_BEFORE_SUBMIT ?? 20000);
 const MAX_PACK_INPUT_PACKETS = Number(process.env.AURAI_MAX_PACK_INPUT_PACKETS ?? process.env.AURAI_LIVE_PACKET_LIMIT ?? 100000);
@@ -160,10 +166,10 @@ function configureHeadlessTiming(client: any): void {
     if (Number.isFinite(GAME_LOGIC_FPS) && GAME_LOGIC_FPS > 0 && typeof client.setFramerate === 'function') {
         client.setFramerate(GAME_LOGIC_FPS);
     }
-    if (Number.isFinite(TARGET_REDRAW_FPS) && TARGET_REDRAW_FPS > 0 && typeof client.setTargetedFramerate === 'function') {
-        client.setTargetedFramerate(TARGET_REDRAW_FPS);
+    if (Number.isFinite(CLIENT_REDRAW_FPS) && CLIENT_REDRAW_FPS > 0 && typeof client.setTargetedFramerate === 'function') {
+        client.setTargetedFramerate(CLIENT_REDRAW_FPS);
     }
-    log(`timing logicFps=${GAME_LOGIC_FPS} targetRedrawFps=${TARGET_REDRAW_FPS} fullUiRedraw=${FORCE_FULL_UI_REDRAW} warmupUiFrames=${FORCE_FULL_UI_REDRAW_WARMUP_FRAMES}`);
+    log(`timing logicFps=${GAME_LOGIC_FPS} clientRedrawFps=${CLIENT_REDRAW_FPS} targetPublishFps=${TARGET_REDRAW_FPS} fullUiRedraw=${FORCE_FULL_UI_REDRAW} warmupUiFrames=${FORCE_FULL_UI_REDRAW_WARMUP_FRAMES}`);
 }
 
 function configureCaptureSceneCamera(client: any): void {
