@@ -171,6 +171,7 @@ class FakeElement {
     addEventListener() {}
     removeEventListener() {}
     appendChild(c: any) { this.children.push(c); }
+    prepend(...nodes: any[]) { this.children.unshift(...nodes); }
     removeChild() {}
     setAttribute() {}
     getAttribute() { return null; }
