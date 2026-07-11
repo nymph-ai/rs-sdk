@@ -131,7 +131,7 @@ class World {
     private static readonly TIMEOUT_NO_CONNECTION: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 500; // 5m with no connection (relaxed for bot background tabs)
     private static readonly TIMEOUT_NO_RESPONSE: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 1000; // 10m without any response (relaxed for bot background tabs)
 
-    private seedStarterAxe(player: Player): void {
+    private ensureStarterAxe(player: Player): void {
         const starterAxeUsername = process.env.STARTER_AXE_USERNAME?.trim().toLowerCase();
         if (!starterAxeUsername || player.username.toLowerCase() !== starterAxeUsername) {
             return;
@@ -398,6 +398,13 @@ class World {
             // - movement
             // - close interface if attempting to logout
             this.processPlayers();
+
+            // Death normally removes inventory before the client output phase.
+            // Keep the configured stream account's starter tool available so a
+            // continuous woodcutting session cannot fall into an axe-less loop.
+            for (const player of this.playerLoop.all()) {
+                this.ensureStarterAxe(player);
+            }
 
             // player logout
             this.processLogouts();
@@ -2012,7 +2019,7 @@ class World {
             try {
                 const player = PlayerLoading.load(username, new Packet(save), client);
 
-                this.seedStarterAxe(player);
+                this.ensureStarterAxe(player);
 
                 player.session = client.uuid;
                 player.reconnecting = reconnecting;
