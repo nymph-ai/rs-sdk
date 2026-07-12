@@ -131,6 +131,28 @@ class World {
     private static readonly TIMEOUT_NO_CONNECTION: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 500; // 5m with no connection (relaxed for bot background tabs)
     private static readonly TIMEOUT_NO_RESPONSE: number = Environment.NODE_DEBUG_SOCKET ? 60000 : 1000; // 10m without any response (relaxed for bot background tabs)
 
+    private ensureStarterAxe(player: Player): void {
+        const starterAxeUsername = process.env.STARTER_AXE_USERNAME?.trim().toLowerCase();
+        if (!starterAxeUsername || player.username.toLowerCase() !== starterAxeUsername) {
+            return;
+        }
+
+        const bronzeAxe = ObjType.getId('bronze_axe');
+        if (bronzeAxe === -1) {
+            throw new Error('STARTER_AXE_USERNAME is configured but bronze_axe is not loaded');
+        }
+
+        if (player.invTotal(InvType.INV, bronzeAxe) > 0 || player.invTotal(InvType.WORN, bronzeAxe) > 0) {
+            return;
+        }
+
+        if (player.invAdd(InvType.INV, bronzeAxe, 1) !== 1) {
+            throw new Error(`Unable to seed a bronze axe for ${player.username}: inventory is full`);
+        }
+
+        printInfo(`Seeded starter bronze axe for ${player.username}`);
+    }
+
     // the game/zones map
     readonly gameMap: GameMap = new GameMap(Environment.node.members);
 
@@ -376,6 +398,13 @@ class World {
             // - movement
             // - close interface if attempting to logout
             this.processPlayers();
+
+            // Death normally removes inventory before the client output phase.
+            // Keep the configured stream account's starter tool available so a
+            // continuous woodcutting session cannot fall into an axe-less loop.
+            for (const player of this.playerLoop.all()) {
+                this.ensureStarterAxe(player);
+            }
 
             // player logout
             this.processLogouts();
@@ -1989,6 +2018,8 @@ class World {
 
             try {
                 const player = PlayerLoading.load(username, new Packet(save), client);
+
+                this.ensureStarterAxe(player);
 
                 player.session = client.uuid;
                 player.reconnecting = reconnecting;

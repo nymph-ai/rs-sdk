@@ -358,6 +358,13 @@ async function main(): Promise<void> {
         ];
 
         const chromeEnv = { ...process.env, ...presentation.env };
+        if (process.env.RENDERER_VALIDATION_CHROME_LD_LIBRARY_PATH) {
+            // `nix develop` supplies the native renderer toolchain, but a
+            // downloaded Chrome-for-Testing must use the host graphics stack
+            // that owns the selected Vulkan ICD. Keep that override scoped to
+            // Chrome instead of replacing the validation runner's libraries.
+            chromeEnv.LD_LIBRARY_PATH = process.env.RENDERER_VALIDATION_CHROME_LD_LIBRARY_PATH;
+        }
         if (process.env.RENDERER_VALIDATION_VK_DRIVER_FILES && !chromeEnv.VK_DRIVER_FILES) {
             chromeEnv.VK_DRIVER_FILES = process.env.RENDERER_VALIDATION_VK_DRIVER_FILES;
         }

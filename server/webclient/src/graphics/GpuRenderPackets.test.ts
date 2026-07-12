@@ -4,11 +4,62 @@ import { describe, expect, test } from 'bun:test';
 
 import {
     gpuRenderPackets,
+    recordClear,
+    recordFillRect,
     recordModelGeometryUpload,
     recordModelLabelMapUpload,
     recordSceneInstance,
+    recordSurfaceTarget,
     shouldEmitSceneNativeDeform
 } from './GpuRenderPackets.js';
+
+describe('GpuRenderPackets retained surfaces', () => {
+    test('first dynamic target selection replays the pre-presentation static base', () => {
+        const pixels = new Int32Array(8 * 6);
+        gpuRenderPackets.reset();
+        gpuRenderPackets.setEnabled(true);
+        gpuRenderPackets.markSurfaceRecordable(pixels, 8, 6);
+
+        recordSurfaceTarget(pixels, 8, 6);
+        recordClear();
+        recordFillRect(0, 0, 8, 6, 0x5a3218);
+
+        // Headless frames reset the emitted packet list while the PixMap and
+        // its retained contents survive. The first update used to discard the
+        // base here because no present had saved it yet.
+        gpuRenderPackets.reset();
+        recordSurfaceTarget(pixels, 8, 6);
+        recordFillRect(2, 2, 4, 2, 0x00ff00);
+
+        expect(gpuRenderPackets.snapshot().packets.map(packet => packet.kind)).toEqual([
+            'surface',
+            'clear',
+            'fillRect',
+            'fillRect',
+        ]);
+    });
+
+    test('retains a static UI base larger than the source replay ceiling', () => {
+        const pixels = new Int32Array(4200);
+        gpuRenderPackets.reset();
+        gpuRenderPackets.setEnabled(true);
+        gpuRenderPackets.markSurfaceRecordable(pixels, 4200, 1);
+
+        recordSurfaceTarget(pixels, 4200, 1);
+        recordClear();
+        for (let x = 0; x < 4100; x++) {
+            recordFillRect(x, 0, 1, 1, 0x302010 + x);
+        }
+
+        gpuRenderPackets.reset();
+        recordSurfaceTarget(pixels, 4200, 1);
+        recordFillRect(4, 0, 8, 1, 0x00ff00);
+
+        const kinds = gpuRenderPackets.snapshot().packets.map(packet => packet.kind);
+        expect(kinds.slice(0, 3)).toEqual(['surface', 'clear', 'fillRect']);
+        expect(kinds.filter(kind => kind === 'fillRect')).toHaveLength(4101);
+    });
+});
 
 describe('GpuRenderPackets scene packets', () => {
     test('scene instances carry animFrameId in the packet payload', () => {

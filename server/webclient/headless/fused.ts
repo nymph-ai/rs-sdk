@@ -21,7 +21,7 @@
 //   RS_TIMEOUT_MS     in-game wait timeout (default 90000)
 
 import { dlopen, FFIType, ptr } from 'bun:ffi';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { installDomStubs } from './dom-stubs.js';
@@ -59,6 +59,13 @@ const DRAWSET_CAPTURE_ONE_FRAME = envEnabled(process.env.AURAI_DRAWSET_CAPTURE_O
 const FRAME_LIMIT = DRAWSET_CAPTURE_ONE_FRAME ? 1 : Number(process.env.AURAI_FRAMES ?? 0);
 const STATS_EVERY_MS = Number(process.env.AURAI_STATS_EVERY_MS ?? 2000);
 const PUBLISH_STALL_MS = Number(process.env.AURAI_PUBLISH_STALL_MS ?? 10000);
+const STATUS_FILE = process.env.AURAI_GAME_STATUS_FILE ?? '/tmp/aurai-game-producer-status.json';
+const RELOGIN_MAX_ATTEMPTS = Math.max(1, Number(process.env.AURAI_RELOGIN_MAX_ATTEMPTS ?? 6) || 6);
+const RELOGIN_INITIAL_BACKOFF_MS = Math.max(100, Number(process.env.AURAI_RELOGIN_INITIAL_BACKOFF_MS ?? 1000) || 1000);
+const RELOGIN_MAX_BACKOFF_MS = Math.max(RELOGIN_INITIAL_BACKOFF_MS, Number(process.env.AURAI_RELOGIN_MAX_BACKOFF_MS ?? 15000) || 15000);
+const HEADLESS_PRESENCE_INTERVAL_MS = Math.max(1000, Number(process.env.AURAI_HEADLESS_PRESENCE_INTERVAL_MS ?? 30000) || 30000);
+const WORLD_MISSING_RESTART_MS = Math.max(5000, Number(process.env.AURAI_WORLD_MISSING_RESTART_MS ?? 30000) || 30000);
+const WORLD_MIN_SCENE_INSTANCES = Math.max(1, Number(process.env.AURAI_WORLD_MIN_SCENE_INSTANCES ?? 1) || 1);
 const WAIT_PIPEWIRE_READY = envEnabled(process.env.AURAI_WAIT_PIPEWIRE_READY, true);
 const PIPEWIRE_READY_TIMEOUT_MS = Number(process.env.AURAI_PIPEWIRE_READY_TIMEOUT_MS ?? 15000);
 const MIN_FIRST_FRAME_PACKETS = Math.max(
@@ -92,6 +99,12 @@ const INIT_RENDERER = (process.env.AURAI_INIT_RENDERER ?? 'true') !== 'false';
 const INIT_RENDERER_AFTER_INGAME = (process.env.AURAI_INIT_RENDERER_AFTER_INGAME ?? 'false') === 'true';
 const GAME_LOGIC_FPS = Number(process.env.AURAI_GAME_LOGIC_FPS ?? 50);
 const TARGET_REDRAW_FPS = Number(process.env.AURAI_TARGET_REDRAW_FPS ?? process.env.PW_FPS ?? 30);
+// Keep client-side movement and orbit-camera easing at the simulation cadence.
+// Tying redraw to the 30 Hz PipeWire publisher made both advance only on
+// publish boundaries, which defeated the client's interpolation and produced
+// visibly stepped motion. The native publisher independently samples the most
+// recent submitted frame at TARGET_REDRAW_FPS.
+const CLIENT_REDRAW_FPS = Number(process.env.AURAI_CLIENT_REDRAW_FPS ?? GAME_LOGIC_FPS);
 const TARGET_SUBMIT_INTERVAL_MS = Number.isFinite(TARGET_REDRAW_FPS) && TARGET_REDRAW_FPS > 0 ? 1000 / TARGET_REDRAW_FPS : 33.333;
 const MAX_PACKET_BACKLOG_BEFORE_SUBMIT = Number(process.env.AURAI_MAX_PACKET_BACKLOG_BEFORE_SUBMIT ?? 20000);
 const MAX_PACK_INPUT_PACKETS = Number(process.env.AURAI_MAX_PACK_INPUT_PACKETS ?? process.env.AURAI_LIVE_PACKET_LIMIT ?? 100000);
@@ -147,6 +160,17 @@ function log(...a: unknown[]) {
     console.log('[fused]', ...a);
 }
 
+function writeProducerStatus(status: Record<string, unknown>): void {
+    if (!STATUS_FILE) return;
+    const temporary = `${STATUS_FILE}.${process.pid}.tmp`;
+    try {
+        writeFileSync(temporary, JSON.stringify({ timestampMs: Date.now(), pid: process.pid, ...status }) + '\n');
+        renameSync(temporary, STATUS_FILE);
+    } catch (error) {
+        log('status write failed', (error as Error)?.message ?? error);
+    }
+}
+
 function forceFullUiRedraw(client: any, force = false): void {
     if ((!FORCE_FULL_UI_REDRAW && !force) || !client?.ingame) return;
     client.redrawFrame = true;
@@ -160,10 +184,10 @@ function configureHeadlessTiming(client: any): void {
     if (Number.isFinite(GAME_LOGIC_FPS) && GAME_LOGIC_FPS > 0 && typeof client.setFramerate === 'function') {
         client.setFramerate(GAME_LOGIC_FPS);
     }
-    if (Number.isFinite(TARGET_REDRAW_FPS) && TARGET_REDRAW_FPS > 0 && typeof client.setTargetedFramerate === 'function') {
-        client.setTargetedFramerate(TARGET_REDRAW_FPS);
+    if (Number.isFinite(CLIENT_REDRAW_FPS) && CLIENT_REDRAW_FPS > 0 && typeof client.setTargetedFramerate === 'function') {
+        client.setTargetedFramerate(CLIENT_REDRAW_FPS);
     }
-    log(`timing logicFps=${GAME_LOGIC_FPS} targetRedrawFps=${TARGET_REDRAW_FPS} fullUiRedraw=${FORCE_FULL_UI_REDRAW} warmupUiFrames=${FORCE_FULL_UI_REDRAW_WARMUP_FRAMES}`);
+    log(`timing logicFps=${GAME_LOGIC_FPS} clientRedrawFps=${CLIENT_REDRAW_FPS} targetPublishFps=${TARGET_REDRAW_FPS} fullUiRedraw=${FORCE_FULL_UI_REDRAW} warmupUiFrames=${FORCE_FULL_UI_REDRAW_WARMUP_FRAMES}`);
 }
 
 function configureCaptureSceneCamera(client: any): void {
@@ -1431,7 +1455,10 @@ async function main() {
     }
     const tLogin = Date.now();
     while (!client.ingame) {
-        if (Date.now() - tLogin > TIMEOUT_MS) { log('TIMEOUT waiting ingame'); break; }
+        if (Date.now() - tLogin > TIMEOUT_MS) {
+            log('FATAL timeout waiting ingame; exiting for supervisor retry');
+            process.exit(133);
+        }
         await Bun.sleep(150);
     }
     log('ingame =', client.ingame);
@@ -1465,6 +1492,86 @@ async function main() {
     let lastQueuedFrames = 0;
     let lastPublishedAt = Date.now();
     let didCpuRef = false;
+    let reloginPromise: Promise<void> | null = null;
+    let reloginAttempts = 0;
+    let reloginNextAt = 0;
+    let sessionLostAt = 0;
+    let sessionRecoveries = 0;
+    let sessionWasInGame = Boolean(client.ingame);
+    let lastPresenceAt = 0;
+    let lastSceneInstances = 0;
+    let worldMissingSince = 0;
+
+    const startRelogin = (now: number): void => {
+        reloginAttempts++;
+        const attempt = reloginAttempts;
+        log(`session recovery login attempt ${attempt}/${RELOGIN_MAX_ATTEMPTS} as ${BOT}`);
+        reloginPromise = Promise.resolve(client.autoLogin(BOT, PASS))
+            .catch((error: unknown) => {
+                log(`session recovery login attempt ${attempt} threw`, (error as Error)?.message ?? error);
+            })
+            .finally(() => {
+                reloginPromise = null;
+                if (client.ingame) return;
+                if (attempt >= RELOGIN_MAX_ATTEMPTS) {
+                    log(`session recovery exhausted ${attempt} attempts; exiting for clean supervisor retry`);
+                    process.exit(133);
+                }
+                const backoff = Math.min(RELOGIN_MAX_BACKOFF_MS, RELOGIN_INITIAL_BACKOFF_MS * (2 ** (attempt - 1)));
+                reloginNextAt = Date.now() + backoff;
+                log(`session recovery attempt ${attempt} did not enter world; retry in ${backoff}ms`);
+            });
+        reloginNextAt = now + RELOGIN_INITIAL_BACKOFF_MS;
+    };
+
+    const maintainSession = (now: number): void => {
+        if (client.ingame) {
+            if (!sessionWasInGame) {
+                const downtime = sessionLostAt > 0 ? now - sessionLostAt : 0;
+                sessionRecoveries++;
+                sessionWasInGame = true;
+                sessionLostAt = 0;
+                reloginAttempts = 0;
+                reloginNextAt = 0;
+                resetSentResources();
+                resetRetainedWorldPacketCache();
+                retainedSurfaceSignatures.clear();
+                gpuRenderPackets.reset();
+                configureCaptureSceneCamera(client);
+                forceFullUiRedraw(client, true);
+                log(`session recovered in ${downtime}ms; recovery=${sessionRecoveries}, renderer resources reset`);
+            }
+
+            // A producer is an intentional always-on client. Keep its activity
+            // clock fresh so the normal interactive-client AFK logout cannot
+            // silently replace the world with a title/empty frame.
+            if (now - lastPresenceAt >= HEADLESS_PRESENCE_INTERVAL_MS) {
+                client.idleTimer = performance.now();
+                lastPresenceAt = now;
+            }
+            return;
+        }
+
+        if (sessionWasInGame) {
+            sessionWasInGame = false;
+            sessionLostAt = now;
+            reloginAttempts = 0;
+            reloginNextAt = now;
+            worldMissingSince = 0;
+            log('game session lost; starting bounded automatic relogin');
+            writeProducerStatus({
+                ingame: false,
+                worldPresent: false,
+                sceneInstances: lastSceneInstances,
+                reloginAttempts,
+                sessionRecoveries,
+                state: 'session-lost',
+            });
+        }
+        if (!reloginPromise && now >= reloginNextAt) {
+            startRelogin(now);
+        }
+    };
 
     // Time-based GPU-readback captures (seconds after ingame) for live proof.
     const CAP_T0_S = Number(process.env.AURAI_CAP_T0_S ?? 0);
@@ -1488,6 +1595,7 @@ async function main() {
         const dc = ClientClass?.drawCycle ?? frame;
         const packetBacklog = Array.isArray(gpuRenderPackets.packets) ? gpuRenderPackets.packets.length : 0;
         const nowLoop = Date.now();
+        maintainSession(nowLoop);
         const drawCycleChanged = dc !== lastDrawCycle;
         const packetBacklogReady =
             packetBacklog > 0 &&
@@ -1593,6 +1701,30 @@ async function main() {
             resources,
             commitResources
         } = packSnapshot(snap);
+        lastSceneInstances = nSceneInstances;
+        const worldPresent = Boolean(
+            client.ingame &&
+            client.localPlayer &&
+            client.sceneState === 2 &&
+            nSceneInstances >= WORLD_MIN_SCENE_INSTANCES
+        );
+        if (client.ingame && !worldPresent) {
+            worldMissingSince ||= Date.now();
+            if (Date.now() - worldMissingSince >= WORLD_MISSING_RESTART_MS) {
+                writeProducerStatus({
+                    ingame: true,
+                    worldPresent: false,
+                    sceneInstances: nSceneInstances,
+                    reloginAttempts,
+                    sessionRecoveries,
+                    state: 'world-missing-restart',
+                });
+                log(`world absent for ${Date.now() - worldMissingSince}ms while ingame; exiting for clean supervisor retry`);
+                process.exit(134);
+            }
+        } else if (worldPresent) {
+            worldMissingSince = 0;
+        }
         if (SCENE_GPU_DRAWSET_MANIFEST) {
             const cpath = Buffer.from(SCENE_GPU_DRAWSET_MANIFEST + '\0');
             const frameId = Number(sceneCpuDrawRecords[0]?.frameId ?? 0) | 0;
@@ -1681,6 +1813,18 @@ async function main() {
                 `gpuFenceWait=${INIT_RENDERER ? (Number(rendererLib().symbols.aurai_render_last_fence_wait_us()) / 1000).toFixed(3) : 0}ms ` +
                 `gpuEmptyDequeues=${INIT_RENDERER ? rendererLib().symbols.aurai_render_publish_counter(1) : 0} ` +
                 `gpuPublished=${published} gpuLastPkts=${rPkts}`);
+            writeProducerStatus({
+                ingame: Boolean(client.ingame),
+                worldPresent,
+                sceneInstances: nSceneInstances,
+                sceneGeometryUploads: nSceneGeometryUploads,
+                gameFps: Number(fps.toFixed(1)),
+                publishFps: Number(publishFps.toFixed(1)),
+                gpuPublished: publishedFrames,
+                reloginAttempts,
+                sessionRecoveries,
+                state: worldPresent ? 'world-present' : (client.ingame ? 'world-loading' : 'relogin'),
+            });
             lastReport = now;
             lastReportFrame = frame;
         }
