@@ -4,11 +4,41 @@ import { describe, expect, test } from 'bun:test';
 
 import {
     gpuRenderPackets,
+    recordClear,
+    recordFillRect,
     recordModelGeometryUpload,
     recordModelLabelMapUpload,
     recordSceneInstance,
+    recordSurfaceTarget,
     shouldEmitSceneNativeDeform
 } from './GpuRenderPackets.js';
+
+describe('GpuRenderPackets retained surfaces', () => {
+    test('first dynamic target selection replays the pre-presentation static base', () => {
+        const pixels = new Int32Array(8 * 6);
+        gpuRenderPackets.reset();
+        gpuRenderPackets.setEnabled(true);
+        gpuRenderPackets.markSurfaceRecordable(pixels, 8, 6);
+
+        recordSurfaceTarget(pixels, 8, 6);
+        recordClear();
+        recordFillRect(0, 0, 8, 6, 0x5a3218);
+
+        // Headless frames reset the emitted packet list while the PixMap and
+        // its retained contents survive. The first update used to discard the
+        // base here because no present had saved it yet.
+        gpuRenderPackets.reset();
+        recordSurfaceTarget(pixels, 8, 6);
+        recordFillRect(2, 2, 4, 2, 0x00ff00);
+
+        expect(gpuRenderPackets.snapshot().packets.map(packet => packet.kind)).toEqual([
+            'surface',
+            'clear',
+            'fillRect',
+            'fillRect',
+        ]);
+    });
+});
 
 describe('GpuRenderPackets scene packets', () => {
     test('scene instances carry animFrameId in the packet payload', () => {

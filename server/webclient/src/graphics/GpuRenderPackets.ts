@@ -843,9 +843,9 @@ function noteNativeRetainedSurfaceWarmup(surface: number): void {
     nativeRetainedWarmupSurfaces.add(surface);
 }
 
-function cacheSurfacePacket(packet: GpuRenderPacket): void {
+function cacheSurfacePacket(packet: GpuRenderPacket): GpuRenderPacket[] {
     if (!isRetainedSurfacePacket(packet)) {
-        return;
+        return [];
     }
 
     nativeRetainedReadySurfaces.delete(packet.surface);
@@ -853,21 +853,32 @@ function cacheSurfacePacket(packet: GpuRenderPacket): void {
     if (packet.kind === 'clear') {
         retainedSurfacePackets.set(packet.surface, [packet]);
         retainedSurfaceBasePackets.delete(packet.surface);
-        return;
+        return [];
     }
 
     if (packet.kind === 'surface') {
-        const base = retainedSurfaceBasePackets.get(packet.surface);
+        const previous = retainedSurfacePackets.get(packet.surface);
+        let base = retainedSurfaceBasePackets.get(packet.surface);
+        if (!base && previous && previous.length <= MAX_RETAINED_BASE_PACKETS) {
+            // PixMap.setPixels() selects an existing offscreen surface; it does
+            // not clear it. Preserve the small initialization stream before
+            // the first presentation (for example clear + minimap mapback),
+            // otherwise the first dynamic update replaces that base and the
+            // native compositor exposes its black framebuffer underneath.
+            base = previous.slice();
+            retainedSurfaceBasePackets.set(packet.surface, base);
+        }
         if (base) {
+            const basePackets = base.filter(basePacket => basePacket.kind !== 'surface');
             retainedSurfacePackets.set(packet.surface, [
                 packet,
-                ...base.filter(basePacket => basePacket.kind !== 'surface')
+                ...basePackets
             ]);
-            return;
+            return basePackets;
         }
 
         retainedSurfacePackets.set(packet.surface, [packet]);
-        return;
+        return [];
     }
 
     const retained = retainedSurfacePackets.get(packet.surface);
@@ -876,6 +887,7 @@ function cacheSurfacePacket(packet: GpuRenderPacket): void {
     } else {
         retainedSurfacePackets.set(packet.surface, [packet]);
     }
+    return [];
 }
 
 function appendRetainedSurfaceStream(target: GpuRenderPacket[], surface: number, width: number, height: number, retained: GpuRenderPacket[]): void {
@@ -954,7 +966,16 @@ function pushPacket(packet: GpuRenderPacket, updateRetainedSurface = true): void
         packets.push(packet);
         noteFrameSurfacePacket(packet);
         if (updateRetainedSurface) {
-            cacheSurfacePacket(packet);
+            const basePackets = cacheSurfacePacket(packet);
+            // A native frame is rebuilt over a cleared target. Selecting an
+            // existing PixMap must therefore make the packet stream
+            // self-contained by replaying its retained base before new draws.
+            // These packets are already in the retained stream; do not cache
+            // them a second time.
+            for (const basePacket of basePackets) {
+                packets.push(basePacket);
+                noteFrameSurfacePacket(basePacket);
+            }
         }
     } else {
         gpuRenderPackets.dropped++;
