@@ -479,7 +479,6 @@ const retainedPresents = new Map<string, RetainedPresent>();
 const retainedPresentOrder: string[] = [];
 const framePresentKeys = new Set<string>();
 let retainedFullFramePresentKey: string | null = null;
-const MAX_RETAINED_BASE_PACKETS = 16;
 const MAX_SOURCE_REPLAY_PACKETS = 4096;
 const NATIVE_RETAINED_PRESENT_ONLY = readNativeRetainedPresentOnly();
 const SCENE_DRAWSET_MANIFEST_ENABLED = readSceneDrawsetManifestEnabled();
@@ -859,9 +858,9 @@ function cacheSurfacePacket(packet: GpuRenderPacket): GpuRenderPacket[] {
     if (packet.kind === 'surface') {
         const previous = retainedSurfacePackets.get(packet.surface);
         let base = retainedSurfaceBasePackets.get(packet.surface);
-        if (!base && previous && previous.length <= MAX_RETAINED_BASE_PACKETS) {
+        if (!base && previous) {
             // PixMap.setPixels() selects an existing offscreen surface; it does
-            // not clear it. Preserve the small initialization stream before
+            // not clear it. Preserve the complete initialization stream before
             // the first presentation (for example clear + minimap mapback),
             // otherwise the first dynamic update replaces that base and the
             // native compositor exposes its black framebuffer underneath.
@@ -2743,13 +2742,12 @@ export const gpuRenderPackets: GpuRenderPacketState = {
         const hasFreshSurfacePackets = (frameSurfacePacketCounts.get(surface) ?? 0) > 0;
         const retained = retainedSurfacePackets.get(surface);
         if (retained && retained.length > 0) {
-            const canReplaySmallBase = retained.length <= MAX_RETAINED_BASE_PACKETS;
             const canSourceReplay = !NATIVE_RETAINED_PRESENT_ONLY && retained.length <= MAX_SOURCE_REPLAY_PACKETS;
-            if (!retainedSurfaceBasePackets.has(surface) && canReplaySmallBase) {
+            if (!retainedSurfaceBasePackets.has(surface)) {
                 retainedSurfaceBasePackets.set(surface, retained.slice());
             }
             if (isMinimapChromePresent(x, y, width, height)) {
-                if (canReplaySmallBase && !deferredSurfaceIds.has(surface)) {
+                if (!deferredSurfaceIds.has(surface)) {
                     replayRetainedSurfacePresent(deferredSurfacePackets, surface, width, height, x, y, retained);
                     deferredSurfaceIds.add(surface);
                 }

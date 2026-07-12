@@ -38,6 +38,27 @@ describe('GpuRenderPackets retained surfaces', () => {
             'fillRect',
         ]);
     });
+
+    test('retains a static UI base larger than the source replay ceiling', () => {
+        const pixels = new Int32Array(4200);
+        gpuRenderPackets.reset();
+        gpuRenderPackets.setEnabled(true);
+        gpuRenderPackets.markSurfaceRecordable(pixels, 4200, 1);
+
+        recordSurfaceTarget(pixels, 4200, 1);
+        recordClear();
+        for (let x = 0; x < 4100; x++) {
+            recordFillRect(x, 0, 1, 1, 0x302010 + x);
+        }
+
+        gpuRenderPackets.reset();
+        recordSurfaceTarget(pixels, 4200, 1);
+        recordFillRect(4, 0, 8, 1, 0x00ff00);
+
+        const kinds = gpuRenderPackets.snapshot().packets.map(packet => packet.kind);
+        expect(kinds.slice(0, 3)).toEqual(['surface', 'clear', 'fillRect']);
+        expect(kinds.filter(kind => kind === 'fillRect')).toHaveLength(4101);
+    });
 });
 
 describe('GpuRenderPackets scene packets', () => {
